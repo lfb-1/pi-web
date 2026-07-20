@@ -1,6 +1,11 @@
-import { LitElement, html } from "lit";
+import { LitElement, html, unsafeCSS } from "lit";
 import { customElement, property } from "lit/decorators.js";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
+// KaTeX layout styles must live inside this component's shadow root to reach the rendered
+// `.katex` spans; `?inline` gives us the CSS text (with font url()s rebased by Vite). The
+// matching @font-face rules are also imported globally in main.ts for document-level font
+// loading (font loading is document-scoped and not guaranteed from shadow roots).
+import katexStyles from "katex/dist/katex.min.css?inline";
 import { writeClipboardText } from "../clipboard";
 import { toSafeMarkdownHtml } from "../formatting/markdown";
 import { formattedTextStyles } from "./shared";
@@ -65,5 +70,5 @@ export class FormattedText extends LitElement {
     button.setAttribute("aria-label", label);
   }
 
-  static override styles = formattedTextStyles;
+  static override styles = [formattedTextStyles, unsafeCSS(katexStyles)];
 }

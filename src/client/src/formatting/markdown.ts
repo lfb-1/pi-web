@@ -1,4 +1,12 @@
 import { marked } from "marked";
+import markedKatex from "marked-katex-extension";
+
+// LaTeX math rendering: $...$ inline, $$...$$ display. `throwOnError: false` makes
+// malformed or mid-stream (still-unclosed on the previous snapshot, then closed but
+// invalid) math render as inline error text instead of throwing and breaking the whole
+// message. Standard delimiter mode (nonStandard omitted) requires the closing `$` to be
+// followed by whitespace/punctuation, so prose like "$5 and $10" is left as text.
+marked.use(markedKatex({ throwOnError: false }));
 
 const renderer = new marked.Renderer();
 renderer.html = ({ text }) => escapeHtml(text);
