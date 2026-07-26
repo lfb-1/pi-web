@@ -121,3 +121,25 @@ describe("readWorkspaceFile", () => {
   });
 
 });
+
+describe("readWorkspaceFile language detection", () => {
+  it.each([
+    ["paper.tex", "latex"],
+    ["macros.sty", "latex"],
+    ["kernel.cu", "cpp"],
+    ["solver.hpp", "cpp"],
+    ["train.c", "c"],
+    ["pyproject.toml", "toml"],
+    ["query.sql", "sql"],
+    ["model.jl", "julia"],
+    ["plot.R", "r"],
+    ["setup.cfg", "ini"],
+    ["run.bash", "shell"],
+    ["notebook.ipynb", "json"],
+  ])("maps %s to %s", async (name, language) => {
+    const root = await createTempWorkspace();
+    await writeFile(join(root, name), "x\n");
+
+    expect((await readWorkspaceFile(root, name)).language).toBe(language);
+  });
+});

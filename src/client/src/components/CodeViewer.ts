@@ -11,6 +11,16 @@ import { python } from "@codemirror/lang-python";
 import { rust } from "@codemirror/lang-rust";
 import { go } from "@codemirror/lang-go";
 import { diff } from "@codemirror/legacy-modes/mode/diff";
+import { shell } from "@codemirror/legacy-modes/mode/shell";
+import { yaml } from "@codemirror/legacy-modes/mode/yaml";
+import { stex } from "@codemirror/legacy-modes/mode/stex";
+import { c, cpp } from "@codemirror/legacy-modes/mode/clike";
+import { toml } from "@codemirror/legacy-modes/mode/toml";
+import { standardSQL } from "@codemirror/legacy-modes/mode/sql";
+import { julia } from "@codemirror/legacy-modes/mode/julia";
+import { r } from "@codemirror/legacy-modes/mode/r";
+import { lua } from "@codemirror/legacy-modes/mode/lua";
+import { properties } from "@codemirror/legacy-modes/mode/properties";
 import { LitElement, css, html } from "lit";
 import { customElement, property, query } from "lit/decorators.js";
 
@@ -124,6 +134,17 @@ function languageExtensions(language: string | undefined): Extension[] {
     case "rust": return [rust()];
     case "go": return [go()];
     case "diff": return [StreamLanguage.define(diff)];
+    case "shell": return [StreamLanguage.define(shell)];
+    case "yaml": return [StreamLanguage.define(yaml)];
+    case "latex": return [StreamLanguage.define(stex)];
+    case "c": return [StreamLanguage.define(c)];
+    case "cpp": return [StreamLanguage.define(cpp)];
+    case "toml": return [StreamLanguage.define(toml)];
+    case "sql": return [StreamLanguage.define(standardSQL)];
+    case "julia": return [StreamLanguage.define(julia)];
+    case "r": return [StreamLanguage.define(r)];
+    case "lua": return [StreamLanguage.define(lua)];
+    case "ini": return [StreamLanguage.define(properties)];
     default: return [];
   }
 }
