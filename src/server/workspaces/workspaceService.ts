@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { resolve } from "node:path";
 import type { Project } from "../types.js";
 import type { Workspace } from "../types.js";
 import { discoverGitWorktrees, isGitRepository } from "./gitWorktreeDiscovery.js";
@@ -13,7 +14,9 @@ export class WorkspaceService {
     }
 
     const worktrees = await discoverGitWorktrees(project.path);
-    if (worktrees.length === 0) return [this.single(project, true)];
+    const projectPath = resolve(project.path);
+    const isWorktreeRoot = worktrees.some((worktree) => resolve(worktree.path) === projectPath);
+    if (!isWorktreeRoot) return [this.single(project, true)];
 
     return worktrees.map((worktree) => {
       const leafName = worktree.path.split("/").filter((part) => part !== "").at(-1);
