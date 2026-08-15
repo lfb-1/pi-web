@@ -1,9 +1,14 @@
 # PI WEB
 
-[![CI](https://github.com/jmfederico/pi-web/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/jmfederico/pi-web/actions/workflows/ci.yml)
+[![CI](https://github.com/lfb-1/pi-web/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/lfb-1/pi-web/actions/workflows/ci.yml)
 [![npm version](https://img.shields.io/npm/v/@jmfederico/pi-web)](https://www.npmjs.com/package/@jmfederico/pi-web)
 [![Node.js](https://img.shields.io/node/v/@jmfederico/pi-web)](package.json)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+> [!NOTE]
+> This is the research-oriented `lfb-1/pi-web` fork. The first foundation release adds
+> broader research-file highlighting and KaTeX rendering in chat while retaining upstream
+> compatibility. See [FORK.md](FORK.md) for scope, provenance, and maintenance policy.
 
 **PI WEB is a web UI for [Pi Coding Agent](https://github.com/earendil-works/pi/tree/main/packages/coding-agent) that keeps agent sessions running in real workspaces on your machine or server.**
 
