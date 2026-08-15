@@ -1,4 +1,4 @@
-import { LitElement, html, unsafeCSS } from "lit";
+import { LitElement, css, html, unsafeCSS } from "lit";
 import { customElement, property } from "lit/decorators.js";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
 // KaTeX layout styles must live inside this component's shadow root to reach the rendered
@@ -70,5 +70,8 @@ export class FormattedText extends LitElement {
     button.setAttribute("aria-label", label);
   }
 
-  static override styles = [formattedTextStyles, unsafeCSS(katexStyles)];
+  static override styles = [formattedTextStyles, unsafeCSS(katexStyles), css`
+    /* Preserve KaTeX layout while keeping long display formulas inside the chat column. */
+    .katex-display { max-width: 100%; overflow-x: auto; overflow-y: hidden; padding-block: 2px; }
+  `];
 }

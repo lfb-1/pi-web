@@ -124,18 +124,33 @@ describe("readWorkspaceFile", () => {
 
 describe("readWorkspaceFile language detection", () => {
   it.each([
+    ["component.mts", "typescript"],
+    ["component.cts", "typescript"],
+    ["module.mjs", "javascript"],
+    ["module.cjs", "javascript"],
+    ["settings.jsonc", "json"],
+    ["notebook.ipynb", "json"],
+    ["notes.markdown", "markdown"],
+    ["run.bash", "shell"],
+    ["run.zsh", "shell"],
     ["paper.tex", "latex"],
     ["macros.sty", "latex"],
-    ["kernel.cu", "cpp"],
-    ["solver.hpp", "cpp"],
+    ["document.cls", "latex"],
     ["train.c", "c"],
+    ["library.h", "c"],
+    ["solver.cpp", "cpp"],
+    ["solver.cc", "cpp"],
+    ["solver.cxx", "cpp"],
+    ["solver.hpp", "cpp"],
+    ["solver.hh", "cpp"],
+    ["kernel.cu", "cpp"],
     ["pyproject.toml", "toml"],
     ["query.sql", "sql"],
     ["model.jl", "julia"],
     ["plot.R", "r"],
+    ["plugin.lua", "lua"],
+    ["settings.ini", "ini"],
     ["setup.cfg", "ini"],
-    ["run.bash", "shell"],
-    ["notebook.ipynb", "json"],
   ])("maps %s to %s", async (name, language) => {
     const root = await createTempWorkspace();
     await writeFile(join(root, name), "x\n");

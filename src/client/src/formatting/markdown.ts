@@ -1,14 +1,16 @@
-import { marked } from "marked";
+import { Marked, Renderer } from "marked";
 import markedKatex from "marked-katex-extension";
 
-// LaTeX math rendering: $...$ inline, $$...$$ display. `throwOnError: false` makes
-// malformed or mid-stream (still-unclosed on the previous snapshot, then closed but
-// invalid) math render as inline error text instead of throwing and breaking the whole
-// message. Standard delimiter mode (nonStandard omitted) requires the closing `$` to be
-// followed by whitespace/punctuation, so prose like "$5 and $10" is left as text.
-marked.use(markedKatex({ throwOnError: false }));
+// Keep the chat parser isolated from other Markdown surfaces. Registering the KaTeX
+// extension on Marked's global singleton would also alter workspace Markdown previews,
+// whose stricter sanitizer intentionally supports a different element allowlist.
+const chatMarkdown = new Marked(markedKatex({
+  // LaTeX math rendering: $...$ inline, $$...$$ display. `throwOnError: false`
+  // keeps malformed or partially streamed math from breaking the whole message.
+  throwOnError: false,
+}));
 
-const renderer = new marked.Renderer();
+const renderer = new Renderer();
 renderer.html = ({ text }) => escapeHtml(text);
 
 const MAX_MARKDOWN_CACHE_ENTRIES = 300;
@@ -17,7 +19,7 @@ const markdownHtmlCache = new Map<string, string>();
 export function toSafeMarkdownHtml(text: string): string {
   const cached = markdownHtmlCache.get(text);
   if (cached !== undefined) return cached;
-  const html = marked.parse(text, { async: false, breaks: true, gfm: true, renderer });
+  const html = chatMarkdown.parse(text, { async: false, breaks: true, gfm: true, renderer });
   const safeHtml = sanitizeHtml(html);
   markdownHtmlCache.set(text, safeHtml);
   if (markdownHtmlCache.size > MAX_MARKDOWN_CACHE_ENTRIES) {
