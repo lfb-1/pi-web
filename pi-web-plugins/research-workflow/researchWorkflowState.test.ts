@@ -20,6 +20,16 @@ function validState(): ResearchWorkflowState {
         objectiveStatus: "proposed",
         phase: "research",
         definitionOfDone: "The registered accuracy gate has a terminal result and interpretation.",
+        brief: {
+          question: "Does the current method improve CIFAR-10 accuracy?",
+          currentAnswer: "No improvement is established yet.",
+          confidence: "low",
+          confidenceReason: "The registered accuracy gate is still pending.",
+          nextActionOwner: "runtime",
+          nextAction: "Wait for the registered run to finish.",
+          evidenceRefs: ["accuracy.gate"],
+          source,
+        },
         acceptanceCriteria: [
           {
             id: "accuracy.gate",
@@ -51,6 +61,40 @@ describe("research workflow state", () => {
     if (!parsed.ok) return;
     expect(activeWorkItem(parsed.state)?.id).toBe("parafm.current");
     expect(parsed.state.workItems[0]?.acceptanceCriteria[0]?.result).toBe("pending");
+  });
+
+  it("keeps legacy states without a semantic brief compatible", () => {
+    const state = validState();
+    if (state.workItems[0] !== undefined) delete state.workItems[0].brief;
+
+    const parsed = parseResearchWorkflowStateText(JSON.stringify(state));
+
+    expect(parsed).toMatchObject({ ok: true });
+  });
+
+  it("rejects an invalid or overlong semantic brief", () => {
+    const invalidConfidence = validState();
+    const invalidBrief = invalidConfidence.workItems[0]?.brief;
+    if (invalidBrief !== undefined) Reflect.set(invalidBrief, "confidence", "certain");
+    expect(parseResearchWorkflowStateText(JSON.stringify(invalidConfidence))).toMatchObject({ ok: false });
+
+    const overlongQuestion = validState();
+    const overlongBrief = overlongQuestion.workItems[0]?.brief;
+    if (overlongBrief !== undefined) overlongBrief.question = "x".repeat(241);
+    const parsed = parseResearchWorkflowStateText(JSON.stringify(overlongQuestion));
+    expect(parsed).toMatchObject({ ok: false });
+    if (!parsed.ok) expect(parsed.error).toContain("at most 240 characters");
+  });
+
+  it("rejects semantic-brief sources that do not resolve to detailed records", () => {
+    const state = validState();
+    const brief = state.workItems[0]?.brief;
+    if (brief !== undefined) brief.evidenceRefs = ["/unlabeled/raw/path"];
+
+    const parsed = parseResearchWorkflowStateText(JSON.stringify(state));
+
+    expect(parsed).toMatchObject({ ok: false });
+    if (!parsed.ok) expect(parsed.error).toContain("references missing record /unlabeled/raw/path");
   });
 
   it("rejects an active work item reference that does not exist", () => {

@@ -13,11 +13,13 @@ import { Type, type Static } from "typebox";
 import {
   activeWorkItem,
   artifactKinds,
+  briefConfidences,
   criterionResults,
   criterionStatuses,
   decisionKinds,
   decisionStatuses,
   findingStatuses,
+  nextActionOwners,
   objectiveStatuses,
   parseResearchWorkflowStateText,
   RESEARCH_WORKFLOW_STATE_PATH,
@@ -30,6 +32,7 @@ import {
   type FindingRecord,
   type RecordSource,
   type ReferenceRecord,
+  type ResearchBrief,
   type ResearchWorkflowState,
   type ResearchWorkItem,
   type RunRecord,
@@ -53,6 +56,18 @@ const recordTypes = ["work-item", "acceptance", "decision", "run", "artifact", "
 
 const sourceDescription = "Stable lowercase id matching ^[a-z][a-z0-9.-]*$. Preserve it across updates.";
 
+const BriefPatchSchema = Type.Object({
+  question: Type.String({ maxLength: 240, description: "One plain-language research question." }),
+  currentAnswer: Type.String({ maxLength: 900, description: "At most three short sentences; lead with the current answer and preserve uncertainty." }),
+  confidence: StringEnum(briefConfidences),
+  confidenceReason: Type.String({ maxLength: 600, description: "Explain both the strongest support and the main limitation." }),
+  blockedBecause: Type.Optional(Type.String({ maxLength: 500, description: "Only the direct reason work cannot advance." })),
+  nextActionOwner: StringEnum(nextActionOwners),
+  nextAction: Type.String({ maxLength: 500, description: "One concrete next action, written for the named owner." }),
+  recentChange: Type.Optional(Type.String({ maxLength: 500, description: "One material change since the previous brief; omit when nothing changed." })),
+  evidenceRefs: Type.Array(Type.String()),
+}, { additionalProperties: false });
+
 const WorkItemPatchSchema = Type.Object({
   id: Type.String({ description: sourceDescription }),
   title: Type.Optional(Type.String()),
@@ -61,6 +76,7 @@ const WorkItemPatchSchema = Type.Object({
   rationale: Type.Optional(Type.String()),
   phase: Type.Optional(StringEnum(workflowPhases)),
   definitionOfDone: Type.Optional(Type.String()),
+  brief: Type.Optional(BriefPatchSchema),
 }, { additionalProperties: false });
 
 const CriterionPatchSchema = Type.Object({
@@ -142,12 +158,16 @@ export default function researchWorkflowExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "research_workflow",
     label: "Research Workflow",
-    description: `Read or update ${RESEARCH_WORKFLOW_STATE_PATH}. Manages research objectives, acceptance criteria, decisions, runs, artifacts, findings, and runtime links with stable ids and provenance. Authority-bearing transitions require a real user confirmation.`,
-    promptSnippet: "Read and update the structured research objective, decisions, runs, evidence, and findings",
+    description: `Read or update ${RESEARCH_WORKFLOW_STATE_PATH}. Manages research objectives, a plain-language semantic brief, acceptance criteria, decisions, runs, artifacts, findings, and runtime links with stable ids and provenance. Authority-bearing transitions require a real user confirmation.`,
+    promptSnippet: "Maintain the structured research workflow and its evidence-backed plain-language brief",
     promptGuidelines: [
-      "Use research_workflow when the current research objective, definition of done, acceptance criteria, decision state, experiment run, artifact, or finding changes.",
+      "Use research_workflow when the current research objective, semantic brief, definition of done, acceptance criteria, decision state, experiment run, artifact, or finding changes.",
       "Call research_workflow with action=get before updating state that may have changed; update one entity at a time and preserve stable ids.",
+      "Rewrite source material into the workItem.brief for human understanding: use plain language, do not copy long source passages, and explain unavoidable jargon. Brief evidenceRefs must use existing artifact, criterion, decision, or run ids; create a labeled artifact record before citing an external path or URL.",
+      "A brief question is one sentence; currentAnswer is at most three short sentences and leads with the answer; confidenceReason names both support and limitations; blockedBecause states only the direct blocker; nextAction gives one concrete action and its owner; recentChange records one material change or is omitted.",
+      "Keep provisional evidence explicitly qualified. The semantic brief is a Pi interpretation and must not change objective, criterion, decision, finding, or completion authority.",
       "Use proposed or provisional status for Pi-generated content. research_workflow asks the user before confirming an objective, approving a criterion, resolving a decision, accepting a finding, removing a record, or marking a work item completed.",
+      "After changing a criterion, decision, run, artifact, or finding, refresh the workItem.brief before ending the task so the executive view stays consistent with the detailed records.",
       "After an authorized experiment reaches a terminal state, use research_workflow to record its status, acceptance results, artifacts, and provisional finding; scheduler submission alone is incomplete.",
     ],
     parameters: ResearchWorkflowParameters,
@@ -155,19 +175,17 @@ export default function researchWorkflowExtension(pi: ExtensionAPI): void {
       if (params.action === "get") return readToolResult(ctx);
       if (!ctx.isProjectTrusted()) throw new Error("Research Workflow updates require a trusted project");
 
-      const current = await readWorkflowState(ctx.cwd);
-      const authorityRequest = authorityRequestFor(params, current.state);
-      let authoritySource: RecordSource | undefined;
-      if (authorityRequest !== undefined) {
-        if (!ctx.hasUI) throw new Error(`User confirmation is required: ${authorityRequest.message}`);
-        const confirmed = await ctx.ui.confirm("Research Workflow authority", authorityRequest.message);
-        if (!confirmed) throw new Error("Research Workflow update was not authorized by the user");
-        authoritySource = sourceFor(ctx, "user");
-      }
-
       const statePath = resolve(ctx.cwd, RESEARCH_WORKFLOW_STATE_PATH);
       return withFileMutationQueue(statePath, async () => {
         const latest = await readWorkflowState(ctx.cwd);
+        const authorityRequest = authorityRequestFor(params, latest.state);
+        let authoritySource: RecordSource | undefined;
+        if (authorityRequest !== undefined) {
+          if (!ctx.hasUI) throw new Error(`User confirmation is required: ${authorityRequest.message}`);
+          const confirmed = await ctx.ui.confirm("Research Workflow authority", authorityRequest.message);
+          if (!confirmed) throw new Error("Research Workflow update was not authorized by the user");
+          authoritySource = sourceFor(ctx, "user");
+        }
         const next = mutateState(latest.state, params, sourceFor(ctx, "pi"), authoritySource);
         next.updatedAt = new Date().toISOString();
         const validated = validateState(next);
@@ -197,15 +215,23 @@ export default function researchWorkflowExtension(pi: ExtensionAPI): void {
       if (item === undefined) return;
       const openDecisions = item.decisions.filter((decision) => decision.status === "open");
       const activeRuns = item.runs.filter((run) => ["queued", "running", "waiting"].includes(run.status));
+      const briefLines = item.brief === undefined
+        ? [`- Objective (${item.objectiveStatus}): ${item.objective}`, `- Definition of done: ${item.definitionOfDone}`, "- Semantic brief: missing; create one when this turn reviews the work item."]
+        : [
+            `- Research question: ${item.brief.question}`,
+            `- Current answer (${item.brief.confidence} confidence): ${item.brief.currentAnswer}`,
+            `- Confidence reason: ${item.brief.confidenceReason}`,
+            ...(item.brief.blockedBecause === undefined ? [] : [`- Blocked because: ${item.brief.blockedBecause}`]),
+            `- Next action (${item.brief.nextActionOwner}): ${item.brief.nextAction}`,
+          ];
       const summary = [
         "Research Workflow active state:",
         `- Work item: ${item.id} — ${item.title}`,
-        `- Objective (${item.objectiveStatus}): ${item.objective}`,
         `- Phase: ${item.phase}`,
-        `- Definition of done: ${item.definitionOfDone}`,
+        ...briefLines,
         `- Open decisions: ${openDecisions.length === 0 ? "none" : openDecisions.map((decision) => `${decision.id}: ${decision.question}`).join("; ")}`,
         `- Active runs: ${activeRuns.length === 0 ? "none" : activeRuns.map((run) => `${run.id}: ${run.status}`).join("; ")}`,
-        `Use research_workflow to keep ${RESEARCH_WORKFLOW_STATE_PATH} synchronized when this turn changes these records.`,
+        `Use research_workflow to keep ${RESEARCH_WORKFLOW_STATE_PATH} synchronized. If this turn materially changes detailed records or their interpretation, rewrite the semantic brief before ending.`,
       ].join("\n");
       return { systemPrompt: `${event.systemPrompt}\n\n${summary}` };
     } catch {
@@ -249,23 +275,67 @@ export function authorityRequestFor(params: ResearchWorkflowParameters, state: R
     const transitions: string[] = [];
     if (params.workItem.objectiveStatus === "confirmed" && existing?.objectiveStatus !== "confirmed") transitions.push("confirm the research objective");
     if (params.workItem.phase === "completed" && existing?.phase !== "completed") transitions.push("mark the work item completed");
-    return transitions.length === 0 ? undefined : { message: `${transitions.join(" and ")} for ${params.workItem.id}?` };
+    if (existing !== undefined && changesAuthorizedWorkItemScope(params.workItem, existing)) {
+      if (existing.phase === "completed") transitions.push("change the completed work item scope");
+      else if (existing.objectiveStatus === "confirmed") transitions.push("change the confirmed research objective");
+    }
+    if (existing?.phase === "completed" && params.workItem.phase !== undefined && params.workItem.phase !== "completed") transitions.push("reopen the completed work item");
+    return transitions.length === 0 ? undefined : { message: `${uniqueStrings(transitions).join(" and ")} for ${params.workItem.id}?` };
   }
 
   const item = params.workItemId === undefined ? undefined : state.workItems.find((candidate) => candidate.id === params.workItemId);
-  if (params.action === "upsert_acceptance" && params.criterion?.status === "approved") {
+  if (params.action === "upsert_acceptance" && params.criterion !== undefined) {
     const existing = item?.acceptanceCriteria.find((criterion) => criterion.id === params.criterion?.id);
-    if (existing?.status !== "approved") return { message: `Approve acceptance criterion ${params.criterion.id}: ${params.criterion.predicate ?? existing?.predicate ?? "(predicate missing)"}?` };
+    if (params.criterion.status === "approved" && existing?.status !== "approved") return { message: `Approve acceptance criterion ${params.criterion.id}: ${params.criterion.predicate ?? existing?.predicate ?? "(predicate missing)"}?` };
+    if (existing?.status === "approved" && changesApprovedCriterion(params.criterion, existing)) return { message: `Change approved acceptance criterion ${params.criterion.id}?` };
   }
-  if (params.action === "upsert_decision" && params.decision?.status !== undefined && params.decision.status !== "open") {
+  if (params.action === "upsert_decision" && params.decision !== undefined) {
     const existing = item?.decisions.find((decision) => decision.id === params.decision?.id);
-    if (existing?.status !== params.decision.status) return { message: `${params.decision.status === "resolved" ? "Resolve" : "Void"} decision ${params.decision.id}${params.decision.resolution === undefined ? "" : ` as: ${params.decision.resolution}`}?` };
+    if (params.decision.status !== undefined && params.decision.status !== "open" && existing?.status !== params.decision.status) return { message: `${params.decision.status === "resolved" ? "Resolve" : "Void"} decision ${params.decision.id}${params.decision.resolution === undefined ? "" : ` as: ${params.decision.resolution}`}?` };
+    if (existing !== undefined && existing.status !== "open" && changesAuthorizedDecision(params.decision, existing)) return { message: `Change ${existing.status} decision ${params.decision.id}?` };
   }
-  if (params.action === "upsert_finding" && params.finding?.status !== undefined && params.finding.status !== "provisional") {
+  if (params.action === "upsert_finding" && params.finding !== undefined) {
     const existing = item?.findings.find((finding) => finding.id === params.finding?.id);
-    if (existing?.status !== params.finding.status) return { message: `${params.finding.status === "accepted" ? "Accept" : "Reject"} finding ${params.finding.id}: ${params.finding.summary ?? existing?.summary ?? "(summary missing)"}?` };
+    if (params.finding.status !== undefined && params.finding.status !== "provisional" && existing?.status !== params.finding.status) return { message: `${params.finding.status === "accepted" ? "Accept" : "Reject"} finding ${params.finding.id}: ${params.finding.summary ?? existing?.summary ?? "(summary missing)"}?` };
+    if (existing !== undefined && existing.status !== "provisional" && changesAuthorizedFinding(params.finding, existing)) return { message: `Change ${existing.status} finding ${params.finding.id}?` };
   }
   return undefined;
+}
+
+function changesAuthorizedWorkItemScope(patch: NonNullable<ResearchWorkflowParameters["workItem"]>, existing: ResearchWorkItem): boolean {
+  return (patch.title !== undefined && patch.title !== existing.title)
+    || (patch.objective !== undefined && patch.objective !== existing.objective)
+    || (patch.rationale !== undefined && patch.rationale !== existing.rationale)
+    || (patch.definitionOfDone !== undefined && patch.definitionOfDone !== existing.definitionOfDone)
+    || (patch.objectiveStatus !== undefined && patch.objectiveStatus !== "confirmed");
+}
+
+function changesApprovedCriterion(patch: NonNullable<ResearchWorkflowParameters["criterion"]>, existing: AcceptanceCriterion): boolean {
+  return (patch.title !== undefined && patch.title !== existing.title)
+    || (patch.predicate !== undefined && patch.predicate !== existing.predicate)
+    || (patch.status !== undefined && patch.status !== "approved");
+}
+
+function changesAuthorizedDecision(patch: NonNullable<ResearchWorkflowParameters["decision"]>, existing: DecisionRecord): boolean {
+  return (patch.kind !== undefined && patch.kind !== existing.kind)
+    || (patch.question !== undefined && patch.question !== existing.question)
+    || (patch.impact !== undefined && patch.impact !== existing.impact)
+    || (patch.status !== undefined && patch.status !== existing.status)
+    || (patch.resolution !== undefined && patch.resolution !== existing.resolution);
+}
+
+function changesAuthorizedFinding(patch: NonNullable<ResearchWorkflowParameters["finding"]>, existing: FindingRecord): boolean {
+  return (patch.summary !== undefined && patch.summary !== existing.summary)
+    || (patch.status !== undefined && patch.status !== existing.status)
+    || (patch.evidenceRefs !== undefined && !stringArraysEqual(patch.evidenceRefs, existing.evidenceRefs));
+}
+
+function stringArraysEqual(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values)];
 }
 
 export function mutateState(
@@ -338,15 +408,19 @@ function upsertWorkItem(
   const index = state.workItems.findIndex((item) => item.id === patch.id);
   const existing = index === -1 ? undefined : state.workItems[index];
   const rationale = patch.rationale ?? existing?.rationale;
-  const authority = authoritySource ?? existing?.authoritySource;
+  const brief = patch.brief === undefined ? existing?.brief : semanticBriefFromPatch(patch.brief, source);
+  const objectiveStatus = patch.objectiveStatus ?? existing?.objectiveStatus ?? "proposed";
+  const phase = patch.phase ?? existing?.phase ?? "research";
+  const authority = objectiveStatus === "confirmed" || phase === "completed" ? authoritySource ?? existing?.authoritySource : undefined;
   const record: ResearchWorkItem = {
     id: patch.id,
     title: required(patch.title ?? existing?.title, "workItem.title"),
     objective: required(patch.objective ?? existing?.objective, "workItem.objective"),
-    objectiveStatus: patch.objectiveStatus ?? existing?.objectiveStatus ?? "proposed",
+    objectiveStatus,
     ...(rationale === undefined ? {} : { rationale }),
-    phase: patch.phase ?? existing?.phase ?? "research",
+    phase,
     definitionOfDone: required(patch.definitionOfDone ?? existing?.definitionOfDone, "workItem.definitionOfDone"),
+    ...(brief === undefined ? {} : { brief }),
     acceptanceCriteria: existing?.acceptanceCriteria ?? [],
     decisions: existing?.decisions ?? [],
     runs: existing?.runs ?? [],
@@ -365,6 +439,24 @@ function upsertWorkItem(
   }
 }
 
+function semanticBriefFromPatch(
+  patch: NonNullable<NonNullable<ResearchWorkflowParameters["workItem"]>["brief"]>,
+  source: RecordSource,
+): ResearchBrief {
+  return {
+    question: patch.question,
+    currentAnswer: patch.currentAnswer,
+    confidence: patch.confidence,
+    confidenceReason: patch.confidenceReason,
+    ...(patch.blockedBecause === undefined ? {} : { blockedBecause: patch.blockedBecause }),
+    nextActionOwner: patch.nextActionOwner,
+    nextAction: patch.nextAction,
+    ...(patch.recentChange === undefined ? {} : { recentChange: patch.recentChange }),
+    evidenceRefs: patch.evidenceRefs,
+    source,
+  };
+}
+
 function upsertCriterion(
   item: ResearchWorkItem,
   patch: NonNullable<ResearchWorkflowParameters["criterion"]>,
@@ -374,12 +466,13 @@ function upsertCriterion(
   const index = item.acceptanceCriteria.findIndex((record) => record.id === patch.id);
   const existing = index === -1 ? undefined : item.acceptanceCriteria[index];
   const note = patch.note ?? existing?.note;
-  const authority = authoritySource ?? existing?.authoritySource;
+  const status = patch.status ?? existing?.status ?? "proposed";
+  const authority = status === "approved" ? authoritySource ?? existing?.authoritySource : undefined;
   const record: AcceptanceCriterion = {
     id: patch.id,
     title: required(patch.title ?? existing?.title, "criterion.title"),
     predicate: required(patch.predicate ?? existing?.predicate, "criterion.predicate"),
-    status: patch.status ?? existing?.status ?? "proposed",
+    status,
     result: patch.result ?? existing?.result ?? "pending",
     ...(note === undefined ? {} : { note }),
     evidenceRefs: patch.evidenceRefs ?? existing?.evidenceRefs ?? [],
@@ -399,13 +492,14 @@ function upsertDecision(
   const index = item.decisions.findIndex((record) => record.id === patch.id);
   const existing = index === -1 ? undefined : item.decisions[index];
   const resolution = patch.resolution ?? (patch.status === "open" ? undefined : existing?.resolution);
-  const authority = authoritySource ?? existing?.authoritySource;
+  const status = patch.status ?? existing?.status ?? "open";
+  const authority = status === "open" ? undefined : authoritySource ?? existing?.authoritySource;
   const record: DecisionRecord = {
     id: patch.id,
     kind: patch.kind ?? existing?.kind ?? "other",
     question: required(patch.question ?? existing?.question, "decision.question"),
     impact: required(patch.impact ?? existing?.impact, "decision.impact"),
-    status: patch.status ?? existing?.status ?? "open",
+    status,
     ...(resolution === undefined ? {} : { resolution }),
     source: existing?.source ?? source,
     ...(authority === undefined ? {} : { authoritySource: authority }),
@@ -473,11 +567,12 @@ function upsertFinding(
 ): void {
   const index = item.findings.findIndex((record) => record.id === patch.id);
   const existing = index === -1 ? undefined : item.findings[index];
-  const authority = authoritySource ?? existing?.authoritySource;
+  const status = patch.status ?? existing?.status ?? "provisional";
+  const authority = status === "provisional" ? undefined : authoritySource ?? existing?.authoritySource;
   const record: FindingRecord = {
     id: patch.id,
     summary: required(patch.summary ?? existing?.summary, "finding.summary"),
-    status: patch.status ?? existing?.status ?? "provisional",
+    status,
     evidenceRefs: patch.evidenceRefs ?? existing?.evidenceRefs ?? [],
     source: existing?.source ?? source,
     ...(authority === undefined ? {} : { authoritySource: authority }),

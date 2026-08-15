@@ -13,6 +13,7 @@ import {
   type DecisionRecord,
   type FindingRecord,
   type RecordSource,
+  type ResearchBrief,
   type ResearchWorkItem,
   type RunRecord,
 } from "./researchWorkflowState.js";
@@ -94,6 +95,8 @@ class PiWebResearchWorkflowPanel extends HTMLElement {
     }
 
     const state = getOrLoadState(context);
+    const selectedItem = this.selectedItem(state);
+    const askPiLabel = state.kind === "missing" ? "Ask Pi to initialize" : selectedItem?.brief === undefined ? "Ask Pi to summarize" : "Ask Pi to refresh summary";
     this.root.innerHTML = `
       ${styles()}
       <section class="toolbar">
@@ -102,18 +105,18 @@ class PiWebResearchWorkflowPanel extends HTMLElement {
           <span class="path">${escapeHtml(RESEARCH_WORKFLOW_STATE_PATH)}</span>
         </div>
         <div class="toolbar-actions">
-          <button class="secondary" data-ask-pi>${state.kind === "missing" ? "Ask Pi to initialize" : "Ask Pi to update"}</button>
+          <button class="secondary" data-ask-pi>${askPiLabel}</button>
           <button class="secondary" data-refresh ${state.kind === "loading" ? "disabled" : ""}>Refresh</button>
         </div>
       </section>
-      <section class="viewer">${this.renderState(state)}</section>
+      <section class="viewer" aria-live="polite" aria-busy="${String(state.kind === "loading")}">${this.renderState(state)}</section>
     `;
 
     this.root.querySelector("button[data-refresh]")?.addEventListener("click", () => {
       void refreshResearchWorkflowPanel(context);
     });
     this.root.querySelector("button[data-ask-pi]")?.addEventListener("click", () => {
-      context.prompt.insertText(state.kind === "missing" ? initializePrompt() : updatePrompt(this.selectedItem(state)));
+      context.prompt.insertText(state.kind === "missing" ? researchWorkflowInitializePrompt() : researchWorkflowUpdatePrompt(this.selectedItem(state)));
     });
     this.root.querySelector("select[data-work-item]")?.addEventListener("change", (event) => {
       const target = event.currentTarget;
@@ -124,13 +127,13 @@ class PiWebResearchWorkflowPanel extends HTMLElement {
   }
 
   private renderState(state: PanelState): string {
-    if (state.kind === "loading") return `<p class="muted">Loading ${escapeHtml(RESEARCH_WORKFLOW_STATE_PATH)}…</p>`;
+    if (state.kind === "loading") return `<p class="muted" role="status">Loading ${escapeHtml(RESEARCH_WORKFLOW_STATE_PATH)}…</p>`;
     if (state.kind === "missing") {
       return `<div class="empty-state"><strong>${escapeHtml(state.message)}</strong><p>${escapeHtml(state.hint)}</p><p class="muted">The panel renders validated state; it does not infer approved content from chat.</p></div>`;
     }
     if (state.kind === "unavailable") {
       const detail = state.detail === undefined ? "" : `<pre>${escapeHtml(state.detail)}</pre>`;
-      return `<div class="status error"><strong>${escapeHtml(state.message)}</strong><p>${escapeHtml(state.hint)}</p>${detail}</div>`;
+      return `<div class="status error" role="alert"><strong>${escapeHtml(state.message)}</strong><p>${escapeHtml(state.hint)}</p>${detail}</div>`;
     }
     if (state.state.workItems.length === 0) {
       return `<div class="empty-state"><strong>No research work items.</strong><p>Ask Pi to create a proposed work item from the current project objective.</p></div>`;
@@ -139,7 +142,7 @@ class PiWebResearchWorkflowPanel extends HTMLElement {
     const item = this.selectedItem(state) ?? activeWorkItem(state.state);
     if (item === undefined) return `<div class="empty-state">No research work items.</div>`;
     this.selectedWorkItemId = item.id;
-    return `${renderWorkItemPicker(state.state.workItems, item.id)}${renderWorkItem(item, state.state.updatedAt)}`;
+    return `${renderWorkItemPicker(state.state.workItems, item.id)}${renderResearchWorkItem(item, state.state.updatedAt)}`;
   }
 
   private selectedItem(state: PanelState): ResearchWorkItem | undefined {
@@ -174,41 +177,93 @@ function renderWorkItemPicker(items: ResearchWorkItem[], selectedId: string): st
   return `<label class="work-item-picker"><span>Work item</span><select data-work-item>${items.map((item) => `<option value="${escapeAttr(item.id)}" ${item.id === selectedId ? "selected" : ""}>${escapeHtml(item.title)}</option>`).join("")}</select></label>`;
 }
 
-function renderWorkItem(item: ResearchWorkItem, updatedAt: string): string {
-  const openDecisions = item.decisions.filter((decision) => decision.status === "open").length;
-  const activeRuns = item.runs.filter((run) => ["queued", "running", "waiting"].includes(run.status)).length;
-  const passedCriteria = item.acceptanceCriteria.filter((criterion) => criterion.result === "passed").length;
+export function renderResearchWorkItem(item: ResearchWorkItem, updatedAt: string): string {
+  const openDecisions = item.decisions.filter((decision) => decision.status === "open");
+  const decisionHistory = item.decisions.filter((decision) => decision.status !== "open");
+  const explanation = `
+    <div class="detail-copy"><span class="section-label">Objective</span><p>${escapeHtml(item.objective)}</p>${chip(item.objectiveStatus, item.objectiveStatus)}</div>
+    ${item.rationale === undefined ? "" : `<div class="detail-copy"><span class="section-label">Rationale</span><p>${escapeHtml(item.rationale)}</p></div>`}
+    <div class="detail-copy"><span class="section-label">Definition of done</span><p>${escapeHtml(item.definitionOfDone)}</p></div>
+    ${item.findings.length === 0 ? emptyRows("No findings recorded.") : `<div class="records">${renderFindings(item.findings)}</div>`}
+  `;
+  const checksAndDecisions = `${renderCriteria(item.acceptanceCriteria)}${decisionHistory.length === 0 ? "" : renderDecisions(decisionHistory)}`;
+  const evidenceAndProvenance = `${renderArtifacts(item.artifacts)}${renderSource(item.source)}${renderAuthoritySource(item.authoritySource)}`;
   return `
     <article class="work-item">
-      <header class="objective-header">
+      <header class="work-item-header">
         <div class="eyebrow">${escapeHtml(item.id)}</div>
-        <div class="title-row"><h2>${escapeHtml(item.title)}</h2>${chip(item.phase, "phase")}</div>
-        <div class="objective-copy">
-          <span class="section-label">Objective</span>
-          <p>${escapeHtml(item.objective)}</p>
-          ${chip(item.objectiveStatus, item.objectiveStatus)}
-        </div>
-        ${item.rationale === undefined ? "" : `<div class="secondary-copy"><span class="section-label">Rationale</span><p>${escapeHtml(item.rationale)}</p></div>`}
-        <div class="secondary-copy"><span class="section-label">Definition of done</span><p>${escapeHtml(item.definitionOfDone)}</p></div>
-        ${renderSource(item.source)}
-        ${renderAuthoritySource(item.authoritySource)}
+        <div class="title-row"><h2>${escapeHtml(item.title)}</h2><span>${chip(item.phase, "phase")}</span></div>
+        <div class="updated">Updated ${escapeHtml(formatTimestamp(updatedAt))}</div>
       </header>
 
-      <section class="metrics">
-        ${metric("Open decisions", openDecisions, openDecisions > 0 ? "attention" : "")}
-        ${metric("Active runs", activeRuns, activeRuns > 0 ? "active" : "")}
-        ${metric("Criteria passed", `${String(passedCriteria)}/${String(item.acceptanceCriteria.length)}`, "")}
-        ${metric("Updated", formatTimestamp(updatedAt), "")}
-      </section>
-
-      ${section("Acceptance criteria", renderCriteria(item.acceptanceCriteria), item.acceptanceCriteria.length)}
-      ${section("Decisions", renderDecisions(item.decisions), item.decisions.length)}
-      ${section("Runs", renderRuns(item.runs), item.runs.length)}
-      ${section("Findings", renderFindings(item.findings), item.findings.length)}
-      ${section("Artifacts and evidence", renderArtifacts(item.artifacts), item.artifacts.length)}
+      ${item.brief === undefined ? renderMissingBrief(item) : renderSemanticBrief(item.brief, item)}
+      ${openDecisions.length === 0 ? "" : detailsSection("Needs your decision", renderDecisions(openDecisions), openDecisions.length, true, "attention-section")}
+      ${detailsSection("Why this is the current answer", explanation, item.findings.length + 1)}
+      ${detailsSection("Checks and decision history", checksAndDecisions, item.acceptanceCriteria.length + decisionHistory.length)}
+      ${detailsSection("Runs", renderRuns(item.runs), item.runs.length)}
+      ${detailsSection("Evidence and provenance", evidenceAndProvenance, item.artifacts.length)}
       ${renderLinks(item)}
     </article>
   `;
+}
+
+function renderSemanticBrief(brief: ResearchBrief, item: ResearchWorkItem): string {
+  return `
+    <section class="executive-brief">
+      <div class="brief-question">
+        <span class="section-label">Research question</span>
+        <p>${escapeHtml(brief.question)}</p>
+      </div>
+      <div class="answer-card">
+        <div class="answer-heading"><span class="section-label">Current answer</span>${chip(`${brief.confidence} confidence`, `confidence-${brief.confidence}`)}</div>
+        <p>${escapeHtml(brief.currentAnswer)}</p>
+        <div class="confidence-reason"><strong>Why this confidence</strong><span>${escapeHtml(brief.confidenceReason)}</span></div>
+      </div>
+      <div class="brief-grid">
+        ${briefFact("Why work is blocked", brief.blockedBecause ?? "No blocker recorded in the semantic brief.", brief.blockedBecause === undefined ? "neutral" : "blocked")}
+        ${briefFact("Next action", brief.nextAction, `owner-${brief.nextActionOwner}`, chip(brief.nextActionOwner, `owner-${brief.nextActionOwner}`))}
+        ${briefFact("What changed", brief.recentChange ?? "No recent material change recorded.", "recent")}
+      </div>
+      ${renderBriefSources(brief.evidenceRefs, item)}
+      ${renderSource(brief.source)}
+    </section>
+  `;
+}
+
+function renderMissingBrief(item: ResearchWorkItem): string {
+  return `
+    <section class="executive-brief missing-brief">
+      <div class="brief-question"><span class="section-label">Research question</span><p>${escapeHtml(item.objective)}</p></div>
+      <div class="semantic-missing"><strong>Plain-language summary not generated yet.</strong><p>Ask Pi to summarize the current evidence, blocker, and next action.</p></div>
+    </section>
+  `;
+}
+
+function briefFact(label: string, content: string, className: string, trailing = ""): string {
+  return `<div class="brief-fact ${escapeAttr(className)}"><div><span class="section-label">${escapeHtml(label)}</span>${trailing}</div><p>${escapeHtml(content)}</p></div>`;
+}
+
+function renderBriefSources(refs: string[], item: ResearchWorkItem): string {
+  if (refs.length === 0) return `<p class="brief-source-count">No supporting sources linked.</p>`;
+  return `
+    <details class="brief-sources">
+      <summary>Based on ${String(refs.length)} ${refs.length === 1 ? "source" : "sources"}</summary>
+      <div class="source-list">${refs.map((ref) => `<span title="${escapeAttr(ref)}">${escapeHtml(sourceLabel(ref, item))}</span>`).join("")}</div>
+    </details>
+  `;
+}
+
+function sourceLabel(ref: string, item: ResearchWorkItem): string {
+  const artifact = item.artifacts.find((candidate) => candidate.id === ref);
+  if (artifact !== undefined) return artifact.label;
+  const decisionId = ref.startsWith("decision:") ? ref.slice("decision:".length) : ref;
+  const decision = item.decisions.find((candidate) => candidate.id === decisionId);
+  if (decision !== undefined) return decision.status === "resolved" && decision.resolution !== undefined ? `Decision: ${decision.resolution}` : `Decision: ${decision.question}`;
+  const criterion = item.acceptanceCriteria.find((candidate) => candidate.id === ref);
+  if (criterion !== undefined) return criterion.title;
+  const run = item.runs.find((candidate) => candidate.id === ref);
+  if (run !== undefined) return run.jobId === undefined ? run.purpose : `Job ${run.jobId}: ${run.purpose}`;
+  return ref;
 }
 
 function renderCriteria(criteria: AcceptanceCriterion[]): string {
@@ -282,23 +337,22 @@ function renderArtifacts(artifacts: ArtifactRecord[]): string {
 
 function renderLinks(item: ResearchWorkItem): string {
   if (item.sessions.length === 0 && item.workspaces.length === 0) return "";
-  return `
-    <section class="workflow-section">
-      <div class="section-heading"><h3>Linked runtime</h3><span>${String(item.sessions.length + item.workspaces.length)}</span></div>
-      <div class="link-grid">
-        ${item.sessions.map((session) => `<span>${chip("session", "kind")} ${escapeHtml(session.label ?? session.id)}</span>`).join("")}
-        ${item.workspaces.map((workspace) => `<span>${chip("workspace", "kind")} ${escapeHtml(workspace.label ?? workspace.id)}</span>`).join("")}
-      </div>
-    </section>
+  const content = `
+    <div class="link-grid">
+      ${item.sessions.map((session) => `<span>${chip("session", "kind")} ${escapeHtml(session.label ?? session.id)}</span>`).join("")}
+      ${item.workspaces.map((workspace) => `<span>${chip("workspace", "kind")} ${escapeHtml(workspace.label ?? workspace.id)}</span>`).join("")}
+    </div>
   `;
+  return detailsSection("Linked runtime", content, item.sessions.length + item.workspaces.length);
 }
 
-function section(title: string, content: string, count: number): string {
-  return `<section class="workflow-section"><div class="section-heading"><h3>${escapeHtml(title)}</h3><span>${String(count)}</span></div><div class="records">${content}</div></section>`;
-}
-
-function metric(label: string, value: string | number, emphasis: string): string {
-  return `<div class="metric ${escapeAttr(emphasis)}"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`;
+function detailsSection(title: string, content: string, count: number, open = false, className = ""): string {
+  return `
+    <details class="workflow-section ${escapeAttr(className)}"${open ? " open" : ""}>
+      <summary><h3>${escapeHtml(title)}</h3><span>${String(count)}</span></summary>
+      <div class="section-body">${content}</div>
+    </details>
+  `;
 }
 
 function chip(text: string, kind: string): string {
@@ -306,12 +360,22 @@ function chip(text: string, kind: string): string {
 }
 
 function renderSource(source: RecordSource): string {
-  return `<div class="source">Source: ${chip(source.kind, `source-${source.kind}`)} <span title="${escapeAttr(source.ref)}">${escapeHtml(source.ref)}</span> · ${escapeHtml(formatTimestamp(source.at))}</div>`;
+  return `
+    <details class="provenance">
+      <summary>Recorded by ${escapeHtml(source.kind)} · ${escapeHtml(formatTimestamp(source.at))}</summary>
+      <code>${escapeHtml(source.ref)}</code>
+    </details>
+  `;
 }
 
 function renderAuthoritySource(source: RecordSource | undefined): string {
   if (source === undefined) return "";
-  return `<div class="source authority-source">Authority: ${chip(source.kind, `source-${source.kind}`)} <span title="${escapeAttr(source.ref)}">${escapeHtml(source.ref)}</span> · ${escapeHtml(formatTimestamp(source.at))}</div>`;
+  return `
+    <details class="provenance authority-source">
+      <summary>Confirmed by ${escapeHtml(source.kind)} · ${escapeHtml(formatTimestamp(source.at))}</summary>
+      <code>${escapeHtml(source.ref)}</code>
+    </details>
+  `;
 }
 
 function renderRefs(label: string, refs: string[]): string {
@@ -323,13 +387,13 @@ function emptyRows(message: string): string {
   return `<p class="muted empty-row">${escapeHtml(message)}</p>`;
 }
 
-function initializePrompt(): string {
-  return "Initialize the Research Workflow for this workspace. Read the canonical project status and current user intent, then use the research_workflow tool to create a proposed work item with objective, definition of done, acceptance criteria, open decisions, and relevant runtime references. Keep inferred content proposed until I confirm it.";
+export function researchWorkflowInitializePrompt(): string {
+  return "Initialize the Research Workflow for this workspace. First read the canonical project status, current user intent, and relevant runtime evidence. Use research_workflow to create a proposed work item with objective, definition of done, acceptance criteria, open decisions, and runtime references. Then write workItem.brief as a plain-language semantic synthesis: one research question, a direct current answer of at most three short sentences, confidence with both support and limitations, the direct blocker when present, one concrete next action with its owner, one recent material change when present, and supporting evidenceRefs. Do not copy long source passages or put paths and session ids in the prose. Keep inferred content proposed or provisional until I confirm it.";
 }
 
-function updatePrompt(item: ResearchWorkItem | undefined): string {
+export function researchWorkflowUpdatePrompt(item: ResearchWorkItem | undefined): string {
   const target = item === undefined ? "the active research work item" : `research work item ${item.id}`;
-  return `Review ${target} against the current conversation, canonical project state, and runtime evidence. Use the research_workflow tool to update only records supported by evidence. Keep interpretations provisional and request confirmation for authority-bearing transitions.`;
+  return `Review ${target}. Call research_workflow get first, then read the canonical project state, relevant source files and runtime artifacts, and the latest user decisions. Update only records supported by evidence. Rewrite workItem.brief for a human reader instead of copying source text: use one plain-language research question; lead with the current answer in at most three short sentences; explain confidence using both support and the main limitation; state only the direct blocker; give one concrete next action and owner; record one material recent change or omit it. Brief evidenceRefs must use existing labeled artifact, criterion, decision, or run ids; create an artifact record before citing an external path or URL. Preserve provisional qualifications and request confirmation for authority-bearing transitions.`;
 }
 
 function formatTimestamp(value: string): string {
@@ -364,37 +428,53 @@ function styles(): string {
       button:disabled { cursor: wait; opacity: 0.65; }
       select { min-width: min(100%, 280px); padding: 7px 28px 7px 9px; }
       .work-item-picker { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; color: var(--pi-muted); }
-      .work-item { display: grid; gap: 14px; }
-      .objective-header { display: grid; gap: 10px; border: 1px solid var(--pi-accent-border); border-radius: 12px; background: var(--pi-bg-overlay-soft); padding: 16px; }
+      .work-item { display: grid; gap: 12px; max-width: 980px; margin: 0 auto; }
+      .work-item-header { display: grid; gap: 5px; padding: 2px 2px 4px; }
       .eyebrow, .section-label { color: var(--pi-muted); font-size: 11px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; }
-      .title-row, .record-heading, .section-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+      .title-row, .record-heading, .answer-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+      .title-row > span, .answer-heading > span { display: flex; flex-wrap: wrap; gap: 5px; }
+      .updated { color: var(--pi-muted); font-size: 11px; }
       h2, h3, p { margin: 0; }
-      h2 { font-size: 19px; line-height: 1.25; }
+      h2 { font-size: 20px; line-height: 1.25; }
       h3 { font-size: 14px; }
-      .objective-copy, .secondary-copy { display: grid; gap: 5px; }
-      .objective-copy p { color: var(--pi-text); font-size: 15px; line-height: 1.5; }
-      .secondary-copy p, .record p { color: var(--pi-text-secondary); line-height: 1.45; }
-      .metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
-      .metric { display: grid; gap: 4px; border: 1px solid var(--pi-border-muted); border-radius: 9px; background: var(--pi-surface); padding: 10px; }
-      .metric span { color: var(--pi-muted); font-size: 11px; }
-      .metric strong { font-size: 14px; }
-      .metric.attention { border-color: var(--pi-warning); }
-      .metric.active { border-color: var(--pi-accent-border); }
-      .workflow-section { display: grid; gap: 8px; }
-      .section-heading { align-items: center; border-bottom: 1px solid var(--pi-border-muted); padding: 0 2px 7px; }
-      .section-heading > span { color: var(--pi-muted); font-size: 12px; }
+      .executive-brief { display: grid; gap: 14px; border: 1px solid var(--pi-accent-border); border-radius: 14px; background: var(--pi-bg-overlay-soft); padding: 18px; }
+      .brief-question { display: grid; gap: 6px; }
+      .brief-question p { color: var(--pi-text); font-size: 17px; font-weight: 600; line-height: 1.45; }
+      .answer-card { display: grid; gap: 9px; border-left: 3px solid var(--pi-accent-border); background: var(--pi-surface); padding: 13px 14px; }
+      .answer-card > p { color: var(--pi-text); font-size: 15px; line-height: 1.55; }
+      .confidence-reason { display: grid; gap: 3px; color: var(--pi-text-secondary); font-size: 12px; line-height: 1.45; }
+      .brief-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
+      .brief-fact { display: grid; align-content: start; gap: 7px; border: 1px solid var(--pi-border-muted); border-radius: 10px; background: var(--pi-surface); padding: 12px; }
+      .brief-fact > div { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+      .brief-fact p, .detail-copy p, .record p { color: var(--pi-text-secondary); line-height: 1.5; }
+      .brief-fact.blocked { border-color: var(--pi-danger); }
+      .brief-fact.recent { grid-column: 1 / -1; }
+      .semantic-missing { display: grid; gap: 5px; border: 1px dashed var(--pi-warning); border-radius: 10px; padding: 12px; color: var(--pi-warning); }
+      .brief-source-count { color: var(--pi-muted); font-size: 11px; }
+      .brief-sources, .provenance { color: var(--pi-muted); font-size: 11px; }
+      .brief-sources > summary, .provenance > summary { cursor: pointer; }
+      .source-list { display: flex; flex-wrap: wrap; gap: 6px; padding-top: 8px; }
+      .source-list > span { border: 1px solid var(--pi-border-muted); border-radius: 999px; background: var(--pi-bg); color: var(--pi-text-secondary); padding: 4px 8px; }
+      .workflow-section { border: 1px solid var(--pi-border-muted); border-radius: 10px; background: var(--pi-surface); }
+      .workflow-section > summary { display: flex; align-items: center; justify-content: space-between; gap: 10px; cursor: pointer; padding: 11px 12px; list-style-position: inside; }
+      .workflow-section > summary > span { color: var(--pi-muted); font-size: 12px; }
+      .workflow-section[open] > summary { border-bottom: 1px solid var(--pi-border-muted); }
+      .attention-section { border-color: var(--pi-warning); }
+      .section-body { display: grid; gap: 9px; padding: 10px; }
+      .detail-copy { display: grid; gap: 5px; padding: 4px 2px; }
       .records { display: grid; gap: 8px; }
-      .record { display: grid; gap: 8px; border: 1px solid var(--pi-border-muted); border-radius: 10px; background: var(--pi-surface); padding: 12px; }
+      .record { display: grid; gap: 8px; border: 1px solid var(--pi-border-muted); border-radius: 9px; background: var(--pi-bg-overlay-soft); padding: 11px; }
       .attention-record { border-color: var(--pi-warning); }
       .record-heading > span { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 5px; }
       .record-grid, .link-grid { display: flex; flex-wrap: wrap; gap: 8px 14px; color: var(--pi-text-secondary); font-size: 12px; }
       .subrecords, .refs { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
       .chip { display: inline-flex; align-items: center; border: 1px solid var(--pi-border); border-radius: 999px; background: var(--pi-bg); color: var(--pi-text-secondary); padding: 2px 7px; font-size: 10px; font-weight: 600; line-height: 1.4; }
-      .chip.confirmed, .chip.approved, .chip.accepted, .chip.passed, .chip.succeeded, .chip.resolved { border-color: var(--pi-success-border); color: var(--pi-success); }
-      .chip.proposed, .chip.provisional, .chip.pending, .chip.open, .chip.awaiting-approval, .chip.waiting { border-color: var(--pi-warning); color: var(--pi-warning); }
-      .chip.failed, .chip.rejected, .chip.blocked, .chip.cancelled { border-color: var(--pi-danger); color: var(--pi-danger); }
-      .chip.running, .chip.executing, .chip.reviewing-results { border-color: var(--pi-accent-border); color: var(--pi-accent); }
-      .source { overflow: hidden; color: var(--pi-muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+      .chip.confirmed, .chip.approved, .chip.accepted, .chip.passed, .chip.succeeded, .chip.resolved, .chip.confidence-high { border-color: var(--pi-success-border); color: var(--pi-success); }
+      .chip.proposed, .chip.provisional, .chip.pending, .chip.open, .chip.awaiting-approval, .chip.waiting, .chip.confidence-medium, .chip.owner-user { border-color: var(--pi-warning); color: var(--pi-warning); }
+      .chip.failed, .chip.rejected, .chip.blocked, .chip.cancelled, .chip.confidence-low { border-color: var(--pi-danger); color: var(--pi-danger); }
+      .chip.running, .chip.executing, .chip.reviewing-results, .chip.owner-pi, .chip.owner-runtime { border-color: var(--pi-accent-border); color: var(--pi-accent); }
+      .provenance { overflow: hidden; padding-top: 2px; }
+      .provenance code { display: block; margin-top: 6px; }
       code, pre { border: 1px solid var(--pi-border-muted); border-radius: 6px; background: var(--pi-bg); color: var(--pi-text-secondary); font: 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
       code { overflow: hidden; padding: 3px 6px; text-overflow: ellipsis; white-space: nowrap; }
       pre { margin: 8px 0 0; overflow: auto; padding: 8px; white-space: pre-wrap; }
@@ -405,11 +485,11 @@ function styles(): string {
       .muted { color: var(--pi-muted); }
       .empty-row { padding: 8px 2px; }
       .empty { padding: 16px; color: var(--pi-muted); }
-      @media (max-width: 900px) { .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-      @media (max-width: 620px) {
+      @media (max-width: 700px) {
         .toolbar { align-items: flex-start; }
-        .metrics { grid-template-columns: 1fr 1fr; }
-        .title-row, .record-heading { align-items: flex-start; flex-direction: column; }
+        .brief-grid { grid-template-columns: 1fr; }
+        .brief-fact.recent { grid-column: auto; }
+        .title-row, .record-heading, .answer-heading { align-items: flex-start; flex-direction: column; }
         .record-heading > span { justify-content: flex-start; }
       }
     </style>

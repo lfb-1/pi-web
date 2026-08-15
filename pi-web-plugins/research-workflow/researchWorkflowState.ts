@@ -21,6 +21,8 @@ export type DecisionStatus = "open" | "resolved" | "void";
 export type RunKind = "pi-session" | "subsession" | "terminal" | "slurm" | "external";
 export type RunStatus = "queued" | "running" | "waiting" | "succeeded" | "failed" | "cancelled";
 export type FindingStatus = "provisional" | "accepted" | "rejected";
+export type BriefConfidence = "low" | "medium" | "high";
+export type NextActionOwner = "user" | "pi" | "runtime" | "none";
 
 export interface RecordSource {
   kind: SourceKind;
@@ -95,6 +97,19 @@ export interface FindingRecord {
   authoritySource?: RecordSource;
 }
 
+export interface ResearchBrief {
+  question: string;
+  currentAnswer: string;
+  confidence: BriefConfidence;
+  confidenceReason: string;
+  blockedBecause?: string;
+  nextActionOwner: NextActionOwner;
+  nextAction: string;
+  recentChange?: string;
+  evidenceRefs: string[];
+  source: RecordSource;
+}
+
 export interface ResearchWorkItem {
   id: string;
   title: string;
@@ -103,6 +118,7 @@ export interface ResearchWorkItem {
   rationale?: string;
   phase: WorkflowPhase;
   definitionOfDone: string;
+  brief?: ResearchBrief;
   acceptanceCriteria: AcceptanceCriterion[];
   decisions: DecisionRecord[];
   runs: RunRecord[];
@@ -136,6 +152,8 @@ export const runKinds = ["pi-session", "subsession", "terminal", "slurm", "exter
 export const runStatuses = ["queued", "running", "waiting", "succeeded", "failed", "cancelled"] as const;
 export const artifactKinds = ["file", "log", "checkpoint", "metric", "report", "url", "other"] as const;
 export const findingStatuses = ["provisional", "accepted", "rejected"] as const;
+export const briefConfidences = ["low", "medium", "high"] as const;
+export const nextActionOwners = ["user", "pi", "runtime", "none"] as const;
 
 export function parseResearchWorkflowStateText(text: string): ParseResearchWorkflowStateResult {
   let value: unknown;
@@ -188,8 +206,9 @@ function parseWorkItem(value: unknown, path: string): ResearchWorkItem {
     requireUniqueIds(values, `${path}.${name}`);
   }
   const rationale = optionalNonEmptyString(record["rationale"], `${path}.rationale`);
+  const brief = optionalBrief(record["brief"], `${path}.brief`);
   const authoritySource = optionalSource(record["authoritySource"], `${path}.authoritySource`);
-  return {
+  const item: ResearchWorkItem = {
     id: idValue(record["id"], `${path}.id`),
     title: nonEmptyString(record["title"], `${path}.title`),
     objective: nonEmptyString(record["objective"], `${path}.objective`),
@@ -197,6 +216,7 @@ function parseWorkItem(value: unknown, path: string): ResearchWorkItem {
     ...(rationale === undefined ? {} : { rationale }),
     phase: enumValue(record["phase"], workflowPhases, `${path}.phase`),
     definitionOfDone: nonEmptyString(record["definitionOfDone"], `${path}.definitionOfDone`),
+    ...(brief === undefined ? {} : { brief }),
     acceptanceCriteria,
     decisions,
     runs,
@@ -206,6 +226,40 @@ function parseWorkItem(value: unknown, path: string): ResearchWorkItem {
     workspaces,
     source: parseSource(record["source"], `${path}.source`),
     ...(authoritySource === undefined ? {} : { authoritySource }),
+  };
+  validateBriefEvidenceRefs(item, path);
+  return item;
+}
+
+function validateBriefEvidenceRefs(item: ResearchWorkItem, path: string): void {
+  if (item.brief === undefined) return;
+  const validRefs = new Set([
+    ...item.acceptanceCriteria.map((record) => record.id),
+    ...item.decisions.flatMap((record) => [record.id, `decision:${record.id}`]),
+    ...item.runs.map((record) => record.id),
+    ...item.artifacts.map((record) => record.id),
+  ]);
+  for (const ref of item.brief.evidenceRefs) {
+    if (!validRefs.has(ref)) throw new Error(`${path}.brief.evidenceRefs references missing record ${ref}`);
+  }
+}
+
+function optionalBrief(value: unknown, path: string): ResearchBrief | undefined {
+  if (value === undefined) return undefined;
+  const record = objectValue(value, path);
+  const blockedBecause = optionalBoundedString(record["blockedBecause"], `${path}.blockedBecause`, 500);
+  const recentChange = optionalBoundedString(record["recentChange"], `${path}.recentChange`, 500);
+  return {
+    question: boundedString(record["question"], `${path}.question`, 240),
+    currentAnswer: boundedString(record["currentAnswer"], `${path}.currentAnswer`, 900),
+    confidence: enumValue(record["confidence"], briefConfidences, `${path}.confidence`),
+    confidenceReason: boundedString(record["confidenceReason"], `${path}.confidenceReason`, 600),
+    ...(blockedBecause === undefined ? {} : { blockedBecause }),
+    nextActionOwner: enumValue(record["nextActionOwner"], nextActionOwners, `${path}.nextActionOwner`),
+    nextAction: boundedString(record["nextAction"], `${path}.nextAction`, 500),
+    ...(recentChange === undefined ? {} : { recentChange }),
+    evidenceRefs: stringArray(record["evidenceRefs"], `${path}.evidenceRefs`),
+    source: parseSource(record["source"], `${path}.source`),
   };
 }
 
@@ -350,6 +404,16 @@ function nonEmptyString(value: unknown, path: string): string {
 
 function optionalNonEmptyString(value: unknown, path: string): string | undefined {
   return value === undefined ? undefined : nonEmptyString(value, path);
+}
+
+function boundedString(value: unknown, path: string, maxLength: number): string {
+  const text = nonEmptyString(value, path);
+  if (text.length > maxLength) throw new Error(`${path} must be at most ${String(maxLength)} characters`);
+  return text;
+}
+
+function optionalBoundedString(value: unknown, path: string, maxLength: number): string | undefined {
+  return value === undefined ? undefined : boundedString(value, path, maxLength);
 }
 
 function idValue(value: unknown, path: string): string {

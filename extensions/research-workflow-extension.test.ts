@@ -53,6 +53,76 @@ describe("research_workflow extension state transitions", () => {
     expect(authorityRequestFor({ action: "get" }, state)).toBeUndefined();
   });
 
+  it("rewrites the semantic brief with current Pi provenance without changing authority", () => {
+    const state = createWorkItem(emptyState());
+    const existing = state.workItems[0];
+    if (existing === undefined) throw new Error("expected work item");
+    existing.objectiveStatus = "confirmed";
+    existing.authoritySource = userSource;
+    const laterPiSource: RecordSource = { ...piSource, at: "2026-08-15T20:02:00.000Z" };
+    const params: ResearchWorkflowParameters = {
+      action: "upsert_work_item",
+      workItem: {
+        id: "parafm.current",
+        brief: {
+          question: "Does the method improve CIFAR-10 accuracy?",
+          currentAnswer: "No improvement is established yet.",
+          confidence: "low",
+          confidenceReason: "The registered run is still pending.",
+          nextActionOwner: "runtime",
+          nextAction: "Wait for the registered run to finish.",
+          evidenceRefs: [],
+        },
+      },
+    };
+
+    expect(authorityRequestFor(params, state)).toBeUndefined();
+    const updated = mutateState(state, params, laterPiSource, undefined);
+
+    expect(updated.workItems[0]?.brief).toMatchObject({
+      currentAnswer: "No improvement is established yet.",
+      source: laterPiSource,
+    });
+    expect(updated.workItems[0]?.authoritySource).toEqual(userSource);
+  });
+
+  it("requires confirmation to change or downgrade authorized content", () => {
+    const state = createWorkItem(emptyState());
+    const item = state.workItems[0];
+    if (item === undefined) throw new Error("expected work item");
+    item.objectiveStatus = "confirmed";
+    item.authoritySource = userSource;
+
+    const changeObjective: ResearchWorkflowParameters = {
+      action: "upsert_work_item",
+      workItem: { id: item.id, objective: "Use a different scientific objective." },
+    };
+    expect(authorityRequestFor(changeObjective, state)?.message).toContain("change the confirmed research objective");
+
+    const downgrade: ResearchWorkflowParameters = {
+      action: "upsert_work_item",
+      workItem: { id: item.id, objectiveStatus: "proposed" },
+    };
+    expect(authorityRequestFor(downgrade, state)?.message).toContain("change the confirmed research objective");
+    const downgraded = mutateState(state, downgrade, piSource, userSource);
+    expect(downgraded.workItems[0]?.objectiveStatus).toBe("proposed");
+    expect(downgraded.workItems[0]?.authoritySource).toBeUndefined();
+  });
+
+  it("requires confirmation to change the scope of a completed work item", () => {
+    const state = createWorkItem(emptyState());
+    const item = state.workItems[0];
+    if (item === undefined) throw new Error("expected work item");
+    item.phase = "completed";
+    item.authoritySource = userSource;
+    const params: ResearchWorkflowParameters = {
+      action: "upsert_work_item",
+      workItem: { id: item.id, definitionOfDone: "Use a different completion contract." },
+    };
+
+    expect(authorityRequestFor(params, state)?.message).toContain("change the completed work item scope");
+  });
+
   it("identifies approval as an authority transition and records its user source", () => {
     const state = createWorkItem(emptyState());
     const params: ResearchWorkflowParameters = {
@@ -72,6 +142,21 @@ describe("research_workflow extension state transitions", () => {
       status: "approved",
       authoritySource: userSource,
     });
+
+    const changeApproved: ResearchWorkflowParameters = {
+      action: "upsert_acceptance",
+      workItemId: "parafm.current",
+      criterion: { id: "accuracy.gate", predicate: "Use a different threshold." },
+    };
+    expect(authorityRequestFor(changeApproved, updated)?.message).toContain("Change approved acceptance criterion");
+
+    const downgrade: ResearchWorkflowParameters = {
+      action: "upsert_acceptance",
+      workItemId: "parafm.current",
+      criterion: { id: "accuracy.gate", status: "proposed" },
+    };
+    const downgraded = mutateState(updated, downgrade, piSource, userSource);
+    expect(downgraded.workItems[0]?.acceptanceCriteria[0]?.authoritySource).toBeUndefined();
   });
 
   it("produces state accepted by the panel parser", () => {
