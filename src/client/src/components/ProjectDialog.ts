@@ -10,7 +10,7 @@ export class ProjectDialog extends LitElement {
   @property({ attribute: false }) onCancel?: () => void;
   @property() machineId = "local";
   @state() private path = "";
-  @state() private createMissing = true;
+  @state() private createMissing = false;
   @state() private suggestions: FileSuggestion[] = [];
   @state() private selected = 0;
   @state() private loading = false;

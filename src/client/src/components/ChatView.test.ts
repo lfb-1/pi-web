@@ -302,11 +302,23 @@ describe("ChatView event-group disclosure wiring", () => {
     expect(bodyCalls).toEqual([]);
   });
 
-  it("renders a live tail body by default", () => {
+  it("keeps a live tail body closed by default", () => {
     const view = new ChatView();
     view.sessionId = "session-1";
     const bodyCalls = observeGroupBodyRenders(view);
 
+    renderMessageGroup(view, messages, 40, 41, true);
+
+    expect(bodyCalls).toEqual([]);
+  });
+
+  it("renders a live tail body after it is opened", () => {
+    const view = new ChatView();
+    view.sessionId = "session-1";
+    const bodyCalls = observeGroupBodyRenders(view);
+    const initiallyClosed = renderMessageGroup(view, messages, 40, 41, true);
+
+    dispatchDetailsToggle(templateEventHandlerAfterMarker(initiallyClosed, "@toggle="), true);
     renderMessageGroup(view, messages, 40, 41, true);
 
     expect(bodyCalls).toEqual([{ messages, startIndex: 40 }]);

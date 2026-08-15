@@ -31,17 +31,18 @@ describe("project-dialog modal surface", () => {
     expect(onCancel).toHaveBeenCalledOnce();
   });
 
-  it("submits the typed path on Enter in the path input", async () => {
+  it("submits the typed path without creating a missing folder by default", async () => {
     const onSubmit = vi.fn<(path: string, create: boolean) => void>();
     const dialog = await mountDialog({ onSubmit });
     const input = pathInput(dialog);
+    expect(createCheckbox(dialog).checked).toBe(false);
     input.value = "/work/new-project";
     input.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
     await settleRenderedDialog(dialog);
 
     pressKey(input, "Enter");
 
-    expect(onSubmit).toHaveBeenCalledWith("/work/new-project", true);
+    expect(onSubmit).toHaveBeenCalledWith("/work/new-project", false);
   });
 });
 

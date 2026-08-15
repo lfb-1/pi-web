@@ -856,14 +856,15 @@ export class ChatView extends LitElement {
     return message.parts.length > 0 && message.parts.every((part) => part.type === "askUserRecord");
   }
 
-  private renderMessageGroup(messages: ChatLine[], startIndex: number, endIndex: number, defaultOpen: boolean) {
-    const disclosureKey = this.groupDisclosureKey(startIndex, endIndex, defaultOpen);
+  private renderMessageGroup(messages: ChatLine[], startIndex: number, endIndex: number, isLive: boolean) {
+    const defaultOpen = false;
+    const disclosureKey = this.groupDisclosureKey(startIndex, endIndex, isLive);
     const open = this.disclosures.isOpen(disclosureKey, defaultOpen);
     return html`
       ${this.renderScrollMarker(this.groupScrollMarkerId(endIndex))}
-      <details class=${chatMessageGroupClassName(defaultOpen)} data-index=${startIndex} data-scroll-anchor-id=${this.groupAnchorKey(startIndex)} ?open=${open} @toggle=${(event: Event) => { this.onGroupToggle(disclosureKey, event, defaultOpen); }}>
+      <details class=${chatMessageGroupClassName(isLive)} data-index=${startIndex} data-scroll-anchor-id=${this.groupAnchorKey(startIndex)} ?open=${open} @toggle=${(event: Event) => { this.onGroupToggle(disclosureKey, event, defaultOpen); }}>
         <summary>
-          <b class="label">${chatMessageGroupLabel(defaultOpen)}</b>
+          <b class="label">${chatMessageGroupLabel(isLive)}</b>
           <span>${summarizeChatGroup(messages)}</span>
         </summary>
         ${open ? this.renderMessageGroupBody(messages, startIndex) : null}
@@ -1340,8 +1341,8 @@ export class ChatView extends LitElement {
     });
   }
 
-  private groupDisclosureKey(startIndex: number, endIndex: number, defaultOpen: boolean): string {
-    return defaultOpen ? `${this.sessionId}:live:${String(startIndex)}` : `${this.sessionId}:${String(endIndex)}`;
+  private groupDisclosureKey(startIndex: number, endIndex: number, isLive: boolean): string {
+    return isLive ? `${this.sessionId}:live:${String(startIndex)}` : `${this.sessionId}:${String(endIndex)}`;
   }
 
   private messageAnchorKey(index: number): string {
