@@ -112,9 +112,12 @@ interface MachineProfileSnapshot {
 }
 ```
 
-Operational state should live in PI WEB's data directory. Durable scientific findings and
-approved plans can additionally export to tracked repository files. This separation avoids
-polluting project repositories with transient UI state while retaining reproducibility.
+Operational state should ultimately live in PI WEB's data directory. Durable scientific findings
+and approved plans can additionally export to tracked repository files. The Stage 1 prototype
+uses `.pi-web/research-workflow.json` because the current server-plugin backend is available only
+to the plugin that owns a workspace; claiming a Git workspace solely for state storage would
+replace its Git provider. The ownership and authority rules are defined in
+[`research-workflow-content-contract.md`](research-workflow-content-contract.md).
 
 ## Proposed information architecture
 
@@ -180,7 +183,8 @@ records. Define stable identifiers and ownership boundaries.
 
 ### Stage 1 — `Research Workflow` plugin
 
-Use plugin API v2 to add a workspace panel and actions backed by a server plugin. Validate:
+Use browser plugin API v2 to add a workspace panel and actions backed by validated
+workspace-local state plus a companion Pi extension. Validate:
 
 - work-item creation and phase transitions;
 - objective, acceptance criteria, and linked sessions;

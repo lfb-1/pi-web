@@ -326,6 +326,34 @@ Updates is enabled by default. It declares `machineSpecific: true` so the gatewa
 }
 ```
 
+### Research Workflow
+
+**Plugin id:** `research-workflow`
+**State file:** `.pi-web/research-workflow.json`
+**What it does:** adds a **Research** workspace tab for objectives, definition of done,
+acceptance criteria, decisions, runs, findings, artifacts, evidence, and linked runtime records.
+
+The panel renders validated structured state and labels proposed, confirmed, provisional,
+accepted, reported, and evidence-backed records separately. It does not reconstruct approved
+research state from chat when the panel opens. The companion `research_workflow` Pi extension
+tool writes the same state file, records provenance, and requests user confirmation before an
+authority-bearing transition.
+
+Research Workflow is enabled by default. Projects without a state file see an initialization
+prompt that can be inserted into the current Pi session. To hide the panel, disable
+`research-workflow` in **Settings → PI WEB plugins** or set:
+
+```json
+{
+  "plugins": {
+    "research-workflow": { "enabled": false }
+  }
+}
+```
+
+See [`research-workflow-content-contract.md`](research-workflow-content-contract.md) for content
+authority, stable identifiers, storage, and Stage 1 limitations.
+
 ### Workspace Tasks
 
 **Plugin id:** `workspace-tasks`

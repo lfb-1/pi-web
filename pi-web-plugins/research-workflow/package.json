@@ -1,0 +1,9 @@
+{
+  "name": "@pi-web/research-workflow-plugin",
+  "private": true,
+  "piWeb": {
+    "plugins": [
+      { "id": "research-workflow", "browserRoot": ".", "module": "pi-web-plugin.js" }
+    ]
+  }
+}

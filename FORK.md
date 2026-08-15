@@ -47,6 +47,19 @@ partially streamed formulas do not break the surrounding message. The chat parse
 isolated Marked instance so the KaTeX extension does not change stricter workspace Markdown
 preview behavior.
 
+### Research Workflow prototype
+
+The bundled `research-workflow` plugin adds a workspace panel for objective, definition of
+done, acceptance criteria, decisions, runs, findings, artifacts, evidence, and linked runtime
+records. The companion `research_workflow` Pi extension writes validated workspace-local state,
+records provenance, injects the active objective into Pi turns, and requires a user dialog for
+authority-bearing transitions.
+
+The Stage 1 state contract is documented in
+`docs/research-workflow-content-contract.md`. The prototype uses
+`.pi-web/research-workflow.json`; cross-machine attention and runtime-derived experiment state
+remain later stages.
+
 ## Upstream maintenance
 
 The local checkout uses conventional fork remotes:
@@ -84,4 +97,6 @@ npm run build
 
 The LaTeX contract tests are in
 `src/client/src/formatting/markdown.test.ts`. File-language detection tests are in
-`src/server/workspaces/fileContentService.read.test.ts`.
+`src/server/workspaces/fileContentService.read.test.ts`. Research Workflow parser, panel, and
+extension tests are under `pi-web-plugins/research-workflow/` and
+`extensions/research-workflow-extension.test.ts`.
