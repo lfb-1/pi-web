@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { initialAppState } from "../appState";
 import type { ExtensionDialogCloseResponse, ExtensionDialogKind, PendingExtensionDialog } from "../api";
 import { SessionController } from "./sessionController";
@@ -61,7 +61,11 @@ interface LiveHarness {
   state: () => AppState;
 }
 
-async function liveSession(patch: Partial<AppState> = {}, sessionStatus = status(oldSession.id)): Promise<LiveHarness> {
+async function liveSession(
+  patch: Partial<AppState> = {},
+  sessionStatus = status(oldSession.id),
+  onAttention = vi.fn(),
+): Promise<LiveHarness & { onAttention: ReturnType<typeof vi.fn> }> {
   const socket = new EmitSocket();
   let state = selectedState({ selectedSession: undefined, ...patch });
   const controller = new SessionController(
@@ -69,10 +73,10 @@ async function liveSession(patch: Partial<AppState> = {}, sessionStatus = status
     (statePatch) => { state = { ...state, ...statePatch }; },
     () => undefined,
     undefined,
-    { api: selectableApi(sessionStatus), socket },
+    { api: selectableApi(sessionStatus), socket, onAttention },
   );
   await controller.selectSession(oldSession, { updateUrl: false });
-  return { controller, socket, state: () => state };
+  return { controller, socket, state: () => state, onAttention };
 }
 
 describe("SessionController extension dialog state", () => {
@@ -88,9 +92,17 @@ describe("SessionController extension dialog state", () => {
   it("opens and closes cards from live dialog events without superseding other dialogs", async () => {
     const harness = await liveSession();
 
+    harness.socket.emit({ type: "status.update", status: statusWithDialogs(oldSession.id, [dialog("dialog-1")]) });
     harness.socket.emit({ type: "dialog.opened", dialog: dialog("dialog-1") });
     harness.socket.emit({ type: "dialog.opened", dialog: dialog("dialog-2", "input") });
     expect(harness.state().pendingDialogs.map((pending) => pending.dialogId)).toEqual(["dialog-1", "dialog-2"]);
+    expect(harness.onAttention).toHaveBeenCalledTimes(2);
+    expect(harness.onAttention).toHaveBeenNthCalledWith(1, {
+      id: JSON.stringify(["local", oldSession.cwd, oldSession.id, "dialog", "dialog-1"]),
+      title: "Pi Web is waiting for a decision",
+      message: "Dialog dialog-1: Are you sure?",
+      severity: "warning",
+    });
 
     harness.socket.emit({ type: "dialog.closed", dialogId: "dialog-1", reason: "answered", answer: true });
     expect(harness.state().pendingDialogs.map((pending) => pending.dialogId)).toEqual(["dialog-2"]);

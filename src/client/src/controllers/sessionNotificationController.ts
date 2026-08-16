@@ -1,4 +1,5 @@
 import { api as defaultApi, type SessionInfo } from "../api";
+import type { AttentionAlert } from "../attentionAlerts";
 import type { AppState } from "../appState";
 import {
   applySelectedNotificationEvent,
@@ -25,6 +26,7 @@ export interface SessionNotificationApi {
 export interface SessionNotificationControllerDependencies {
   api?: SessionNotificationApi;
   onBackgroundError?: (message: string, error: unknown) => void;
+  onAttention?: (alert: AttentionAlert) => void;
 }
 
 interface SelectedJoin {
@@ -47,6 +49,7 @@ interface SelectedRefreshOperation {
 export class SessionNotificationController {
   private readonly api: SessionNotificationApi;
   private readonly onBackgroundError: (message: string, error: unknown) => void;
+  private readonly onAttention: ((alert: AttentionAlert) => void) | undefined;
   private selectedTarget: SessionNotificationTarget | undefined;
   private selectedGeneration = 0;
   private selectedJoin: SelectedJoin | undefined;
@@ -62,6 +65,7 @@ export class SessionNotificationController {
   ) {
     this.api = dependencies.api ?? defaultApi;
     this.onBackgroundError = dependencies.onBackgroundError ?? ((message, error) => { console.warn(message, error); });
+    this.onAttention = dependencies.onAttention;
   }
 
   dispose(): void {
@@ -123,7 +127,9 @@ export class SessionNotificationController {
       join.events.push(event);
       return;
     }
-    const result = applySelectedNotificationEvent(this.getState().selectedNotificationInbox, target, event);
+    const previous = this.getState().selectedNotificationInbox;
+    const result = applySelectedNotificationEvent(previous, target, event);
+    this.signalAttentionForLiveEvent(target, event, previous);
     if (result.changed) this.setState({ selectedNotificationInbox: result.value });
     if (result.needsRefresh) this.scheduleSelectedRefresh(target);
   }
@@ -228,8 +234,10 @@ export class SessionNotificationController {
           ? installSelectedNotificationSnapshot(current, target, snapshot)
           : current;
         for (const event of [...join.events].sort((left, right) => left.summary.inboxRevision - right.summary.inboxRevision)) {
-          const result = applySelectedNotificationEvent(inbox, target, event);
+          const previous = inbox;
+          const result = applySelectedNotificationEvent(previous, target, event);
           inbox = result.value;
+          this.signalAttentionForLiveEvent(target, event, previous);
           if (result.needsRefresh) operation.trailing = true;
         }
         this.setState({ selectedNotificationInbox: inbox });
@@ -244,6 +252,26 @@ export class SessionNotificationController {
         if (this.selectedJoin === join) this.selectedJoin = undefined;
       }
     } while (operation.trailing && this.isCurrentTarget(target, operation.generation) && this.machineIsReachable(target.machineId));
+  }
+
+  private signalAttentionForLiveEvent(
+    target: SessionNotificationTarget,
+    event: SessionNotificationInboxEvent,
+    previous: SelectedSessionNotificationInbox | undefined,
+  ): void {
+    if (event.delta.kind !== "added") return;
+    const notification = event.delta.notification;
+    if (notification.severity === "info") return;
+    if (previous?.status !== "fresh"
+      || previous.daemonInstanceId !== event.daemonInstanceId
+      || (previous.summary?.inboxRevision ?? 0) >= event.summary.inboxRevision
+      || previous.notifications.some((existing) => existing.id === notification.id)) return;
+    this.onAttention?.({
+      id: JSON.stringify([target.machineId, target.cwd, target.sessionId, notification.id]),
+      title: "Pi Web needs attention",
+      message: notification.message,
+      severity: notification.severity,
+    });
   }
 
   private applyMutationSnapshot(

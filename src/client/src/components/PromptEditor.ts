@@ -3,7 +3,7 @@ import { markdown, deleteMarkupBackward, insertNewlineContinueMarkup } from "@co
 import { EditorSelection, EditorState, Compartment } from "@codemirror/state";
 import { EditorView, keymap, placeholder } from "@codemirror/view";
 import { defaultHighlightStyle, indentOnInput, indentUnit, syntaxHighlighting } from "@codemirror/language";
-import { LitElement, html, type PropertyValues } from "lit";
+import { LitElement, html, nothing, type PropertyValues } from "lit";
 import { customElement, property, query, state } from "lit/decorators.js";
 import { api, type FileSuggestion, type PromptAttachment, type SessionModel, type SessionStatus, type SlashCommand } from "../api";
 import type { PromptAttachmentDelivery } from "../../../shared/apiTypes";
@@ -157,9 +157,7 @@ export class PromptEditor extends LitElement {
       ? "Voice input requires a browser with Web Speech recognition, such as Chrome"
       : active
         ? stopping ? "Finishing voice input" : "Stop voice input"
-        : this.voiceSecureContext
-          ? "Start voice input. Chrome may send audio to its speech-recognition service"
-          : "Start voice input. Chrome may send audio to its speech-recognition service and may require HTTPS or localhost";
+        : "Start voice input";
     const label = stopping ? "Finishing voice input" : active ? "Stop voice input" : "Start voice input";
     return html`
       <div class="voice-input-controls" aria-label="Voice input controls">
@@ -179,7 +177,7 @@ export class PromptEditor extends LitElement {
           ?disabled=${busy || unavailable || stopping}
           title=${title}
           aria-label=${unavailable ? title : label}
-          aria-describedby="voice-input-feedback"
+          aria-describedby=${this.hasVoiceInputFeedback() ? "voice-input-feedback" : nothing}
           aria-pressed=${active ? "true" : "false"}
           @click=${() => { this.toggleVoiceInput(); }}
         >${renderMicrophoneIcon(active)}</button>
@@ -203,7 +201,14 @@ export class PromptEditor extends LitElement {
     if (this.voiceInputMessage !== undefined) {
       return html`<div id="voice-input-feedback" class="voice-input-feedback" role="status" aria-live="polite">${this.voiceInputMessage}</div>`;
     }
-    return html`<div id="voice-input-feedback" class="voice-input-feedback voice-input-guidance">Chrome may send voice audio to its speech-recognition service. Review inserted text before sending.</div>`;
+    return null;
+  }
+
+  private hasVoiceInputFeedback(): boolean {
+    return this.voiceInputError !== undefined
+      || !this.voiceInputSupported
+      || this.voiceInputInterim !== ""
+      || this.voiceInputMessage !== undefined;
   }
 
   replaceText(text: string): void {

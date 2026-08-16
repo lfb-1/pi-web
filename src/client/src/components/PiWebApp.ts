@@ -3,6 +3,7 @@ import { customElement, query, state } from "lit/decorators.js";
 import { configApi, effectiveWorkspaceUploadFolder, sessionsApi, terminalsApi, workspacesApi, workspaceEffectiveUploadFolder, type AskUserSubmission, type ExtensionDialogAnswer, type Machine, type MachineHealth, type PiWebConfigValues, type PiWebShortcutConfig, type Project, type SessionCleanupExecuteResponse, type SessionCleanupPreviewResponse, type SessionCleanupRequest, type SessionInfo, type SessionTreeForkResult, type SessionTreeNavigateResult, type SessionTreeSummaryChoice, type TerminalCommandRun, type TerminalUiEvent, type Workspace } from "../api";
 import type { AppAction } from "../actions";
 import { initialAppState, type AppState } from "../appState";
+import { BrowserAttentionAlerts, browserAttentionAlertPermission, type AttentionAlertPermission } from "../attentionAlerts";
 import { isAgentChildSession, mainAgentSessionForSelection, mainAgentSessions } from "../agentSessionGraph";
 import { isSessionActive } from "../../../shared/activity";
 import { PI_WEB_CAPABILITIES, supportsPiWebCapability } from "../../../shared/capabilities";
@@ -125,11 +126,16 @@ export class PiWebApp extends LitElement {
   private committedChatIdentity: string | undefined;
   private readyChatIdentity: string | undefined;
   private agentGraphRootSessionPath: string | undefined;
+  private readonly attentionAlerts = new BrowserAttentionAlerts();
+  @state() private attentionAlertsPermission: AttentionAlertPermission = browserAttentionAlertPermission();
 
   private readonly notifications = new SessionNotificationController(
     () => this.state,
     (patch) => { this.setState(patch); },
-    { onBackgroundError: (message, error) => { console.warn(message, error); } },
+    {
+      onBackgroundError: (message, error) => { console.warn(message, error); },
+      onAttention: (alert) => { this.attentionAlerts.alert(alert); },
+    },
   );
   private readonly sessions = new SessionController(
     () => this.state,
@@ -138,6 +144,7 @@ export class PiWebApp extends LitElement {
     new SessionStorageSessionSelectionMemory(),
     {
       notifications: this.notifications,
+      onAttention: (alert) => { this.attentionAlerts.alert(alert); },
       onSelectedSessionReady: ({ machineId, session }) => {
         void this.commitReadyChatAfterRender(machineId, session);
       },
@@ -238,6 +245,7 @@ export class PiWebApp extends LitElement {
     await this.restoreRoute(false);
   });
   private readonly onPageShow = () => {
+    this.attentionAlertsPermission = this.attentionAlerts.permission();
     void this.sessionUnread.refreshAll();
     this.appShell.repairViewportPosition();
     this.retryPendingRemoteRouteRestoreSoon();
@@ -883,6 +891,10 @@ export class PiWebApp extends LitElement {
   private navigateSettings(section: SettingsSection): void {
     this.settingsSection = section;
     writeSettingsSection(section);
+  }
+
+  private async enableAttentionAlerts(): Promise<void> {
+    this.attentionAlertsPermission = await this.attentionAlerts.requestPermission();
   }
 
   private restoreSettingsRoute(): void {
@@ -2166,7 +2178,7 @@ export class PiWebApp extends LitElement {
         ${state.machineDialogOpen ? html`<machine-dialog .error=${state.error} .onSubmit=${(input: MachineDialogSubmit) => this.submitMachineDialog(input)} .onCancel=${() => { this.setState({ machineDialogOpen: false }); }}></machine-dialog>` : null}
         ${this.sessionCleanupDialog !== undefined ? html`<session-cleanup-dialog .preview=${this.sessionCleanupDialog.preview} .previewRequest=${this.sessionCleanupDialog.previewRequest} .result=${this.sessionCleanupDialog.result} .loading=${this.sessionCleanupDialog.loading === true} .running=${this.sessionCleanupDialog.running === true} .error=${this.sessionCleanupDialog.error ?? ""} .onPreview=${(request: SessionCleanupRequest) => { void this.previewSessionCleanup(request); }} .onRun=${(request: SessionCleanupRequest) => { void this.runSessionCleanup(request); }} .onClose=${() => { this.closeSessionCleanupDialog(); }}></session-cleanup-dialog>` : null}
         ${state.themeDialog !== undefined ? html`<command-picker title=${state.themeDialog.title} .options=${state.themeDialog.options} .selectedValue=${state.themeDialog.selectedValue} .onPick=${(value: string) => { this.pickTheme(value); }} .onCancel=${() => { this.setState({ themeDialog: undefined }); }}></command-picker>` : null}
-        ${this.settingsSection !== undefined ? html`<settings-dialog .section=${this.settingsSection} .machine=${state.selectedMachine} .machineRuntime=${this.selectedMachineRuntime()} .actions=${this.getDefaultActions()} .onNavigate=${(section: SettingsSection) => { this.navigateSettings(section); }} .onClose=${() => { this.closeSettings(); }} .onConfigSaved=${(config: PiWebConfigValues) => { this.applyClientConfig(config); }} .onRefreshMachineRuntime=${async (machineId: string) => { await this.machines.refreshMachineRuntime(machineId); }}></settings-dialog>` : null}
+        ${this.settingsSection !== undefined ? html`<settings-dialog .section=${this.settingsSection} .machine=${state.selectedMachine} .machineRuntime=${this.selectedMachineRuntime()} .actions=${this.getDefaultActions()} .attentionAlertsPermission=${this.attentionAlertsPermission} .onEnableAttentionAlerts=${() => this.enableAttentionAlerts()} .onNavigate=${(section: SettingsSection) => { this.navigateSettings(section); }} .onClose=${() => { this.closeSettings(); }} .onConfigSaved=${(config: PiWebConfigValues) => { this.applyClientConfig(config); }} .onRefreshMachineRuntime=${async (machineId: string) => { await this.machines.refreshMachineRuntime(machineId); }}></settings-dialog>` : null}
       </div>
     `;
   }

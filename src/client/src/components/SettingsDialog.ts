@@ -1,6 +1,7 @@
 import { css, html, LitElement, type PropertyValues, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import type { AppAction } from "../actions";
+import type { AttentionAlertPermission } from "../attentionAlerts";
 import { configApi, piPackagesApi, pluginsApi, type Machine, type MachineRuntime, type PiPackageMutationResponse, type PiPackageScope, type PiPackagesResponse, type PiWebConfigResponse, type PiWebConfigValues, type PiWebPluginsResponse } from "../api";
 import type { SettingsSection } from "../settingsRoute";
 import "./ModalSurface";
@@ -22,6 +23,8 @@ export class SettingsDialog extends LitElement {
   @property({ attribute: false }) actions: AppAction[] = [];
   @property({ attribute: false }) machine: Machine | undefined;
   @property({ attribute: false }) machineRuntime: MachineRuntime | undefined;
+  @property({ attribute: false }) attentionAlertsPermission: AttentionAlertPermission = "unsupported";
+  @property({ attribute: false }) onEnableAttentionAlerts?: () => void | Promise<void>;
   @property({ attribute: false }) onNavigate?: (section: SettingsSection) => void;
   @property({ attribute: false }) onClose?: () => void;
   @property({ attribute: false }) onConfigSaved?: (config: PiWebConfigValues) => void;
@@ -194,6 +197,8 @@ export class SettingsDialog extends LitElement {
         .machineError=${this.accessError}
         .savedMessage=${this.savedMessage}
         .targetLabel=${settingsMachineTargetLabel(this.settingsTarget())}
+        .attentionAlertsPermission=${this.attentionAlertsPermission}
+        .onEnableAttentionAlerts=${this.onEnableAttentionAlerts}
         .onReload=${() => this.loadConfig()}
         .onReloadMachine=${() => this.loadAccessConfigForTarget()}
         .onSave=${(config: PiWebConfigValues) => this.saveConfig(config)}

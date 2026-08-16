@@ -1,5 +1,6 @@
 import { api as defaultApi, type AskUserCloseResponse, type AskUserSubmission, type CommandResult, type ExtensionDialogAnswer, type ExtensionDialogCloseReason, type ExtensionDialogCloseResponse, type ExtensionDialogOutcome, type PendingAskUser, type PendingExtensionDialog, type PromptAttachment, type QueuedSessionMessage, type SessionActivity, type SessionBulkFailure, type SessionCleanupExecuteResponse, type SessionInfo, type SessionRef, type SessionStatus, type SessionTreeForkResult, type SessionTreeNavigateResult, type SessionTreeSummaryChoice, type Workspace } from "../api";
 import type { AppState, ClosedExtensionDialog } from "../appState";
+import type { AttentionAlert } from "../attentionAlerts";
 import { forgetCachedNewSession, isCachedNewSessionInfo, markCachedNewSessionInfo, mergeCachedNewSessions, rememberCachedNewSession, stripCachedNewSessionMarker } from "../cachedNewSessions";
 import { textMessage } from "../chatMessages";
 import { machineSessionKey } from "../machineKeys";
@@ -53,6 +54,7 @@ export interface SessionControllerDependencies {
   socket?: SessionEventSocket;
   transcripts?: ChatTranscriptStore;
   notifications?: SessionNotificationSessionBridge;
+  onAttention?: (alert: AttentionAlert) => void;
   replacePromptEditorText?: (replacement: PromptEditorTextReplacement) => void | Promise<void>;
   onSelectedSessionReady?: (selection: SelectedSessionReady) => void;
 }
@@ -105,6 +107,7 @@ export class SessionController {
   private readonly api: typeof defaultApi;
   private readonly transcripts: ChatTranscriptStore;
   private readonly notifications: SessionNotificationSessionBridge | undefined;
+  private readonly onAttention: SessionControllerDependencies["onAttention"];
   private readonly replacePromptEditorText: SessionControllerDependencies["replacePromptEditorText"];
   private readonly onSelectedSessionReady: SessionControllerDependencies["onSelectedSessionReady"];
   private selectionSeq = 0;
@@ -136,6 +139,7 @@ export class SessionController {
     this.api = deps.api ?? defaultApi;
     this.transcripts = deps.transcripts ?? new ChatTranscriptStore();
     this.notifications = deps.notifications;
+    this.onAttention = deps.onAttention;
     this.replacePromptEditorText = deps.replacePromptEditorText;
     this.onSelectedSessionReady = deps.onSelectedSessionReady;
   }
@@ -1393,9 +1397,16 @@ export class SessionController {
   private applyOpenedDialog(dialog: PendingExtensionDialog): void {
     const state = this.getState();
     if (state.selectedSession === undefined) return;
-    // Events apply exactly once, so an id already on screen means this frame
-    // was already reflected (e.g. a rehydrated open) and must not duplicate
-    // the card.
+    // The paired status frame can populate the card before this live open frame
+    // is applied. Signal attention from the open frame itself, then independently
+    // avoid duplicating any status-rehydrated card. The browser alert boundary
+    // deduplicates a replay by this stable id.
+    this.onAttention?.({
+      id: JSON.stringify([selectedMachineId(state), state.selectedSession.cwd, state.selectedSession.id, "dialog", dialog.dialogId]),
+      title: "Pi Web is waiting for a decision",
+      message: dialog.message === undefined ? dialog.title : `${dialog.title}: ${dialog.message}`,
+      severity: "warning",
+    });
     if (state.pendingDialogs.some((pending) => pending.dialogId === dialog.dialogId)) return;
     this.setState({ pendingDialogs: [...state.pendingDialogs, dialog] });
   }
@@ -1432,8 +1443,19 @@ export class SessionController {
   private applyOpenedAsk(ask: PendingAskUser): void {
     const state = this.getState();
     if (state.selectedSession === undefined) return;
+    // The paired status frame can populate the card before this live open frame
+    // is applied. Signal attention from the open frame itself; status-only
+    // rehydration remains quiet, and the browser alert boundary deduplicates a
+    // replay by this stable id.
+    this.onAttention?.({
+      id: JSON.stringify([selectedMachineId(state), state.selectedSession.cwd, state.selectedSession.id, "ask", ask.askId]),
+      title: "Pi Web is waiting for your response",
+      message: ask.questions[0]?.question ?? "A session is waiting for your response.",
+      severity: "warning",
+    });
     // A superseded ask keeps its draft: the read-only record of an ask the user
     // never submitted must still be able to show what they had typed.
+    if (state.pendingAsk?.askId === ask.askId) return;
     this.setState({ pendingAsk: ask });
   }
 

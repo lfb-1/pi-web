@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { initialAppState } from "../appState";
 import { loadAskDraft, saveAskDraft } from "../askDrafts";
 import type { AskUserCloseResponse, AskUserQuestion, PendingAskUser } from "../api";
@@ -62,7 +62,11 @@ interface LiveHarness {
   state: () => AppState;
 }
 
-async function liveSession(patch: Partial<AppState> = {}, sessionStatus = status(oldSession.id)): Promise<LiveHarness> {
+async function liveSession(
+  patch: Partial<AppState> = {},
+  sessionStatus = status(oldSession.id),
+  onAttention = vi.fn(),
+): Promise<LiveHarness & { onAttention: ReturnType<typeof vi.fn> }> {
   const socket = new EmitSocket();
   let state = selectedSessionState({ selectedSession: undefined, ...patch });
   const controller = new SessionController(
@@ -70,10 +74,10 @@ async function liveSession(patch: Partial<AppState> = {}, sessionStatus = status
     (statePatch) => { state = { ...state, ...statePatch }; },
     () => undefined,
     undefined,
-    { api: selectableApi(sessionStatus), socket },
+    { api: selectableApi(sessionStatus), socket, onAttention },
   );
   await controller.selectSession(oldSession, { updateUrl: false });
-  return { controller, socket, state: () => state };
+  return { controller, socket, state: () => state, onAttention };
 }
 
 beforeEach(() => {
@@ -89,11 +93,18 @@ describe("SessionController open ask state", () => {
     expect(harness.state().pendingAsk).toEqual(pending);
   });
 
-  it("opens and closes the card from live ask events", async () => {
+  it("opens and closes the card from live ask events and raises attention once", async () => {
     const harness = await liveSession();
 
+    harness.socket.emit({ type: "status.update", status: statusWithAsk(oldSession.id, ask("ask-1")) });
     harness.socket.emit({ type: "ask.opened", ask: ask("ask-1") });
     expect(harness.state().pendingAsk?.askId).toBe("ask-1");
+    expect(harness.onAttention).toHaveBeenCalledExactlyOnceWith({
+      id: JSON.stringify(["local", oldSession.cwd, oldSession.id, "ask", "ask-1"]),
+      title: "Pi Web is waiting for your response",
+      message: "Which database?",
+      severity: "warning",
+    });
 
     harness.socket.emit({ type: "ask.closed", askId: "ask-1", reason: "submitted" });
     expect(harness.state().pendingAsk).toBeUndefined();

@@ -1,6 +1,7 @@
 import { css, html, LitElement, type PropertyValues, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { DEFAULT_WORKSPACE_UPLOADS_FOLDER, type PiWebConfigEnvOverrides, type PiWebConfigResponse, type PiWebConfigValues } from "../../api";
+import type { AttentionAlertPermission } from "../../attentionAlerts";
 import "./SettingsPanelFrame";
 import type { SettingsNotice } from "./SettingsPanelFrame";
 import {
@@ -15,7 +16,39 @@ import {
 } from "./settingsConfigDraft";
 
 function generalDescription(targetLabel: string): TemplateResult {
-  return html`Gateway server fields edit this local gateway. File access and upload defaults edit ${targetLabel}.`;
+  return html`Browser attention alerts are local to this browser. Gateway server fields edit this local gateway. File access and upload defaults edit ${targetLabel}.`;
+}
+
+export interface AttentionAlertSettingsContent {
+  status: string;
+  detail: string;
+  action?: string;
+}
+
+export function attentionAlertSettingsContent(permission: AttentionAlertPermission): AttentionAlertSettingsContent {
+  if (permission === "granted") {
+    return {
+      status: "Enabled",
+      detail: "New warning and error events play a sound and show a browser notification.",
+    };
+  }
+  if (permission === "denied") {
+    return {
+      status: "Blocked by the browser",
+      detail: "Sounds remain active. Allow notifications for this site in the browser settings to show alerts outside the tab.",
+    };
+  }
+  if (permission === "default") {
+    return {
+      status: "Browser notifications not enabled",
+      detail: "Sounds are active. Enable browser notifications to receive warning and error alerts outside the tab.",
+      action: "Enable browser notifications",
+    };
+  }
+  return {
+    status: "Unavailable",
+    detail: "This browser does not support desktop notifications. In-page notifications and supported sounds remain available.",
+  };
 }
 
 @customElement("settings-general-panel")
@@ -29,6 +62,8 @@ export class SettingsGeneralPanel extends LitElement {
   @property() machineError = "";
   @property() savedMessage = "";
   @property() targetLabel = "selected machine";
+  @property({ attribute: false }) attentionAlertsPermission: AttentionAlertPermission = "unsupported";
+  @property({ attribute: false }) onEnableAttentionAlerts?: () => void | Promise<void>;
   @property({ attribute: false }) onReload?: () => void | Promise<void>;
   @property({ attribute: false }) onReloadMachine?: () => void | Promise<void>;
   @property({ attribute: false }) onSave?: (config: PiWebConfigValues) => void | Promise<void>;
@@ -37,6 +72,7 @@ export class SettingsGeneralPanel extends LitElement {
   @state() private machineDraft: MachineAccessConfigDraft = emptyMachineAccessConfigDraft();
   @state() private gatewayLocalError = "";
   @state() private machineLocalError = "";
+  @state() private attentionAlertsError = "";
 
   protected override willUpdate(changed: PropertyValues<this>): void {
     if (changed.has("configResponse") && this.configResponse !== undefined) {
@@ -60,10 +96,33 @@ export class SettingsGeneralPanel extends LitElement {
         .onAction=${() => { this.reloadAll(); }}
       >
         <div class="settings-sections">
+          ${this.renderAttentionAlerts()}
           ${this.renderGatewayServerSettings()}
           ${this.renderSelectedMachineAccessSettings()}
         </div>
       </settings-panel-frame>
+    `;
+  }
+
+  private renderAttentionAlerts(): TemplateResult {
+    const content = attentionAlertSettingsContent(this.attentionAlertsPermission);
+    return html`
+      <section class="settings-card" aria-label="Browser attention alerts">
+        <div class="card-heading">
+          <h3>Attention alerts</h3>
+          <p>Alerts are emitted for live questions, confirmation dialogs, and warning or error notifications in the selected session.</p>
+        </div>
+        <dl class="attention-alert-status">
+          <div><dt>Status</dt><dd>${content.status}</dd></div>
+          <div><dt>Behavior</dt><dd>${content.detail}</dd></div>
+        </dl>
+        ${this.attentionAlertsError === "" ? null : html`<div class="message error-message" role="alert">${this.attentionAlertsError}</div>`}
+        ${content.action === undefined ? null : html`
+          <footer class="form-actions">
+            <button class="primary" ?disabled=${this.onEnableAttentionAlerts === undefined} @click=${() => { void this.enableAttentionAlerts(); }}>${content.action}</button>
+          </footer>
+        `}
+      </section>
     `;
   }
 
@@ -213,6 +272,15 @@ export class SettingsGeneralPanel extends LitElement {
     `;
   }
 
+  private async enableAttentionAlerts(): Promise<void> {
+    this.attentionAlertsError = "";
+    try {
+      await this.onEnableAttentionAlerts?.();
+    } catch (error) {
+      this.attentionAlertsError = errorMessage(error);
+    }
+  }
+
   private reloadAll(): void {
     void this.onReload?.();
     void this.onReloadMachine?.();
@@ -277,15 +345,15 @@ export class SettingsGeneralPanel extends LitElement {
     textarea:disabled { opacity: .55; }
     .override-badge { border: 1px solid var(--pi-warning-border); border-radius: 999px; color: var(--pi-warning); background: var(--pi-warning-surface); padding: 2px 7px; font-size: 11px; font-weight: 600; text-transform: none; }
     .effective-card { display: grid; gap: 10px; }
-    .effective-card dl { display: grid; gap: 8px; margin: 0; }
-    .effective-card dl > div { display: grid; grid-template-columns: 130px minmax(0, 1fr); gap: 12px; align-items: baseline; }
+    .effective-card dl, .attention-alert-status { display: grid; gap: 8px; margin: 0; }
+    .effective-card dl > div, .attention-alert-status > div { display: grid; grid-template-columns: 130px minmax(0, 1fr); gap: 12px; align-items: baseline; }
     dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
     .muted { color: var(--pi-muted); }
     .form-actions { display: flex; justify-content: flex-end; gap: 8px; padding-top: 2px; }
     .primary { border-color: var(--pi-accent); background: var(--pi-selection-bg); color: var(--pi-text-bright); }
 
     @media (max-width: 760px) {
-      .effective-card dl > div { grid-template-columns: minmax(0, 1fr); gap: 3px; }
+      .effective-card dl > div, .attention-alert-status > div { grid-template-columns: minmax(0, 1fr); gap: 3px; }
     }
   `;
 }

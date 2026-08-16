@@ -44,8 +44,8 @@ describe("PromptEditor voice input", () => {
     await editor.updateComplete;
 
     const microphone = requiredButton(root, ".voice-input-button");
-    expect(root.querySelector("#voice-input-feedback")?.textContent).toContain("Chrome may send voice audio");
-    expect(microphone.getAttribute("aria-describedby")).toBe("voice-input-feedback");
+    expect(root.querySelector("#voice-input-feedback")).toBeNull();
+    expect(microphone.getAttribute("aria-describedby")).toBeNull();
     microphone.click();
     const recognition = instances[0];
     if (recognition === undefined) throw new Error("Expected a recognition instance");
@@ -57,6 +57,7 @@ describe("PromptEditor voice input", () => {
     recognition.emitStart();
     await editor.updateComplete;
     expect(microphone.getAttribute("aria-pressed")).toBe("true");
+    expect(microphone.getAttribute("aria-describedby")).toBe("voice-input-feedback");
     expect(root.querySelector("[role='status']")?.textContent).toContain("Listening in English");
 
     recognition.emitResult(result(false, "spoken wor"));
@@ -143,8 +144,8 @@ describe("PromptEditor voice input", () => {
     staleResult(new TestRecognitionEvent([result(true, "stale words")]));
     await editor.updateComplete;
     expect(recognition.abort).toHaveBeenCalledOnce();
-    expect(root.querySelector("#voice-input-feedback")?.textContent).toContain("Chrome may send voice audio");
-    expect(root.querySelector("#voice-input-feedback")?.textContent).not.toContain("Listening");
+    expect(root.querySelector("#voice-input-feedback")).toBeNull();
+    expect(requiredButton(root, ".voice-input-button").getAttribute("aria-describedby")).toBeNull();
     expect(editor.view?.state.doc.toString()).toBe("new session draft");
   });
 

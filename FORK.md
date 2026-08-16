@@ -55,10 +55,9 @@ and review the final transcript inserted at the current editor selection before 
 Interim recognition stays in a status line and does not modify the draft.
 
 The implementation uses `SpeechRecognition` with the Chrome-compatible
-`webkitSpeechRecognition` fallback. It does not upload audio through PI WEB, but Chrome may
-send audio to its own speech-recognition service. Unsupported browsers, denied microphone
-permission, missing audio capture, recognition network failures, and remote HTTP origins receive
-explicit guidance. HTTPS or localhost access is recommended for reliable microphone permission.
+`webkitSpeechRecognition` fallback. Unsupported browsers, denied microphone permission, missing
+audio capture, recognition network failures, and remote HTTP origins receive explicit guidance.
+HTTPS or localhost access is recommended for reliable microphone permission.
 
 ### Research Workflow prototype
 
@@ -97,6 +96,18 @@ Session notifications use one fixed banner above the chat transcript. Each new u
 the banner's visible status in place and reports the retained update count, so periodic experiment
 monitor checks do not create a growing stack in the middle panel. The complete bounded notification
 history remains available through the banner disclosure and existing clear controls.
+
+### Attention alerts and compact status
+
+Live questions, extension dialogs, and warning or error notifications in the selected session
+play a short attention sound. When browser notification permission is enabled under **Settings →
+General → Attention alerts**, the same events also produce an operating-system notification.
+Replay and reconnect frames are deduplicated within the browser page lifetime. Informational
+monitor updates remain quiet.
+
+The middle panel's bottom status bar keeps warning controls, cost, and queued-message state while
+omitting cumulative input/output token counts and context-window percentage. Voice input keeps
+state and error feedback but no longer renders a permanent idle privacy notice.
 
 ### Recommended extension-dialog timeouts
 

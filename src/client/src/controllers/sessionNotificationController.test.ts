@@ -90,7 +90,11 @@ function baseState(): AppState {
   };
 }
 
-function createHarness(initialState = baseState(), overrides: Partial<SessionNotificationApi> = {}) {
+function createHarness(
+  initialState = baseState(),
+  overrides: Partial<SessionNotificationApi> = {},
+  onAttention = vi.fn(),
+) {
   let state = initialState;
   const api: SessionNotificationApi = {
     notificationInbox: vi.fn(() => Promise.resolve(inboxSnapshot())),
@@ -101,11 +105,12 @@ function createHarness(initialState = baseState(), overrides: Partial<SessionNot
   const controller = new SessionNotificationController(
     () => state,
     (patch) => { state = { ...state, ...patch }; },
-    { api, onBackgroundError: vi.fn() },
+    { api, onBackgroundError: vi.fn(), onAttention },
   );
   return {
     controller,
     api,
+    onAttention,
     get state() { return state; },
     replaceState(next: AppState) { state = next; },
   };
@@ -129,6 +134,61 @@ describe("SessionNotificationController selected inbox ownership", () => {
     expect(selectedNotificationView(harness.state.selectedNotificationInbox)?.announcements).toMatchObject([
       { severity: "warning", message: "notice 2" },
     ]);
+    expect(harness.onAttention).toHaveBeenCalledOnce();
+  });
+
+  it("does not alert when a stale added frame repeats a warning already installed by the snapshot", async () => {
+    const existing = entry(1, "warning");
+    const harness = createHarness(baseState(), {
+      notificationInbox: vi.fn(() => Promise.resolve(inboxSnapshot([existing], { inboxRevision: 1, catalogRevision: 1 }))),
+    });
+    harness.controller.prepareSelectedSession(session, "local");
+    await harness.controller.refreshSelectedSession(session, "local");
+
+    harness.controller.applyInboxEvent("local", addedEvent(existing, 1, 1));
+
+    expect(harness.onAttention).not.toHaveBeenCalled();
+    expect(selectedNotificationView(harness.state.selectedNotificationInbox)?.notifications).toEqual([existing]);
+  });
+
+  it("does not alert when the join snapshot already includes a buffered warning event", async () => {
+    const pendingInbox = deferred<SessionNotificationInboxSnapshot>();
+    const harness = createHarness(baseState(), { notificationInbox: vi.fn(() => pendingInbox.promise) });
+    const existing = entry(2, "warning");
+    harness.controller.prepareSelectedSession(session, "local");
+    const refresh = harness.controller.refreshSelectedSession(session, "local");
+
+    harness.controller.applyInboxEvent("local", addedEvent(existing, 2, 2));
+    expect(harness.onAttention).not.toHaveBeenCalled();
+    pendingInbox.resolve(inboxSnapshot([existing, entry(1)], { inboxRevision: 2, catalogRevision: 2 }));
+    await refresh;
+
+    expect(harness.onAttention).not.toHaveBeenCalled();
+    expect(selectedNotificationView(harness.state.selectedNotificationInbox)?.notifications.map((notification) => notification.id)).toEqual([
+      "daemon-a:2",
+      "daemon-a:1",
+    ]);
+  });
+
+  it("raises browser attention only for live warning and error notifications", async () => {
+    const warningHarness = createHarness();
+    warningHarness.controller.prepareSelectedSession(session, "local");
+    await warningHarness.controller.refreshSelectedSession(session, "local");
+
+    warningHarness.controller.applyInboxEvent("local", addedEvent(entry(2, "warning"), 2, 2));
+
+    expect(warningHarness.onAttention).toHaveBeenCalledExactlyOnceWith({
+      id: JSON.stringify(["local", session.cwd, session.id, "daemon-a:2"]),
+      title: "Pi Web needs attention",
+      message: "notice 2",
+      severity: "warning",
+    });
+
+    const infoHarness = createHarness();
+    infoHarness.controller.prepareSelectedSession(session, "local");
+    await infoHarness.controller.refreshSelectedSession(session, "local");
+    infoHarness.controller.applyInboxEvent("local", addedEvent(entry(2), 2, 2));
+    expect(infoHarness.onAttention).not.toHaveBeenCalled();
   });
 
   it("ignores notification events for an unselected chat", async () => {
@@ -147,9 +207,9 @@ describe("SessionNotificationController selected inbox ownership", () => {
     expect(harness.state.selectedNotificationInbox).toBe(selectedBefore);
   });
 
-  it("recovers a selected inbox revision gap from its bounded snapshot", async () => {
+  it("alerts for a live warning across a revision gap and recovers from the bounded snapshot", async () => {
     const first = inboxSnapshot([entry(1)], { inboxRevision: 1, catalogRevision: 1 });
-    const recovered = inboxSnapshot([entry(3), entry(1)], { inboxRevision: 3, catalogRevision: 3 });
+    const recovered = inboxSnapshot([entry(3, "warning"), entry(1)], { inboxRevision: 3, catalogRevision: 3 });
     const notificationInbox = vi.fn()
       .mockResolvedValueOnce(first)
       .mockResolvedValueOnce(recovered);
@@ -157,8 +217,14 @@ describe("SessionNotificationController selected inbox ownership", () => {
     harness.controller.prepareSelectedSession(session, "local");
     await harness.controller.refreshSelectedSession(session, "local");
 
-    harness.controller.applyInboxEvent("local", addedEvent(entry(3), 3, 2));
+    harness.controller.applyInboxEvent("local", addedEvent(entry(3, "warning"), 3, 2));
 
+    expect(harness.onAttention).toHaveBeenCalledExactlyOnceWith({
+      id: JSON.stringify(["local", session.cwd, session.id, "daemon-a:3"]),
+      title: "Pi Web needs attention",
+      message: "notice 3",
+      severity: "warning",
+    });
     await vi.waitFor(() => { expect(notificationInbox).toHaveBeenCalledTimes(2); });
     expect(selectedNotificationView(harness.state.selectedNotificationInbox)?.notifications.map((notification) => notification.id)).toEqual([
       "daemon-a:3",
