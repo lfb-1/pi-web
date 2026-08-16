@@ -1,8 +1,9 @@
-import { LitElement, html, type TemplateResult } from "lit";
+import { LitElement, css, html, type TemplateResult } from "lit";
 import { customElement, property, query, state } from "lit/decorators.js";
-import type { Workspace } from "../api";
+import type { SessionActivity, SessionInfo, SessionStatus, Workspace } from "../api";
 import type { QualifiedContributionId, QualifiedWorkspacePanelContribution, WorkspacePanelContext } from "../plugins/types";
-import { workspacePanelStyles } from "./shared";
+import { workspacePanelStyles, type ChatLine } from "./shared";
+import "./AgentSessionGraph";
 
 export interface WorkspacePanelEmptyState {
   title: string;
@@ -18,8 +19,14 @@ export class WorkspacePanel extends LitElement {
   @property({ attribute: false }) emptyState: WorkspacePanelEmptyState | undefined;
   @property() tool: QualifiedContributionId = "core:workspace.files";
   @property({ attribute: false }) panels: QualifiedWorkspacePanelContribution[] = [];
+  @property({ attribute: false }) sessions: SessionInfo[] = [];
+  @property({ attribute: false }) selectedSession: SessionInfo | undefined;
+  @property({ attribute: false }) messages: ChatLine[] = [];
+  @property({ attribute: false }) sessionStatuses: Record<string, SessionStatus> = {};
+  @property({ attribute: false }) sessionActivities: Record<string, SessionActivity> = {};
   @property({ type: Boolean }) hideToolTabs = false;
   @property({ attribute: false }) onSelectTool: (tool: QualifiedContributionId) => void = () => undefined;
+  @property({ attribute: false }) onSelectSession: (session: SessionInfo, rootSession: SessionInfo) => void = () => undefined;
   @query(".workspace-header-strip") private workspaceHeaderStrip?: HTMLElement | null;
   @state() private workspaceHeaderCanScrollLeft = false;
   @state() private workspaceHeaderCanScrollRight = false;
@@ -81,14 +88,28 @@ export class WorkspacePanel extends LitElement {
           </div>
         </header>
       `}
-      ${selectedPanel === undefined ? this.renderEmptyState({
-        title: "No workspace tools available",
-        body: "No tools are available for this workspace.",
-      }) : html`
-        <div class="panel-content">
-          ${selectedPanel.render(context)}
+      <div class="workspace-content-split">
+        <div class="workspace-tool-pane">
+          ${selectedPanel === undefined ? this.renderEmptyState({
+            title: "No workspace tools available",
+            body: "No tools are available for this workspace.",
+          }) : html`
+            <div class="panel-content">
+              ${selectedPanel.render(context)}
+            </div>
+          `}
         </div>
-      `}
+        <div class="agent-graph-pane">
+          <agent-session-graph
+            .sessions=${this.sessions}
+            .selectedSession=${this.selectedSession}
+            .messages=${this.messages}
+            .statuses=${this.sessionStatuses}
+            .activities=${this.sessionActivities}
+            .onSelectSession=${this.onSelectSession}
+          ></agent-session-graph>
+        </div>
+      </div>
     `;
   }
 
@@ -157,5 +178,12 @@ export class WorkspacePanel extends LitElement {
     return strip instanceof HTMLElement ? strip : undefined;
   }
 
-  static override styles = workspacePanelStyles;
+  static override styles = [workspacePanelStyles, css`
+    :host { overflow: hidden; }
+    .workspace-content-split { flex: 1 1 auto; min-height: 0; display: grid; grid-template-rows: minmax(140px, 56%) minmax(160px, 44%); overflow: hidden; }
+    .workspace-tool-pane { min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+    .workspace-tool-pane > .empty-state { flex: 1 1 auto; }
+    .agent-graph-pane { min-height: 0; overflow: hidden; border-top: 1px solid var(--pi-border); }
+    agent-session-graph { height: 100%; }
+  `];
 }

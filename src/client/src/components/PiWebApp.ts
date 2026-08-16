@@ -3,6 +3,7 @@ import { customElement, query, state } from "lit/decorators.js";
 import { configApi, effectiveWorkspaceUploadFolder, sessionsApi, terminalsApi, workspacesApi, workspaceEffectiveUploadFolder, type AskUserSubmission, type ExtensionDialogAnswer, type Machine, type MachineHealth, type PiWebConfigValues, type PiWebShortcutConfig, type Project, type SessionCleanupExecuteResponse, type SessionCleanupPreviewResponse, type SessionCleanupRequest, type SessionInfo, type SessionTreeForkResult, type SessionTreeNavigateResult, type SessionTreeSummaryChoice, type TerminalCommandRun, type TerminalUiEvent, type Workspace } from "../api";
 import type { AppAction } from "../actions";
 import { initialAppState, type AppState } from "../appState";
+import { mainAgentSessionForSelection, mainAgentSessions } from "../agentSessionGraph";
 import { isSessionActive } from "../../../shared/activity";
 import { PI_WEB_CAPABILITIES, supportsPiWebCapability } from "../../../shared/capabilities";
 import { machineScopedPluginId } from "../../../shared/machinePluginIds";
@@ -123,6 +124,7 @@ export class PiWebApp extends LitElement {
   private unreadConnected = false;
   private committedChatIdentity: string | undefined;
   private readyChatIdentity: string | undefined;
+  private agentGraphRootSessionPath: string | undefined;
 
   private readonly notifications = new SessionNotificationController(
     () => this.state,
@@ -1045,7 +1047,16 @@ export class PiWebApp extends LitElement {
         .emptyState=${emptyState}
         .tool=${this.state.workspaceTool}
         .panels=${this.visibleWorkspacePanels()}
+        .sessions=${this.state.sessions}
+        .selectedSession=${this.state.selectedSession}
+        .messages=${this.state.messages}
+        .sessionStatuses=${this.state.sessionStatuses}
+        .sessionActivities=${this.state.sessionActivities}
         .onSelectTool=${(tool: QualifiedContributionId) => { this.openWorkspaceTool(tool); }}
+        .onSelectSession=${(session: SessionInfo, rootSession: SessionInfo) => {
+          this.agentGraphRootSessionPath = rootSession.path;
+          void this.selectNavigationItem("sessions", "chat", () => this.sessions.selectSession(session));
+        }}
       ></workspace-panel>
     `;
   }
@@ -1192,6 +1203,9 @@ export class PiWebApp extends LitElement {
   }
 
   private renderNavigationPanel() {
+    const navigationSessions = mainAgentSessions(this.state.sessions);
+    const navigationSelectedSession = mainAgentSessionForSelection(this.state.sessions, this.state.selectedSession)
+      ?? navigationSessions.find((session) => session.path === this.agentGraphRootSessionPath);
     return html`
       <app-navigation-panel
         .machines=${this.state.machines}
@@ -1207,12 +1221,12 @@ export class PiWebApp extends LitElement {
         .workspaces=${this.state.workspaces}
         .selectedWorkspace=${this.state.selectedWorkspace}
         .deletingWorkspaceIds=${pendingWorkspaceDeletionIds(this.state.workspaceDeletionRuns)}
-        .sessions=${this.state.sessions}
+        .sessions=${navigationSessions}
         .sessionStatuses=${this.state.sessionStatuses}
         .sessionActivities=${this.state.sessionActivities}
         .sendingPrompts=${this.state.sendingPrompts}
         .unreadSessionIds=${this.unreadSessionIds}
-        .selectedSession=${this.state.selectedSession}
+        .selectedSession=${navigationSelectedSession}
         .startingSessionCount=${this.state.startingSessionCount}
         .canStartSession=${!!this.state.selectedWorkspace}
         .collapsible=${true}
@@ -1232,7 +1246,10 @@ export class PiWebApp extends LitElement {
         .onDeleteWorkspace=${(workspace: Workspace) => { void this.deleteWorkspace(workspace); }}
         .onArchivedCollapsed=${() => { this.sessions.clearSelectionAfterArchivedCollapse(); }}
         .onStartSession=${() => this.startSessionFromNavigation()}
-        .onSelectSession=${(session: SessionInfo) => this.selectNavigationItem("sessions", "chat", () => this.sessions.selectSession(session))}
+        .onSelectSession=${(session: SessionInfo) => {
+          this.agentGraphRootSessionPath = session.path;
+          return this.selectNavigationItem("sessions", "chat", () => this.sessions.selectSession(session));
+        }}
         .onMarkSessionRead=${(session: SessionInfo) => { this.markSessionsRead([session]); }}
         .onMarkSessionsRead=${(sessions: SessionInfo[]) => { this.markSessionsRead(sessions); }}
         .onArchiveSession=${(session: SessionInfo) => this.sessions.archiveSession(session)}
@@ -2089,7 +2106,7 @@ export class PiWebApp extends LitElement {
   }
 
   private mobileMainTabs(): AppMobileMainTab[] {
-    const unreadCount = unreadSessionCount(this.state.sessions, this.unreadSessionIds);
+    const unreadCount = unreadSessionCount(mainAgentSessions(this.state.sessions), this.unreadSessionIds);
     return [
       {
         id: "navigation",

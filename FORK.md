@@ -73,6 +73,15 @@ The Stage 1 state contract is documented in
 `.pi-web/research-workflow.json`; cross-machine attention and runtime-derived experiment state
 remain later stages.
 
+### Agent session graph
+
+The right workspace panel is split horizontally: its upper area keeps the selected Git,
+Terminal, Research, or other workspace tool, while the lower area shows a zoomable and pannable
+session graph. Root sessions represent main agents; linked descendants and `pi-subagents` child
+sessions appear below them. Selecting a graph node opens that session in the middle chat panel.
+The left navigation lists main-agent sessions only so delegated sessions remain attached to their
+parent workflow. Agent output and tool details retain the existing collapsed-by-default behavior.
+
 ## Upstream maintenance
 
 The local checkout uses conventional fork remotes:
