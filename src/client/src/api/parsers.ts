@@ -259,6 +259,7 @@ export function parseSessionInfo(value: unknown): SessionInfo {
   const name = optionalString(record, "name");
   const persisted = parseOptionalBoolean(record["persisted"], "persisted");
   const parentSessionPath = optionalString(record, "parentSessionPath");
+  const parentSessionRelation = parseOptionalSessionParentRelation(record["parentSessionRelation"]);
   const archivedAt = optionalString(record, "archivedAt");
   return {
     id: requireString(record, "id"),
@@ -271,9 +272,16 @@ export function parseSessionInfo(value: unknown): SessionInfo {
     messageCount: requireNumber(record, "messageCount"),
     firstMessage: requireString(record, "firstMessage"),
     ...(parentSessionPath === undefined ? {} : { parentSessionPath }),
+    ...(parentSessionRelation === undefined ? {} : { parentSessionRelation }),
     ...(record["archived"] === true ? { archived: true } : {}),
     ...(archivedAt === undefined ? {} : { archivedAt }),
   };
+}
+
+function parseOptionalSessionParentRelation(value: unknown): SessionInfo["parentSessionRelation"] {
+  if (value === undefined) return undefined;
+  if (value === "fork" || value === "subagent") return value;
+  throw new Error("Invalid parentSessionRelation field");
 }
 
 function parseSessionWarningSeverity(value: unknown): SessionWarningSeverity {

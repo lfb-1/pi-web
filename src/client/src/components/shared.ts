@@ -67,6 +67,8 @@ export interface ChatLine {
   source?: "compaction" | "branch_summary";
   meta?: {
     timestamp?: string;
+    /** Durable Pi session-tree entry used by response-level fork actions. */
+    entryId?: string;
     model?: { provider?: string; id?: string; responseId?: string };
     /** Thinking level the assistant message was generated with, when known. */
     thinkingLevel?: string;
@@ -325,10 +327,19 @@ export const chatStyles = css`
   .session-warning-dismiss:focus-visible { outline: 1px solid var(--pi-border); outline-offset: 2px; }
   .notification-tray { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; background: var(--pi-bg-overlay); }
   .notification-tray.collapsed { flex: 0 0 auto; }
-  .notification-header { position: sticky; top: 0; z-index: 2; flex: 0 0 auto; min-width: 0; display: flex; flex-wrap: nowrap; align-items: center; justify-content: space-between; gap: 8px; box-sizing: border-box; min-height: 40px; padding: 4px 10px; border-bottom: 1px solid var(--pi-border-muted); background: var(--pi-bg-overlay); }
+  .notification-banner { border-left: 3px solid var(--pi-accent-border); }
+  .notification-banner.warning { border-left-color: var(--pi-warning); }
+  .notification-banner.error { border-left-color: var(--pi-danger); }
+  .notification-header { position: sticky; top: 0; z-index: 2; flex: 0 0 auto; min-width: 0; display: flex; flex-wrap: nowrap; align-items: center; justify-content: space-between; gap: 8px; box-sizing: border-box; min-height: 48px; padding: 6px 10px; border-bottom: 1px solid var(--pi-border-muted); background: var(--pi-bg-overlay); }
   .notification-tray.collapsed .notification-header { border-bottom: 0; }
   .notification-header:focus-visible { outline: 2px solid var(--pi-accent); outline-offset: -3px; }
-  .notification-heading { min-width: 0; flex: 1 1 auto; overflow: hidden; color: var(--pi-text-bright); font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+  .notification-banner-copy { min-width: 0; flex: 1 1 auto; display: grid; gap: 2px; }
+  .notification-banner-metadata { min-width: 0; display: flex; align-items: baseline; gap: 5px; color: var(--pi-muted); font-size: 11px; }
+  .notification-heading { min-width: 0; overflow: hidden; color: var(--pi-text-bright); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+  .notification-update-count { min-width: 0; margin-left: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .notification-banner-message { margin: 0; overflow: hidden; color: var(--pi-text); font-size: 12px; line-height: 1.35; text-align: start; text-overflow: ellipsis; white-space: nowrap; unicode-bidi: plaintext; }
+  .notification-banner.warning .notification-banner-metadata .notification-severity { color: var(--pi-warning); }
+  .notification-banner.error .notification-banner-metadata .notification-severity { color: var(--pi-danger); }
   .notification-header-actions { flex: 0 0 auto; display: flex; align-items: center; gap: 2px; }
   .notification-control, .notification-row-dismiss { box-sizing: border-box; min-height: 32px; border: 0; border-radius: 6px; background: transparent; color: var(--pi-muted); cursor: pointer; }
   .notification-control { padding: 0 7px; font: 12px system-ui, sans-serif; white-space: nowrap; }
@@ -360,6 +371,7 @@ export const chatStyles = css`
   }
   @media (max-width: 520px) {
     .notification-header { gap: 4px; padding-inline: 8px; }
+    .notification-update-count { display: none; }
     .notification-list { padding-inline: 8px; }
   }
   .chat { --pi-chat-sticky-top: -26px; height: 100%; min-height: 0; overflow: auto; overflow-anchor: none; padding: 26px 16px 64px; box-sizing: border-box; }
@@ -431,6 +443,7 @@ export const chatStyles = css`
   .msg-actions { flex: 0 0 auto; display: inline-flex; gap: 6px; opacity: 0; transition: opacity .12s ease; }
   .msg-action { display: inline-grid; place-items: center; width: 24px; height: 24px; border: 1px solid var(--pi-border); border-radius: 6px; background: var(--pi-surface); color: var(--pi-muted); padding: 0; font: 14px system-ui, sans-serif; line-height: 1; cursor: pointer; }
   .msg-action:hover, .msg-action:focus { color: var(--pi-text); border-color: var(--pi-accent); }
+  .msg-action:disabled { opacity: .45; color: var(--pi-dim); border-color: var(--pi-border-muted); cursor: default; }
   .msg:hover > .msg-header .msg-actions, .msg:focus-within > .msg-header .msg-actions, .group-msg:hover > .msg-header .msg-actions, .group-msg:focus-within > .msg-header .msg-actions { opacity: 1; }
   .label { display: block; color: var(--pi-muted); font-size: 12px; text-transform: uppercase; }
   .msg-header .label { margin: 0; }

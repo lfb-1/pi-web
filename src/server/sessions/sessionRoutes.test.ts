@@ -363,8 +363,13 @@ describe("session routes", () => {
         url: "/sessions/session-1/tree/fork",
         payload: { cwd: "/repo", entryId: "entry-3", expectedLeafId: null },
       });
+      const responseAction = await routeApp.inject({
+        method: "POST",
+        url: "/sessions/session-1/tree/fork",
+        payload: { cwd: "/repo", entryId: "assistant-4" },
+      });
 
-      expect([response.statusCode, nullLeaf.statusCode]).toEqual([200, 200]);
+      expect([response.statusCode, nullLeaf.statusCode, responseAction.statusCode]).toEqual([200, 200, 200]);
       expect(response.json()).toEqual({
         cancelled: false,
         session: {
@@ -387,6 +392,10 @@ describe("session routes", () => {
           lookup: { id: "session-1", cwd: resolve("/repo") },
           request: { entryId: "entry-3", expectedLeafId: null },
         },
+        {
+          lookup: { id: "session-1", cwd: resolve("/repo") },
+          request: { entryId: "assistant-4" },
+        },
       ]);
     } finally {
       await routeService.dispose();
@@ -405,7 +414,6 @@ describe("session routes", () => {
       { cwd: "/repo", expectedLeafId: "leaf-1" },
       { ...base, entryId: "   " },
       { ...base, entryId: 42 },
-      { cwd: "/repo", entryId: "entry-2" },
       { ...base, expectedLeafId: 1 },
       { ...base, expectedLeafId: "" },
     ];

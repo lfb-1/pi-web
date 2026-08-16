@@ -340,8 +340,10 @@ export class SessionList extends LitElement implements KeyboardNavigableSection 
    * hide them.
    */
   private renderRowBadges(row: SessionRow) {
-    if (row.depth <= 2) return null;
-    return html`<span class="row-badges"><span class="badge">depth ${row.depth}</span></span>`;
+    const forkBadge = row.session.parentSessionRelation === "fork" ? html`<span class="badge">fork</span>` : null;
+    const depthBadge = row.depth > 2 ? html`<span class="badge">depth ${row.depth}</span>` : null;
+    if (forkBadge === null && depthBadge === null) return null;
+    return html`<span class="row-badges">${forkBadge}${depthBadge}</span>`;
   }
 
   private handleSessionKeydown(event: KeyboardEvent, session: SessionInfo, scope: SessionSelectionScope): void {

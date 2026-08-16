@@ -73,14 +73,29 @@ The Stage 1 state contract is documented in
 `.pi-web/research-workflow.json`; cross-machine attention and runtime-derived experiment state
 remain later stages.
 
-### Agent session graph
+### Agent session graph and main-session forks
 
 The right workspace panel is split horizontally: its upper area keeps the selected Git,
 Terminal, Research, or other workspace tool, while the lower area shows a zoomable and pannable
-session graph. Root sessions represent main agents; linked descendants and `pi-subagents` child
-sessions appear below them. Selecting a graph node opens that session in the middle chat panel.
-The left navigation lists main-agent sessions only so delegated sessions remain attached to their
-parent workflow. Agent output and tool details retain the existing collapsed-by-default behavior.
+session graph. Root sessions and response-level forks form the persistent main-agent lineage.
+Each main session's delegated `pi-subagents` and tracked subsessions are folded into that main by
+default; selecting a main node toggles its own subagents, while selecting any visible node opens
+that session in the middle chat panel.
+
+Assistant text responses in root or forked-main sessions expose a Fork action next to Copy;
+subagent and archived chats remain read-only for lineage creation. The action creates and selects
+a new main session at that exact Pi session-tree entry, leaving the source session unchanged. A durable
+`parentSessionRelation` distinguishes these main forks from subagents across listing, reload,
+archive, navigation, and graph projections. The left navigation therefore lists root and forked
+main sessions as a nested tree while delegated subagents remain filtered from that panel. Agent
+output and tool details retain the existing collapsed-by-default behavior.
+
+### Persistent notification banner
+
+Session notifications use one fixed banner above the chat transcript. Each new update replaces
+the banner's visible status in place and reports the retained update count, so periodic experiment
+monitor checks do not create a growing stack in the middle panel. The complete bounded notification
+history remains available through the banner disclosure and existing clear controls.
 
 ## Upstream maintenance
 

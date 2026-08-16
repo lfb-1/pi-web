@@ -296,6 +296,7 @@ export interface PiSessionListEntry {
   allMessagesText: string;
   name?: string;
   parentSessionPath?: string;
+  parentSessionRelation?: ClientSession["parentSessionRelation"];
 }
 
 /** A session file located by id without parsing its transcript. */
@@ -2149,16 +2150,18 @@ export class PiSessionService implements SessionRouteService {
     await this.assertWritable(ref);
     const session = await this.getOrOpen(ref);
     if (this.hasActiveWork(session)) throw new Error("Stop current session activity before forking the session tree");
-    if (session.sessionManager.getLeafId() !== request.expectedLeafId) {
+    if (request.expectedLeafId !== undefined && session.sessionManager.getLeafId() !== request.expectedLeafId) {
       throw new Error("The session changed since /tree was opened. Reopen /tree and try again.");
     }
 
     this.publishActivity(session, "forking session from entry", "active");
     this.publishStatus(session);
     try {
-      const result = await this.commandService.forkEntry(session.sessionId, request.entryId, {
-        expectedLeafId: request.expectedLeafId,
-      });
+      const result = await this.commandService.forkEntry(
+        session.sessionId,
+        request.entryId,
+        request.expectedLeafId === undefined ? undefined : { expectedLeafId: request.expectedLeafId },
+      );
       if (result.type === "unsupported") throw new Error(result.message);
       if (result.type !== "done") throw new Error("Session fork is unavailable");
       if (result.session === undefined) {
@@ -3217,9 +3220,10 @@ export class PiSessionService implements SessionRouteService {
       }
     }
     active.unsubscribe = session.subscribe((event) => {
-      this.events.publish(session.sessionId, toClientEvent(event, session.thinkingLevel));
-      this.publishActivityForEvent(session, event);
       const eventType = getString(event, "type");
+      const entryId = eventType === "message_end" ? latestMessageEntryId(session, getProperty(event, "message")) : undefined;
+      this.events.publish(session.sessionId, toClientEvent(event, session.thinkingLevel, entryId));
+      this.publishActivityForEvent(session, event);
       if (eventType === "agent_end") this.abortRunScopedExtensionDialogs(session.sessionId);
       if (eventType === "compaction_end") this.scheduleCompactionQueueDrain(session.sessionId);
       if (eventType === "agent_start" || eventType === "agent_end") this.scheduleCompactionQueueDrain(session.sessionId);
@@ -3744,6 +3748,7 @@ function clientSessionFromListEntry(session: PiSessionListEntry): ClientSession 
     messageCount: session.messageCount,
     firstMessage: session.firstMessage,
     ...(session.parentSessionPath === undefined ? {} : { parentSessionPath: session.parentSessionPath }),
+    ...(session.parentSessionRelation === undefined ? {} : { parentSessionRelation: session.parentSessionRelation }),
   };
 }
 
@@ -3758,6 +3763,7 @@ function archiveInputFromListEntry(session: PiSessionListEntry): ArchiveSessionI
     firstMessage: session.firstMessage,
     ...(session.name === undefined ? {} : { name: session.name }),
     ...(session.parentSessionPath === undefined ? {} : { parentSessionPath: session.parentSessionPath }),
+    ...(session.parentSessionRelation === undefined ? {} : { parentSessionRelation: session.parentSessionRelation }),
   };
 }
 
@@ -3765,6 +3771,7 @@ function archiveInputFromActiveSession(session: PiAgentSession): ArchiveSessionI
   const sessionFile = session.sessionFile;
   if (sessionFile === undefined || sessionFile === "") throw new Error("Session is not persisted");
   const parentSessionPath = session.sessionManager.getHeader?.()?.parentSession;
+  const parentSessionRelation = parentRelationFromBranch(session.sessionManager.getBranch());
   return {
     sessionId: session.sessionId,
     cwd: session.sessionManager.getCwd(),
@@ -3775,6 +3782,7 @@ function archiveInputFromActiveSession(session: PiAgentSession): ArchiveSessionI
     firstMessage: "",
     ...(session.sessionName === undefined ? {} : { name: session.sessionName }),
     ...(parentSessionPath === undefined ? {} : { parentSessionPath }),
+    ...(parentSessionRelation === undefined ? {} : { parentSessionRelation }),
   };
 }
 
@@ -3840,6 +3848,7 @@ function clientSessionFromArchivedRecord(record: ArchivedSessionRecord, fallback
   if (path === undefined || created === undefined || modified === undefined || messageCount === undefined || firstMessage === undefined) return undefined;
   const name = record.name ?? fallback?.name;
   const parentSessionPath = record.parentSessionPath ?? fallback?.parentSessionPath;
+  const parentSessionRelation = record.parentSessionRelation ?? fallback?.parentSessionRelation;
   return {
     id: record.sessionId,
     path,
@@ -3850,6 +3859,7 @@ function clientSessionFromArchivedRecord(record: ArchivedSessionRecord, fallback
     messageCount,
     firstMessage,
     ...(parentSessionPath === undefined ? {} : { parentSessionPath }),
+    ...(parentSessionRelation === undefined ? {} : { parentSessionRelation }),
     archived: true,
     archivedAt: record.archivedAt,
   };
@@ -4127,6 +4137,35 @@ function annotateAssistantThinkingLevel(message: unknown, thinkingLevel: string 
   return { ...message, thinkingLevel };
 }
 
+function annotateMessageEntryId(message: unknown, entryId: string | undefined): unknown {
+  if (entryId === undefined || entryId === "" || !isRecord(message)) return message;
+  return { ...message, entryId };
+}
+
+function latestMessageEntryId(session: PiAgentSession, message: unknown): string | undefined {
+  const role = getString(message, "role");
+  const branch = session.sessionManager.getBranch();
+  for (let index = branch.length - 1; index >= 0; index -= 1) {
+    const entry = branch[index];
+    if (!isRecord(entry) || entry["type"] !== "message") continue;
+    const candidate = entry["message"];
+    if (role !== undefined && getString(candidate, "role") !== role) continue;
+    const id = getString(entry, "id");
+    if (id !== undefined && id !== "") return id;
+  }
+  return undefined;
+}
+
+function parentRelationFromBranch(branch: readonly unknown[]): ClientSession["parentSessionRelation"] {
+  let relation: ClientSession["parentSessionRelation"] = undefined;
+  for (const entry of branch) {
+    if (!isRecord(entry) || entry["type"] !== "custom") continue;
+    if (entry["customType"] === "pi-web.main-fork") relation = "fork";
+    else if (entry["customType"] === SUBSESSION_CHILD_LINK_CUSTOM_TYPE) relation = "subagent";
+  }
+  return relation;
+}
+
 function historyMessages(session: PiAgentSession): unknown[] {
   const messages: unknown[] = [];
   // Pi records the initial level at session creation and every later change, so
@@ -4134,7 +4173,12 @@ function historyMessages(session: PiAgentSession): unknown[] {
   let thinkingLevel: string | undefined;
   for (const entry of session.sessionManager.getBranch()) {
     if (!isRecord(entry)) continue;
-    if (entry["type"] === "message") messages.push(annotateAssistantThinkingLevel(entry["message"], thinkingLevel));
+    if (entry["type"] === "message") {
+      messages.push(annotateMessageEntryId(
+        annotateAssistantThinkingLevel(entry["message"], thinkingLevel),
+        getString(entry, "id"),
+      ));
+    }
     else if (entry["type"] === "thinking_level_change") {
       const level = getString(entry, "thinkingLevel");
       if (level !== undefined) thinkingLevel = level;
@@ -4182,7 +4226,7 @@ function finalAssistantText(messages: readonly unknown[]): string {
   return "";
 }
 
-function toClientEvent(event: unknown, thinkingLevel?: string): SessionUiEvent {
+function toClientEvent(event: unknown, thinkingLevel?: string, entryId?: string): SessionUiEvent {
   const eventType = getString(event, "type");
   const assistantMessageEvent = getProperty(event, "assistantMessageEvent");
   if (eventType === "message_update" && getString(assistantMessageEvent, "type") === "text_delta") {
@@ -4208,7 +4252,7 @@ function toClientEvent(event: unknown, thinkingLevel?: string): SessionUiEvent {
   if (eventType === "message_end") {
     const message = getProperty(event, "message");
     if (message === undefined) return { type: "message.end" };
-    return { type: "message.end", message: annotateAssistantThinkingLevel(message, thinkingLevel) };
+    return { type: "message.end", message: annotateMessageEntryId(annotateAssistantThinkingLevel(message, thinkingLevel), entryId) };
   }
   return { type: "pi.event", eventType: eventType ?? "unknown" };
 }

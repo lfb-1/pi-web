@@ -184,6 +184,7 @@ function archiveInputFromListEntry(session: PiSessionListEntry): ArchiveSessionI
     firstMessage: session.firstMessage,
     ...(session.name === undefined ? {} : { name: session.name }),
     ...(session.parentSessionPath === undefined ? {} : { parentSessionPath: session.parentSessionPath }),
+    ...(session.parentSessionRelation === undefined ? {} : { parentSessionRelation: session.parentSessionRelation }),
   };
 }
 

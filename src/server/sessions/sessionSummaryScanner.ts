@@ -2,6 +2,7 @@ import { open, readdir, stat } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import type { Stats } from "node:fs";
 import { join, sep } from "node:path";
+import type { SessionParentRelation } from "../../shared/apiTypes.js";
 import { isRecord, tryParseEntry } from "./sessionFileFormat.js";
 import type { PiSessionListEntry } from "./piSessionService.js";
 
@@ -57,6 +58,9 @@ const TAB = 0x09;
 /** The entry types the byte fast path recognizes, as raw bytes: type names are never decoded. */
 const MESSAGE_TYPE_BYTES = Buffer.from("message");
 const SESSION_INFO_TYPE_BYTES = Buffer.from("session_info");
+const CUSTOM_TYPE_BYTES = Buffer.from("custom");
+const MAIN_FORK_CUSTOM_TYPE = "pi-web.main-fork";
+const SUBSESSION_CHILD_CUSTOM_TYPE = "pi-web.subsession.spawned";
 
 /** Same bound the SDK uses for its concurrent session-info builds. */
 const MAX_CONCURRENT_SESSION_SUMMARY_SCANS = 10;
@@ -207,10 +211,11 @@ interface SummaryFoldState {
   messageCount: number;
   firstMessageText: string | undefined;
   name: string | undefined;
+  parentSessionRelation: SessionParentRelation | undefined;
 }
 
 function createEmptyFold(): SummaryFoldState {
-  return { header: undefined, rejected: false, messageCount: 0, firstMessageText: undefined, name: undefined };
+  return { header: undefined, rejected: false, messageCount: 0, firstMessageText: undefined, name: undefined, parentSessionRelation: undefined };
 }
 
 /** One scanned session file: what it was read as, and what folding it produced. */
@@ -339,6 +344,7 @@ function buildSummaryFromFold(fold: SummaryFoldState, filePath: string, mtime: D
     allMessagesText: "",
     ...(fold.name === undefined ? {} : { name: fold.name }),
     ...(typeof parentSessionPath === "string" ? { parentSessionPath } : {}),
+    ...(fold.parentSessionRelation === undefined ? {} : { parentSessionRelation: fold.parentSessionRelation }),
   };
 }
 
@@ -362,6 +368,12 @@ function processLineBytes(data: Buffer, start: number, end: number, state: Summa
   if (entryType === "session_info") {
     const entry = tryParseEntry(data.toString("utf8", start, end));
     if (entry !== undefined) state.name = sessionInfoName(entry);
+    return;
+  }
+  if (entryType === "custom") {
+    const entry = tryParseEntry(data.toString("utf8", start, end));
+    const relation = entry === undefined ? undefined : customParentRelation(entry);
+    if (relation !== undefined) state.parentSessionRelation = relation;
     return;
   }
   if (entryType === "message") {
@@ -410,7 +422,7 @@ function processLineBytes(data: Buffer, start: number, end: number, state: Summa
  * does not carry the prefix (or the type is unreasonably long), leaving
  * classification to the parse fallback.
  */
-function classifyLineType(data: Buffer, start: number, end: number): "message" | "session_info" | "other" | undefined {
+function classifyLineType(data: Buffer, start: number, end: number): "message" | "session_info" | "custom" | "other" | undefined {
   const prefixLength = ENTRY_TYPE_PREFIX.length;
   if (end - start < prefixLength + 1) return undefined;
   for (let i = 0; i < prefixLength; i += 1) {
@@ -421,6 +433,7 @@ function classifyLineType(data: Buffer, start: number, end: number): "message" |
   if (closeAt === -1 || closeAt > searchLimit) return undefined;
   if (sameBytes(data, start + prefixLength, closeAt, MESSAGE_TYPE_BYTES)) return "message";
   if (sameBytes(data, start + prefixLength, closeAt, SESSION_INFO_TYPE_BYTES)) return "session_info";
+  if (sameBytes(data, start + prefixLength, closeAt, CUSTOM_TYPE_BYTES)) return "custom";
   return "other";
 }
 
@@ -455,6 +468,12 @@ function classifyPreHeaderLine(line: string): Record<string, unknown> | "skip" |
   if (entry === undefined) return "skip";
   if (entry["type"] !== "session") return "reject";
   return entry;
+}
+
+function customParentRelation(entry: Record<string, unknown>): SessionParentRelation | undefined {
+  if (entry["customType"] === MAIN_FORK_CUSTOM_TYPE) return "fork";
+  if (entry["customType"] === SUBSESSION_CHILD_CUSTOM_TYPE) return "subagent";
+  return undefined;
 }
 
 /** The SDK's name rule: latest `session_info` wins, and empty/missing names clear. */

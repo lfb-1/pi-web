@@ -297,7 +297,10 @@ async function requestSessionTreeFork(session: SessionRef, fork: SessionTreeFork
   const response = await fetch(resolveAppUrl(sessionPath(session, "tree/fork", machineId)), {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: sessionBody(session, { entryId: fork.entryId, expectedLeafId: fork.expectedLeafId }),
+    body: sessionBody(session, {
+      entryId: fork.entryId,
+      ...(fork.expectedLeafId === undefined ? {} : { expectedLeafId: fork.expectedLeafId }),
+    }),
   });
   if (!response.ok) {
     const body: unknown = await response.json().catch((): unknown => ({}));

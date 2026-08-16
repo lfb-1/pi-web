@@ -513,6 +513,36 @@ export class SessionController {
     return result;
   }
 
+  async forkFromMessage(entryId: string): Promise<SessionTreeForkResult> {
+    const state = this.getState();
+    const session = state.selectedSession;
+    if (session === undefined || session.archived === true || isClientPendingStartSessionInfo(session)) {
+      throw new Error("The selected session cannot be forked");
+    }
+    if (entryId.trim() === "") throw new Error("Assistant response entry is required");
+
+    const machineId = selectedMachineId(state);
+    const selectionSeq = this.selectionSeq;
+    const originalCacheKey = machineSessionKey(machineId, session.id);
+    let result: SessionTreeForkResult;
+    try {
+      result = await this.api.forkTree(session, { entryId }, machineId);
+    } catch (error) {
+      if (this.isCurrentSessionSelection(session.id, machineId, selectionSeq)) this.setState({ error: String(error) });
+      throw error;
+    }
+    if (result.cancelled) return result;
+
+    const forked = result.session;
+    if (result.promptDraft !== undefined) saveDraft(machineSessionKey(machineId, forked.id), result.promptDraft);
+    this.transcripts.discard(originalCacheKey);
+    if (!this.isSelectedSessionIdentity(session.id, machineId)) return result;
+    const sessions = [forked, ...this.getState().sessions.filter((candidate) => candidate.id !== forked.id)];
+    this.setState({ sessions, treeDialog: undefined });
+    void this.selectSession(forked);
+    return result;
+  }
+
   async forkFromTree(entryId: string): Promise<SessionTreeForkResult> {
     const state = this.getState();
     const session = state.selectedSession;

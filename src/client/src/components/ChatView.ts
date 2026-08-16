@@ -213,12 +213,14 @@ export class ChatView extends LitElement {
   @property({ type: Boolean }) warningsVisible = true;
   @property({ attribute: false }) onToggleWarnings?: () => void;
   @property({ attribute: false }) onLoadMore?: () => void;
+  @property({ attribute: false }) onForkMessage?: (entryId: string) => void | Promise<void>;
   @query(".chat") private chat?: HTMLDivElement;
   @query("dialog.image-zoom") private imageZoomDialog?: HTMLDialogElement;
   @state() private pinnedToBottom = true;
   @state() private zoomedImage: { src: string; alt: string } | undefined = undefined;
   @state() private expandedMetaKey: string | undefined;
   @state() private copiedMessageKey: string | undefined;
+  @state() private forkingMessageEntryId: string | undefined;
   @state() private currentConversationIndex: number | undefined;
   @state() private collapsedNotificationTargetKeys: ReadonlySet<string> = new Set();
   @state() private retainedEmptyNotificationTrayTargetKey: string | undefined;
@@ -339,9 +341,21 @@ export class ChatView extends LitElement {
     if (changed.has("sessionId")) {
       this.savePreviousSessionScrollPosition(changed.get("sessionId"));
       this.prepareSessionUiState();
-    } else if (changed.has("notificationInbox") && this.notificationTargetChanged(changed.get("notificationInbox"))) {
+    }
+    if (changed.has("notificationInbox") && this.notificationTargetChanged(changed.get("notificationInbox"))) {
       this.pendingNotificationFocus = undefined;
       this.retainedEmptyNotificationTrayTargetKey = undefined;
+      const inbox = this.notificationInbox;
+      if (inbox !== undefined && notificationInboxTotalCount(inbox) > 0) {
+        // Notifications are a persistent, in-place banner by default. Users can
+        // still expand the retained history deliberately, and later updates do
+        // not override that choice because the exact chat target is unchanged.
+        this.collapsedNotificationTargetKeys = setNotificationTrayCollapsed(
+          this.collapsedNotificationTargetKeys,
+          inbox,
+          true,
+        );
+      }
     }
     if (changed.has("messages") || changed.has("pendingAsk") || changed.has("pendingDialogs") || changed.has("closedDialogs")) this.pinnedToBottom = this.pinnedToBottom && (this.didChatHeightChange() || this.isNearBottom());
   }
@@ -456,11 +470,25 @@ export class ChatView extends LitElement {
     const totalCount = notificationInboxTotalCount(inbox);
     if (totalCount === 0 && !hasPendingOverlay && !retainsFocusTarget) return null;
     const collapsed = notificationTrayIsCollapsed(this.collapsedNotificationTargetKeys, inbox);
-    const toggleLabel = collapsed ? "Expand notifications" : "Collapse notifications";
+    const toggleLabel = collapsed ? "Expand notification history" : "Collapse notification history";
+    const latest = inbox.notifications[0];
+    const latestLabel = latest === undefined ? undefined : notificationSeverityLabel(latest.severity);
     return html`
-      <section class=${`notification-tray${collapsed ? " collapsed" : ""}`} role="region" aria-labelledby="session-notifications-heading" @focusout=${(event: FocusEvent) => { this.releaseEmptyNotificationTray(event); }}>
+      <section class=${`notification-tray notification-banner${latest === undefined ? "" : ` ${latest.severity}`}${collapsed ? " collapsed" : ""}`} role="region" aria-labelledby="session-notifications-heading" @focusout=${(event: FocusEvent) => { this.releaseEmptyNotificationTray(event); }}>
         <header class="notification-header" data-notification-focus="header" tabindex="-1">
-          <strong class="notification-heading" id="session-notifications-heading">${notificationTrayHeading(inbox)}</strong>
+          <div class="notification-banner-copy">
+            <div class="notification-banner-metadata">
+              <strong class="notification-heading" id="session-notifications-heading">Latest notification</strong>
+              ${latest === undefined ? null : html`
+                <span aria-hidden="true">·</span>
+                <strong class="notification-severity">${latestLabel}</strong>
+                <span aria-hidden="true">·</span>
+                <time datetime=${latest.receivedAt}>${notificationTimestampFormatter.format(new Date(latest.receivedAt))}</time>
+              `}
+              <span class="notification-update-count">${notificationTrayHeading(inbox)}</span>
+            </div>
+            ${latest === undefined ? null : html`<p class="notification-banner-message" dir="auto">${latest.message}</p>`}
+          </div>
           <div class="notification-header-actions">
             <button
               type="button"
@@ -481,7 +509,7 @@ export class ChatView extends LitElement {
             >${renderNotificationDisclosureIcon(collapsed)}</button>
           </div>
         </header>
-        <div class="notification-list" id="session-notification-list" ?hidden=${collapsed}>
+        <div class="notification-list" id="session-notification-list" aria-label="Notification history" ?hidden=${collapsed}>
           ${inbox.discardedCount === 0 ? null : html`
             <p class="notification-overflow">${notificationInboxOverflowLabel(inbox.discardedCount)}</p>
           `}
@@ -907,13 +935,29 @@ export class ChatView extends LitElement {
   }
 
   private renderMessageActions(message: ChatLine, key: string) {
-    if (!this.isCopyableMessage(message)) return null;
+    const copyable = this.isCopyableMessage(message);
+    const entryId = this.forkableAssistantEntryId(message);
+    if (!copyable && entryId === undefined) return null;
     const copied = this.copiedMessageKey === key;
+    const forking = entryId !== undefined && this.forkingMessageEntryId === entryId;
+    const forkDisabled = forking || this.sessionHasActiveWork();
     return html`
       <div class="msg-actions" aria-label="Message actions">
-        <button type="button" class="msg-action" title=${copied ? "Copied" : "Copy message"} aria-label=${`${copied ? "Copied" : "Copy"} ${message.role} message`} @click=${(event: MouseEvent) => { void this.copyMessage(message, key, event); }}>
-          <span aria-hidden="true">${copied ? "✓" : "⧉"}</span>
-        </button>
+        ${copyable ? html`
+          <button type="button" class="msg-action" title=${copied ? "Copied" : "Copy message"} aria-label=${`${copied ? "Copied" : "Copy"} ${message.role} message`} @click=${(event: MouseEvent) => { void this.copyMessage(message, key, event); }}>
+            <span aria-hidden="true">${copied ? "✓" : "⧉"}</span>
+          </button>
+        ` : null}
+        ${entryId === undefined ? null : html`
+          <button
+            type="button"
+            class="msg-action msg-fork-action"
+            title=${forkDisabled ? "Wait for current session activity to finish" : "Fork from this response"}
+            aria-label=${forking ? "Forking from this assistant response" : "Fork from this assistant response"}
+            ?disabled=${forkDisabled}
+            @click=${(event: MouseEvent) => { void this.forkMessage(entryId, event); }}
+          ><span aria-hidden="true">${forking ? "…" : "⑂"}</span></button>
+        `}
       </div>
     `;
   }
@@ -922,6 +966,21 @@ export class ChatView extends LitElement {
     if (event.key !== "Enter" && event.key !== " ") return;
     event.preventDefault();
     this.expandedMetaKey = expanded ? undefined : key;
+  }
+
+  private forkableAssistantEntryId(message: ChatLine): string | undefined {
+    if (message.role !== "assistant" || message.source !== undefined || this.onForkMessage === undefined || !this.isCopyableMessage(message)) return undefined;
+    const entryId = message.meta?.entryId;
+    return entryId === undefined || entryId === "" ? undefined : entryId;
+  }
+
+  private sessionHasActiveWork(): boolean {
+    return this.isSendingPrompt
+      || this.isCompacting
+      || this.pendingMessageCount > 0
+      || this.status?.isStreaming === true
+      || this.status?.isCompacting === true
+      || this.status?.isBashRunning === true;
   }
 
   private isCopyableMessage(message: ChatLine): boolean {
@@ -938,6 +997,21 @@ export class ChatView extends LitElement {
       .join("\n\n");
     this.messageCopyTextCache.set(message, text);
     return text;
+  }
+
+  private async forkMessage(entryId: string, event: MouseEvent): Promise<void> {
+    event.stopPropagation();
+    if (this.onForkMessage === undefined || this.sessionHasActiveWork() || this.forkingMessageEntryId !== undefined) return;
+    this.forkingMessageEntryId = entryId;
+    try {
+      await this.onForkMessage(entryId);
+    } catch {
+      // PiWebApp's SessionController owns the user-visible error state. Keep the
+      // click boundary handled so a rejected API request never becomes an
+      // unhandled browser promise rejection.
+    } finally {
+      if (this.forkingMessageEntryId === entryId) this.forkingMessageEntryId = undefined;
+    }
   }
 
   private async copyMessage(message: ChatLine, key: string, event: MouseEvent): Promise<void> {

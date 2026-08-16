@@ -67,6 +67,8 @@ describe("SessionArchiveStore", () => {
       modified: "2026-01-01T00:01:00.000Z",
       messageCount: 2,
       firstMessage: "hello",
+      parentSessionPath: "/sessions/main.jsonl",
+      parentSessionRelation: "fork",
     });
 
     expect(await exists(sourcePath)).toBe(false);
@@ -74,7 +76,14 @@ describe("SessionArchiveStore", () => {
     expect(record.archivePath).toBeDefined();
     if (record.archivePath === undefined) throw new Error("Expected archive path");
     expect(await readFile(record.archivePath, "utf8")).toBe("session contents\n");
-    await expect(store.list()).resolves.toMatchObject([{ sessionId: "s1", originalPath: sourcePath, archivePath: record.archivePath, messageCount: 2 }]);
+    await expect(store.list()).resolves.toMatchObject([{
+      sessionId: "s1",
+      originalPath: sourcePath,
+      archivePath: record.archivePath,
+      messageCount: 2,
+      parentSessionPath: "/sessions/main.jsonl",
+      parentSessionRelation: "fork",
+    }]);
 
     await store.restore("s1");
 

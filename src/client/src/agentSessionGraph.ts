@@ -5,7 +5,7 @@ import { normalizeSessionPath } from "./sessionPaths";
 const SUBAGENT_SESSION_PREFIX = "subagent-";
 const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
-export type AgentSessionKind = "main" | "subagent" | "branch";
+export type AgentSessionKind = "main" | "main-fork" | "subagent";
 export type AgentRunState = "pending" | "running" | "complete" | "failed" | "paused" | "stopped";
 
 export interface SubagentSessionIdentity {
@@ -80,31 +80,65 @@ export function subagentSessionIdentity(session: Pick<SessionInfo, "name">): Sub
   return { agent, runKey };
 }
 
+export function isMainForkSession(session: SessionInfo): boolean {
+  if (session.parentSessionPath === undefined) return false;
+  if (session.parentSessionRelation === "fork") return true;
+  // Compatibility for fork files created before the durable relation marker was
+  // added. New forks retain parentSessionRelation even after a later rename.
+  return / — Fork \d+$/u.test(session.name ?? "");
+}
+
 export function isAgentChildSession(session: SessionInfo): boolean {
-  return session.parentSessionPath !== undefined || subagentSessionIdentity(session) !== undefined;
+  if (isMainForkSession(session)) return false;
+  if (session.parentSessionRelation === "subagent") return true;
+  if (subagentSessionIdentity(session) !== undefined) return true;
+  // Legacy tracked subsessions predate parentSessionRelation. Unknown parented
+  // sessions remain children so they do not leak into the main-session list.
+  return session.parentSessionPath !== undefined;
 }
 
 export function mainAgentSessions(sessions: readonly SessionInfo[]): SessionInfo[] {
   return sessions.filter((session) => !isAgentChildSession(session));
 }
 
-/** Return the visible root row that owns a selected descendant when known. */
+/** Return the nearest visible main session that owns a selected subagent. */
 export function mainAgentSessionForSelection(
   sessions: readonly SessionInfo[],
   selected: SessionInfo | undefined,
 ): SessionInfo | undefined {
   if (selected === undefined) return undefined;
+  if (!isAgentChildSession(selected)) return selected;
   const byPath = sessionsByPath(sessions);
   let current: SessionInfo | undefined = selected;
   const seen = new Set<string>();
-  while (current !== undefined) {
+  while (current?.parentSessionPath !== undefined) {
     const key = normalizeSessionPath(current.path);
     if (seen.has(key)) break;
     seen.add(key);
-    if (current.parentSessionPath === undefined) return isAgentChildSession(current) ? undefined : current;
     current = byPath.get(normalizeSessionPath(current.parentSessionPath));
+    if (current !== undefined && !isAgentChildSession(current)) return current;
   }
   return undefined;
+}
+
+/** Return the top-level main session for a main/fork/subagent lineage. */
+export function mainAgentLineageRoot(
+  sessions: readonly SessionInfo[],
+  selected: SessionInfo | undefined,
+): SessionInfo | undefined {
+  let current = mainAgentSessionForSelection(sessions, selected);
+  if (current === undefined) return undefined;
+  const byPath = sessionsByPath(sessions);
+  const seen = new Set<string>();
+  while (isMainForkSession(current) && current.parentSessionPath !== undefined) {
+    const key = normalizeSessionPath(current.path);
+    if (seen.has(key)) break;
+    seen.add(key);
+    const parent = byPath.get(normalizeSessionPath(current.parentSessionPath));
+    if (parent === undefined || isAgentChildSession(parent)) break;
+    current = parent;
+  }
+  return current;
 }
 
 export function buildAgentSessionGraph(
@@ -150,7 +184,11 @@ export function buildAgentSessionGraph(
       : recordedParent !== undefined && includedPaths.has(normalizeSessionPath(recordedParent.path))
         ? recordedParent.id
         : root.id;
-    const kind: AgentSessionKind = session.id === root.id ? "main" : identity === undefined ? "branch" : "subagent";
+    const kind: AgentSessionKind = session.id === root.id
+      ? "main"
+      : isMainForkSession(session)
+        ? "main-fork"
+        : "subagent";
     const model = splitModelThinking(matchingEvidence?.model, matchingEvidence?.thinking);
     const agent = matchingEvidence?.agent ?? identity?.agent;
     nodes.push({
@@ -169,6 +207,47 @@ export function buildAgentSessionGraph(
     nodes.unshift({ session: root, kind: "main" });
   }
   return { rootSessionId: root.id, nodes: sortGraphNodes(nodes, root.id) };
+}
+
+/** Number of subagent descendants owned by each main/forked-main node. */
+export function subagentCountsByMain(graph: AgentSessionGraph): ReadonlyMap<string, number> {
+  const byId = new Map(graph.nodes.map((node) => [node.session.id, node]));
+  const counts = new Map<string, number>();
+  for (const node of graph.nodes) {
+    if (node.kind !== "subagent") continue;
+    const ownerId = mainOwnerId(node, byId);
+    if (ownerId !== undefined) counts.set(ownerId, (counts.get(ownerId) ?? 0) + 1);
+  }
+  return counts;
+}
+
+/** Keep the main/fork lineage visible while folding each main's subagents. */
+export function visibleAgentSessionGraph(
+  graph: AgentSessionGraph,
+  expandedMainSessionIds: ReadonlySet<string>,
+): AgentSessionGraph {
+  const byId = new Map(graph.nodes.map((node) => [node.session.id, node]));
+  const nodes = graph.nodes.filter((node) => {
+    if (node.kind !== "subagent") return true;
+    const ownerId = mainOwnerId(node, byId);
+    return ownerId !== undefined && expandedMainSessionIds.has(ownerId);
+  });
+  return { ...graph, nodes };
+}
+
+function mainOwnerId(
+  start: AgentSessionGraphNode,
+  byId: ReadonlyMap<string, AgentSessionGraphNode>,
+): string | undefined {
+  let current: AgentSessionGraphNode | undefined = start;
+  const seen = new Set<string>();
+  while (current !== undefined) {
+    if (current.kind === "main" || current.kind === "main-fork") return current.session.id;
+    if (seen.has(current.session.id)) return undefined;
+    seen.add(current.session.id);
+    current = current.parentSessionId === undefined ? undefined : byId.get(current.parentSessionId);
+  }
+  return undefined;
 }
 
 export function collectAgentRunEvidence(messages: readonly ChatLine[]): AgentRunEvidence[] {

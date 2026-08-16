@@ -76,6 +76,22 @@ describe("session summary scanner parity with the SDK listing", () => {
     expect(rich?.allMessagesText).toBe("");
   });
 
+  it("projects durable fork and tracked-subagent parent relations", async () => {
+    await writeSession("fork.jsonl", [
+      headerLine({ id: "fork", cwd: WORKSPACE, parentSession: "/sessions/main.jsonl" }),
+      JSON.stringify({ type: "custom", id: nextEntryId(), customType: "pi-web.main-fork", data: { parentSessionId: "main", entryId: "assistant-1" } }),
+    ]);
+    await writeSession("subagent.jsonl", [
+      headerLine({ id: "subagent", cwd: WORKSPACE, parentSession: "/sessions/main.jsonl" }),
+      JSON.stringify({ type: "custom", id: nextEntryId(), customType: "pi-web.subsession.spawned", data: { spawnedBySessionId: "main", spawnedSessionId: "subagent" } }),
+    ]);
+
+    const sessions = await coldListing(sessionDir);
+
+    expect(sessions.find((session) => session.id === "fork")?.parentSessionRelation).toBe("fork");
+    expect(sessions.find((session) => session.id === "subagent")?.parentSessionRelation).toBe("subagent");
+  });
+
   it("uses the file mtime as the listing's modified time", async () => {
     const path = await writeSession("2026-01-01T00-00-00-000Z_mtimed.jsonl", [
       headerLine({ id: "mtimed", cwd: WORKSPACE }),

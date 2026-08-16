@@ -6,22 +6,29 @@ import {
   collectAgentRunEvidence,
   isAgentChildSession,
   layoutAgentSessionGraph,
+  mainAgentLineageRoot,
   mainAgentSessionForSelection,
   mainAgentSessions,
+  subagentCountsByMain,
   subagentSessionIdentity,
+  visibleAgentSessionGraph,
 } from "./agentSessionGraph";
 
 describe("agent session classification", () => {
-  it("recognizes pi-subagents names and keeps only main sessions in navigation", () => {
+  it("keeps marked main forks in navigation while filtering subagents", () => {
     const main = session("main");
-    const fork = session("fork", { parentSessionPath: main.path });
-    const subagent = session("worker", { name: "subagent-worker-6370b6c4-1" });
+    const fork = session("fork", { parentSessionPath: main.path, parentSessionRelation: "fork", name: "Main — Fork 1" });
+    const subagent = session("worker", { parentSessionPath: fork.path, name: "subagent-worker-6370b6c4-1" });
+    const legacySubagent = session("legacy", { parentSessionPath: main.path, name: "Legacy tracked child" });
 
     expect(subagentSessionIdentity(subagent)).toEqual({ agent: "worker", runKey: "6370b6c4" });
-    expect(isAgentChildSession(fork)).toBe(true);
+    expect(isAgentChildSession(fork)).toBe(false);
     expect(isAgentChildSession(subagent)).toBe(true);
-    expect(mainAgentSessions([main, fork, subagent])).toEqual([main]);
-    expect(mainAgentSessionForSelection([main, fork, subagent], fork)).toEqual(main);
+    expect(isAgentChildSession(legacySubagent)).toBe(true);
+    expect(mainAgentSessions([main, fork, subagent, legacySubagent])).toEqual([main, fork]);
+    expect(mainAgentSessionForSelection([main, fork, subagent], fork)).toEqual(fork);
+    expect(mainAgentSessionForSelection([main, fork, subagent], subagent)).toEqual(fork);
+    expect(mainAgentLineageRoot([main, fork, subagent], subagent)).toEqual(main);
   });
 
   it("requires the complete generated name and supports hyphenated agents with UUID runs", () => {
@@ -91,6 +98,35 @@ describe("agent session graph", () => {
       evidenceState: "complete",
     });
     expect(graph.nodes.find((node) => node.session.id === "reviewer")).toMatchObject({ parentSessionId: "main" });
+  });
+
+  it("shows the main-fork lineage while folding subagents under their owning main", () => {
+    const main = session("main", { path: "/sessions/main.jsonl" });
+    const fork = session("fork", {
+      path: "/sessions/fork.jsonl",
+      parentSessionPath: main.path,
+      parentSessionRelation: "fork",
+      name: "Main — Fork 1",
+    });
+    const mainWorker = session("main-worker", {
+      path: "/sessions/main-worker.jsonl",
+      parentSessionPath: main.path,
+      parentSessionRelation: "subagent",
+      name: "subagent-worker-aabbccdd-1",
+    });
+    const forkReviewer = session("fork-reviewer", {
+      path: "/sessions/fork-reviewer.jsonl",
+      parentSessionPath: fork.path,
+      parentSessionRelation: "subagent",
+      name: "subagent-reviewer-11223344-1",
+    });
+    const graph = buildAgentSessionGraph([main, fork, mainWorker, forkReviewer], main, []);
+
+    expect(graph.nodes.find((node) => node.session.id === "fork")?.kind).toBe("main-fork");
+    expect(Object.fromEntries(subagentCountsByMain(graph))).toEqual({ main: 1, fork: 1 });
+    expect(visibleAgentSessionGraph(graph, new Set()).nodes.map((node) => node.session.id)).toEqual(["main", "fork"]);
+    expect(visibleAgentSessionGraph(graph, new Set(["main"])).nodes.map((node) => node.session.id)).toEqual(["main", "fork", "main-worker"]);
+    expect(visibleAgentSessionGraph(graph, new Set(["fork"])).nodes.map((node) => node.session.id)).toEqual(["main", "fork", "fork-reviewer"]);
   });
 
   it("lays out descendants below their parent and returns matching edges", () => {

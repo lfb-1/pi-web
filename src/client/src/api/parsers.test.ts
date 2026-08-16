@@ -481,13 +481,15 @@ describe("API parsers", () => {
     expect(() => parseSessionBulkDeleteArchivedResponse({ deleted: true, deletedSessionIds: [1], failures: [], generatedAt: "now" })).toThrow("Expected string array field: deletedSessionIds");
   });
 
-  it("parses session info including optional persistence signals", () => {
+  it("parses session info including persistence and parent-relation signals", () => {
     expect(parseSessionInfo({
       id: "s1",
       path: "/sessions/s1.jsonl",
       cwd: "/repo",
       persisted: false,
       name: "Draft session",
+      parentSessionPath: "/sessions/main.jsonl",
+      parentSessionRelation: "fork",
       created: "2026-01-01T00:00:00.000Z",
       modified: "2026-01-01T00:01:00.000Z",
       messageCount: 0,
@@ -498,12 +500,15 @@ describe("API parsers", () => {
       cwd: "/repo",
       persisted: false,
       name: "Draft session",
+      parentSessionPath: "/sessions/main.jsonl",
+      parentSessionRelation: "fork",
       created: "2026-01-01T00:00:00.000Z",
       modified: "2026-01-01T00:01:00.000Z",
       messageCount: 0,
       firstMessage: "",
     });
     expect(() => parseSessionInfo({ id: "s1", path: "", cwd: "/repo", persisted: "yes", created: "now", modified: "now", messageCount: 0, firstMessage: "" })).toThrow("Expected optional boolean field: persisted");
+    expect(() => parseSessionInfo({ id: "s1", path: "", cwd: "/repo", parentSessionRelation: "branch", created: "now", modified: "now", messageCount: 0, firstMessage: "" })).toThrow("Invalid parentSessionRelation field");
   });
 
   it("validates session status including optional model and nullable context usage", () => {

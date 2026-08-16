@@ -9,9 +9,12 @@ import {
   buildAgentSessionGraph,
   isAgentChildSession,
   layoutAgentSessionGraph,
-  mainAgentSessionForSelection,
+  mainAgentLineageRoot,
+  subagentCountsByMain,
+  visibleAgentSessionGraph,
   type AgentRunState,
   type AgentSessionGraphLayout,
+  type AgentSessionGraphNode,
   type PositionedAgentSessionNode,
 } from "../agentSessionGraph";
 
@@ -39,6 +42,7 @@ export class AgentSessionGraphElement extends LitElement {
   @state() private zoom = 1;
   @state() private panX = 0;
   @state() private panY = 0;
+  @state() private expandedMainSessionIds: ReadonlySet<string> = new Set();
   @query("svg") private canvas?: SVGSVGElement;
 
   private rootSessionPath: string | undefined;
@@ -49,29 +53,40 @@ export class AgentSessionGraphElement extends LitElement {
   protected override willUpdate(changed: PropertyValues<this>): void {
     if (changed.has("sessions") || changed.has("selectedSession")) this.reconcileRootSession();
     const selected = this.selectedSession;
-    if (selected !== undefined && selected.path === this.rootSessionPath && !isAgentChildSession(selected)) {
+    if (selected !== undefined && !isAgentChildSession(selected)) {
       this.messagesByRootPath.set(selected.path, this.messages);
+    }
+    if (changed.has("sessions")) {
+      const sessionIds = new Set(this.sessions.map((session) => session.id));
+      this.expandedMainSessionIds = new Set([...this.expandedMainSessionIds].filter((id) => sessionIds.has(id)));
     }
   }
 
   override render() {
     const root = this.sessions.find((session) => session.path === this.rootSessionPath);
     if (root === undefined) return this.renderEmptyState();
-    const rootMessages = root.id === this.selectedSession?.id
-      ? this.messages
-      : this.messagesByRootPath.get(root.path) ?? [];
+    const lineageMainPaths = new Set(this.sessions
+      .filter((session) => !isAgentChildSession(session) && mainAgentLineageRoot(this.sessions, session)?.id === root.id)
+      .map((session) => session.path));
+    const rootMessages = [...this.messagesByRootPath.entries()]
+      .filter(([sessionPath]) => lineageMainPaths.has(sessionPath))
+      .flatMap(([, messages]) => messages);
     const graph = buildAgentSessionGraph(this.sessions, root, rootMessages);
-    const layout = layoutAgentSessionGraph(graph);
+    const subagentCounts = subagentCountsByMain(graph);
+    const visibleGraph = visibleAgentSessionGraph(graph, this.expandedMainSessionIds);
+    const layout = layoutAgentSessionGraph(visibleGraph);
     this.layout = layout;
-    const activeCount = layout.nodes.filter((node) => this.nodeState(node) === "running").length;
-    const childCount = Math.max(0, layout.nodes.length - 1);
+    const activeCount = graph.nodes.filter((node) => this.nodeState(node) === "running").length;
+    const subagentCount = graph.nodes.filter((node) => node.kind === "subagent").length;
+    const mainCount = graph.nodes.length - subagentCount;
+    const hiddenCount = graph.nodes.length - visibleGraph.nodes.length;
     const viewBox = this.viewBox(layout);
     return html`
       <section class="graph-shell" aria-label="Agent session graph">
         <header>
           <div class="graph-title">
             <strong>Agents</strong>
-            <span>${String(childCount)} ${childCount === 1 ? "child" : "children"}${activeCount === 0 ? "" : ` · ${String(activeCount)} active`}</span>
+            <span>${String(mainCount)} main · ${String(subagentCount)} subagent${subagentCount === 1 ? "" : "s"}${hiddenCount === 0 ? "" : ` · ${String(hiddenCount)} folded`}${activeCount === 0 ? "" : ` · ${String(activeCount)} active`}</span>
           </div>
           <div class="zoom-controls" aria-label="Agent graph zoom controls">
             <button type="button" title="Zoom out" aria-label="Zoom out agent graph" @click=${() => { this.changeZoom(-ZOOM_STEP); }}>−</button>
@@ -83,7 +98,7 @@ export class AgentSessionGraphElement extends LitElement {
           <svg
             viewBox=${viewBox}
             role="group"
-            aria-label=${`Main agent and ${String(childCount)} child agent sessions`}
+            aria-label=${`${String(mainCount)} main agent sessions and ${String(subagentCount)} subagent sessions`}
             @wheel=${(event: WheelEvent) => { this.onWheel(event); }}
             @pointerdown=${(event: PointerEvent) => { this.onPointerDown(event); }}
             @pointermove=${(event: PointerEvent) => { this.onPointerMove(event); }}
@@ -96,9 +111,9 @@ export class AgentSessionGraphElement extends LitElement {
               </marker>
             </defs>
             <g class="edges">${layout.edges.map((edge) => this.renderEdge(layout, edge.parentSessionId, edge.childSessionId))}</g>
-            <g class="nodes">${layout.nodes.map((node) => this.renderNode(node))}</g>
+            <g class="nodes">${layout.nodes.map((node) => this.renderNode(node, subagentCounts.get(node.session.id) ?? 0))}</g>
           </svg>
-          ${layout.nodes.length === 1 ? html`<p class="empty-hint">Subagents will appear here when this session spawns them.</p>` : null}
+          ${graph.nodes.length === 1 ? html`<p class="empty-hint">Subagents and main-session forks will appear here.</p>` : null}
         </div>
       </section>
     `;
@@ -128,14 +143,20 @@ export class AgentSessionGraphElement extends LitElement {
     return svg`<path d=${`M ${String(startX)} ${String(startY)} C ${String(startX)} ${String(middleY)}, ${String(endX)} ${String(middleY)}, ${String(endX)} ${String(endY)}`} marker-end="url(#agent-arrow)"></path>`;
   }
 
-  private renderNode(node: PositionedAgentSessionNode): TemplateResult {
+  private renderNode(node: PositionedAgentSessionNode, subagentCount: number): TemplateResult {
     const state = this.nodeState(node);
     const selected = node.session.id === this.selectedSession?.id;
-    const role = node.kind === "main" ? "main" : node.agent ?? (node.kind === "branch" ? "branch" : "subagent");
+    const isMain = node.kind === "main" || node.kind === "main-fork";
+    const expanded = isMain && this.expandedMainSessionIds.has(node.session.id);
+    const role = node.kind === "main" ? "main" : node.kind === "main-fork" ? "main fork" : node.agent ?? "subagent";
     const model = node.model === undefined ? undefined : shortModelName(node.model);
     const modelLine = [model, node.thinking].filter((value): value is string => value !== undefined && value !== "").join(" · ");
+    const foldLine = isMain && subagentCount > 0
+      ? `${String(subagentCount)} subagent${subagentCount === 1 ? "" : "s"} · ${expanded ? "expanded" : "folded"}`
+      : "";
+    const metaLine = modelLine === "" ? foldLine === "" ? state : foldLine : `${modelLine} · ${state}`;
     const title = sessionLabel(node.session);
-    const aria = [role, title, modelLine, state].filter((value) => value !== "").join(", ");
+    const aria = [role, title, modelLine, state, foldLine].filter((value) => value !== "").join(", ");
     return svg`
       <g
         class=${`agent-node ${node.kind} ${state}${selected ? " selected" : ""}`}
@@ -144,20 +165,21 @@ export class AgentSessionGraphElement extends LitElement {
         tabindex="0"
         aria-label=${aria}
         aria-current=${selected ? "true" : "false"}
+        aria-expanded=${isMain && subagentCount > 0 ? String(expanded) : undefined}
         @pointerdown=${(event: PointerEvent) => { event.stopPropagation(); }}
-        @click=${(event: MouseEvent) => { event.stopPropagation(); this.selectSession(node.session); }}
-        @keydown=${(event: KeyboardEvent) => { this.onNodeKeydown(event, node.session); }}
+        @click=${(event: MouseEvent) => { event.stopPropagation(); this.activateNode(node, subagentCount); }}
+        @keydown=${(event: KeyboardEvent) => { this.onNodeKeydown(event, node, subagentCount); }}
       >
         <rect width=${String(AGENT_GRAPH_NODE_WIDTH)} height=${String(AGENT_GRAPH_NODE_HEIGHT)} rx="10" ry="10"></rect>
         <circle class="status-dot" cx="13" cy="14" r="4"></circle>
         <text class="role" x="23" y="18">${truncate(role, 20)}</text>
         <text class="title" x="12" y="39">${truncate(title, 25)}</text>
-        <text class="meta" x="12" y="57">${truncate(modelLine === "" ? state : `${modelLine} · ${state}`, 30)}</text>
+        <text class="meta" x="12" y="57">${truncate(metaLine, 30)}</text>
       </g>
     `;
   }
 
-  private nodeState(node: PositionedAgentSessionNode): AgentRunState | "idle" {
+  private nodeState(node: AgentSessionGraphNode): AgentRunState | "idle" {
     if (isSessionActive(this.statuses[node.session.id], this.activities[node.session.id])) return "running";
     return node.evidenceState ?? "idle";
   }
@@ -168,7 +190,7 @@ export class AgentSessionGraphElement extends LitElement {
       this.rootSessionPath = undefined;
       return;
     }
-    const linkedRoot = mainAgentSessionForSelection(this.sessions, selected);
+    const linkedRoot = mainAgentLineageRoot(this.sessions, selected);
     if (linkedRoot !== undefined) {
       if (this.rootSessionPath !== linkedRoot.path) this.resetView();
       this.rootSessionPath = linkedRoot.path;
@@ -235,10 +257,20 @@ export class AgentSessionGraphElement extends LitElement {
     this.drag = undefined;
   }
 
-  private onNodeKeydown(event: KeyboardEvent, session: SessionInfo): void {
+  private onNodeKeydown(event: KeyboardEvent, node: PositionedAgentSessionNode, subagentCount: number): void {
     if (event.key !== "Enter" && event.key !== " ") return;
     event.preventDefault();
-    this.selectSession(session);
+    this.activateNode(node, subagentCount);
+  }
+
+  private activateNode(node: PositionedAgentSessionNode, subagentCount: number): void {
+    if ((node.kind === "main" || node.kind === "main-fork") && subagentCount > 0) {
+      const expanded = new Set(this.expandedMainSessionIds);
+      if (expanded.has(node.session.id)) expanded.delete(node.session.id);
+      else expanded.add(node.session.id);
+      this.expandedMainSessionIds = expanded;
+    }
+    this.selectSession(node.session);
   }
 
   private selectSession(session: SessionInfo): void {
@@ -266,7 +298,8 @@ export class AgentSessionGraphElement extends LitElement {
     marker path { fill: var(--pi-border); }
     .agent-node { cursor: pointer; outline: none; }
     .agent-node rect { fill: var(--pi-surface); stroke: var(--pi-border); stroke-width: 1.5; }
-    .agent-node.main rect { fill: color-mix(in srgb, var(--pi-accent) 9%, var(--pi-surface)); stroke: var(--pi-accent-border); }
+    .agent-node.main rect, .agent-node.main-fork rect { fill: color-mix(in srgb, var(--pi-accent) 9%, var(--pi-surface)); stroke: var(--pi-accent-border); }
+    .agent-node.main-fork rect { stroke-dasharray: 5 3; }
     .agent-node.running rect { stroke: var(--pi-warning-border); }
     .agent-node.failed rect { fill: color-mix(in srgb, var(--pi-danger) 8%, var(--pi-surface)); stroke: var(--pi-danger); }
     .agent-node.complete rect { stroke: var(--pi-success-border); }

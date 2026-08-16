@@ -528,6 +528,8 @@ export interface SessionNotificationSummaryEvent {
   summary: SessionNotificationSummary;
 }
 
+export type SessionParentRelation = "fork" | "subagent";
+
 export interface SessionInfo extends SessionRef {
   path: string;
   /** True when the server has verified a backing session file exists; false when known transient. */
@@ -538,6 +540,8 @@ export interface SessionInfo extends SessionRef {
   messageCount: number;
   firstMessage: string;
   parentSessionPath?: string;
+  /** Durable meaning of parentSessionPath when Pi Web can verify it. */
+  parentSessionRelation?: SessionParentRelation;
   archived?: boolean;
   archivedAt?: string;
 }
@@ -1171,8 +1175,11 @@ export type SessionTreeNavigateResult =
 
 export interface SessionTreeForkRequest {
   entryId: string;
-  /** Leaf shown when the navigator opened; null is valid for an empty/root position. */
-  expectedLeafId: string | null;
+  /**
+   * Leaf shown when the tree navigator opened. Direct response actions omit it:
+   * the selected response entry itself is the explicit fork point.
+   */
+  expectedLeafId?: string | null;
 }
 
 /**

@@ -19,7 +19,7 @@ function activeSession(overrides: Partial<TestCommandSession> = {}): CommandActi
     promptTemplates: [{ name: "template" }],
     extensionRunner: { getRegisteredCommands: () => [{ invocationName: "ext" }] },
     resourceLoader: { getSkills: () => ({ skills: [{ name: "skill-a" }] }) },
-    sessionManager: { getLeafId: () => "leaf-1" },
+    sessionManager: { getLeafId: () => "leaf-1", appendCustomEntry: vi.fn() },
     setSessionName: vi.fn((name: string) => { session.sessionName = name; }),
     compact: vi.fn(async () => {
       await Promise.resolve();
@@ -267,6 +267,37 @@ describe("SessionCommandService", () => {
     expect(cloned.setSessionName).toHaveBeenCalledWith("Build auth — Copy 2");
   });
 
+  it("rejects clone before mutation when durable lineage recording is unavailable", async () => {
+    const active = activeSession({ sessionManager: { getLeafId: () => "leaf-1" } });
+    const service = new SessionCommandService(() => getActive(active), vi.fn(), eventPublisher());
+
+    await expect(service.run("s1", "/clone")).resolves.toEqual({
+      type: "unsupported",
+      message: "Cannot clone: this Pi runtime cannot durably record main-session lineage.",
+    });
+    expect(active.runtime.fork).not.toHaveBeenCalled();
+  });
+
+  it("does not report clone success when the lineage marker write fails", async () => {
+    const active = activeSession({ sessionName: "Build auth" });
+    const copied = activeSession({
+      sessionId: "copy",
+      sessionManager: {
+        getLeafId: () => "leaf-1",
+        getHeader: () => ({ parentSession: "/tmp/s1.jsonl" }),
+        appendCustomEntry: () => { throw new Error("copy marker write failed"); },
+      },
+    }).runtime.session;
+    vi.mocked(active.runtime.fork).mockImplementationOnce(() => {
+      active.runtime.session = copied;
+      return Promise.resolve({ cancelled: false });
+    });
+    const service = new SessionCommandService(() => getActive(active), vi.fn(), eventPublisher());
+
+    await expect(service.run("s1", "/clone")).rejects.toThrow("copy marker write failed");
+    expect(copied.setSessionName).toHaveBeenCalled();
+  });
+
   it("does not start a clone if tree navigation takes the gate during async name lookup", async () => {
     const active = activeSession();
     const names = deferred<readonly string[]>();
@@ -290,7 +321,7 @@ describe("SessionCommandService", () => {
 
   it("clones the leaf that is current after asynchronous name lookup", async () => {
     let leafId = "leaf-before-navigation";
-    const active = activeSession({ sessionManager: { getLeafId: () => leafId } });
+    const active = activeSession({ sessionManager: { getLeafId: () => leafId, appendCustomEntry: vi.fn() } });
     const names = deferred<readonly string[]>();
     const listSessionNames = vi.fn(() => names.promise);
     const service = new SessionCommandService(() => getActive(active), vi.fn(), eventPublisher(), {}, { listSessionNames });
@@ -356,6 +387,37 @@ describe("SessionCommandService", () => {
     expect(active.runtime.fork).toHaveBeenCalledWith("entry-9", { position: "at" });
   });
 
+  it("rejects fork before mutation when durable lineage recording is unavailable", async () => {
+    const active = activeSession({ sessionManager: { getLeafId: () => "leaf-1" } });
+    const service = new SessionCommandService(() => getActive(active), vi.fn(), eventPublisher());
+
+    await expect(service.forkEntry("s1", "m1")).resolves.toEqual({
+      type: "unsupported",
+      message: "Cannot fork: this Pi runtime cannot durably record main-session lineage.",
+    });
+    expect(active.runtime.fork).not.toHaveBeenCalled();
+  });
+
+  it("does not report success when the fork lineage marker write fails", async () => {
+    const active = activeSession({ sessionName: "Build auth" });
+    const forked = activeSession({
+      sessionId: "forked",
+      sessionManager: {
+        getLeafId: () => "entry-9",
+        getHeader: () => ({ parentSession: "/tmp/s1.jsonl" }),
+        appendCustomEntry: () => { throw new Error("marker write failed"); },
+      },
+    }).runtime.session;
+    vi.mocked(active.runtime.fork).mockImplementationOnce(() => {
+      active.runtime.session = forked;
+      return Promise.resolve({ cancelled: false });
+    });
+    const service = new SessionCommandService(() => getActive(active), vi.fn(), eventPublisher());
+
+    await expect(service.forkEntry("s1", "entry-9")).rejects.toThrow("marker write failed");
+    expect(forked.setSessionName).toHaveBeenCalled();
+  });
+
   it("forkEntry reports cancellation without naming or returning session metadata", async () => {
     const active = activeSession();
     vi.mocked(active.runtime.fork).mockResolvedValueOnce({ cancelled: true });
@@ -386,9 +448,18 @@ describe("SessionCommandService", () => {
     expect(navigating.runtime.fork).not.toHaveBeenCalled();
   });
 
-  it("forkEntry names the forked session on success", async () => {
+  it("forkEntry names and durably marks the forked main session", async () => {
     const active = activeSession({ sessionName: "Build auth" });
-    const forked = activeSession({ sessionId: "forked", sessionName: undefined }).runtime.session;
+    const appendCustomEntry = vi.fn();
+    const forked = activeSession({
+      sessionId: "forked",
+      sessionName: undefined,
+      sessionManager: {
+        getLeafId: () => "entry-9",
+        getHeader: () => ({ parentSession: "/tmp/s1.jsonl" }),
+        appendCustomEntry,
+      },
+    }).runtime.session;
     vi.mocked(active.runtime.fork).mockImplementationOnce(() => {
       active.runtime.session = forked;
       return Promise.resolve({ cancelled: false, selectedText: "some text" });
@@ -401,7 +472,17 @@ describe("SessionCommandService", () => {
     await expect(service.forkEntry("s1", "entry-9")).resolves.toMatchObject({
       type: "done",
       message: "Session forked",
-      session: { id: "forked", name: "Build auth — Fork 1" },
+      session: {
+        id: "forked",
+        name: "Build auth — Fork 1",
+        parentSessionPath: "/tmp/s1.jsonl",
+        parentSessionRelation: "fork",
+      },
+    });
+    expect(appendCustomEntry).toHaveBeenCalledWith("pi-web.main-fork", {
+      parentSessionId: "s1",
+      parentSessionPath: "/tmp/s1.jsonl",
+      entryId: "entry-9",
     });
     expect(forked.setSessionName).toHaveBeenCalledWith("Build auth — Fork 1");
     expect(events.publish).toHaveBeenCalledWith("forked", { type: "session.name", sessionId: "forked", name: "Build auth — Fork 1" });

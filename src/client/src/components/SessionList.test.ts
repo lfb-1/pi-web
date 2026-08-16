@@ -1,5 +1,6 @@
 import type { TemplateResult } from "lit";
 import { describe, expect, it, vi } from "vitest";
+import { mainAgentSessions } from "../agentSessionGraph";
 import type { SessionInfo, SessionStatus } from "../api";
 import { markCachedNewSessionInfo } from "../cachedNewSessions";
 import { isArchivableSessionInfo, isTransientNewSessionInfo } from "../sessionPersistence";
@@ -153,6 +154,17 @@ describe("mark-as-read actions", () => {
 });
 
 describe("sessionRowsForCurrentTree", () => {
+  it("nests forked main sessions while excluding their subagents", () => {
+    const main = session("main");
+    const fork = session("fork", { parentSessionPath: main.path, parentSessionRelation: "fork", name: "Main — Fork 1" });
+    const subagent = session("worker", { parentSessionPath: fork.path, parentSessionRelation: "subagent", name: "subagent-worker-11223344-1" });
+
+    expect(rowSummaries(sessionRowsForCurrentTree(mainAgentSessions([main, fork, subagent])))).toEqual([
+      { id: "main", depth: 0, hasMissingParent: false },
+      { id: "fork", depth: 1, hasMissingParent: false },
+    ]);
+  });
+
   it("keeps archived ancestors visible while they have unarchived descendants", () => {
     const parent = { ...session("parent"), archived: true, archivedAt: "2026-06-09T00:00:00.000Z" };
     const child = session("child", { parentSessionPath: parent.path });

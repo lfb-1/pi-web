@@ -3,6 +3,7 @@ import { constants } from "node:fs";
 import { access, copyFile, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { piWebDataDir } from "../../config.js";
+import type { SessionParentRelation } from "../../shared/apiTypes.js";
 import { canonicalizeStoredCwd } from "../workingDirectory.js";
 
 export interface ArchiveSessionInput {
@@ -15,6 +16,7 @@ export interface ArchiveSessionInput {
   firstMessage: string;
   name?: string;
   parentSessionPath?: string;
+  parentSessionRelation?: SessionParentRelation;
 }
 
 export interface ArchivedSessionRecord {
@@ -29,6 +31,7 @@ export interface ArchivedSessionRecord {
   firstMessage?: string;
   name?: string;
   parentSessionPath?: string;
+  parentSessionRelation?: SessionParentRelation;
 }
 
 export interface SessionArchiveFile {
@@ -189,6 +192,7 @@ function archiveRecordFromInput(session: ArchiveSessionInput, archive: { archive
     firstMessage: session.firstMessage,
     ...(session.name === undefined ? {} : { name: session.name }),
     ...(session.parentSessionPath === undefined ? {} : { parentSessionPath: session.parentSessionPath }),
+    ...(session.parentSessionRelation === undefined ? {} : { parentSessionRelation: session.parentSessionRelation }),
   };
 }
 
@@ -251,6 +255,7 @@ function parseArchivedSessionRecord(value: unknown): ArchivedSessionRecord {
   const firstMessage = optionalString(value, "firstMessage");
   const name = optionalString(value, "name");
   const parentSessionPath = optionalString(value, "parentSessionPath");
+  const parentSessionRelation = optionalParentSessionRelation(value["parentSessionRelation"]);
   return {
     sessionId,
     cwd: canonicalCwd,
@@ -263,7 +268,14 @@ function parseArchivedSessionRecord(value: unknown): ArchivedSessionRecord {
     ...(firstMessage === undefined ? {} : { firstMessage }),
     ...(name === undefined ? {} : { name }),
     ...(parentSessionPath === undefined ? {} : { parentSessionPath }),
+    ...(parentSessionRelation === undefined ? {} : { parentSessionRelation }),
   };
+}
+
+function optionalParentSessionRelation(value: unknown): SessionParentRelation | undefined {
+  if (value === undefined) return undefined;
+  if (value === "fork" || value === "subagent") return value;
+  throw new Error("Invalid archived session parentSessionRelation");
 }
 
 function optionalString(record: Record<string, unknown>, key: string): string | undefined {

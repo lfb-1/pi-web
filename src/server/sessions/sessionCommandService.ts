@@ -15,7 +15,11 @@ export interface CommandSession {
   promptTemplates: readonly { name: string }[];
   extensionRunner: { getRegisteredCommands(): readonly { invocationName: string }[] };
   resourceLoader: { getSkills(): { skills: readonly { name: string }[] } };
-  sessionManager: { getLeafId(): string | null; getHeader?: () => { parentSession?: string } | null | undefined };
+  sessionManager: {
+    getLeafId(): string | null;
+    getHeader?: () => { parentSession?: string } | null | undefined;
+    appendCustomEntry?: (customType: string, data: unknown) => unknown;
+  };
   setSessionName: (name: string) => void;
   compact: (instructions?: string) => Promise<{ summary: string; tokensBefore: number }>;
   getSessionStats: () => {
@@ -67,6 +71,8 @@ export interface ForkEntryOptions {
 }
 
 type RelatedSessionKind = "fork" | "copy";
+
+const MAIN_FORK_CUSTOM_TYPE = "pi-web.main-fork";
 
 interface PendingCommandSelect {
   sessionId: string;
@@ -133,6 +139,7 @@ export class SessionCommandService<TSession extends CommandSession = CommandSess
     const active = await this.getActive(sessionId);
     if (this.lifecycle.isTreeNavigationActive?.(active.runtime.session) === true) return treeNavigationActiveUnsupported();
     if (this.hasActiveWork(active.runtime.session)) return forkActiveUnsupported("fork");
+    if (active.runtime.session.sessionManager.appendCustomEntry === undefined) return forkLineageUnavailableUnsupported("fork");
     const relatedName = await this.nextRelatedSessionName(active, "fork");
     if (this.lifecycle.isTreeNavigationActive?.(active.runtime.session) === true) return treeNavigationActiveUnsupported();
     if (this.hasActiveWork(active.runtime.session)) return forkActiveUnsupported("fork");
@@ -141,15 +148,25 @@ export class SessionCommandService<TSession extends CommandSession = CommandSess
       if (options !== undefined && session.sessionManager.getLeafId() !== options.expectedLeafId) {
         throw new Error("The session changed since /tree was opened. Reopen /tree and try again.");
       }
+      const parentSessionId = session.sessionId;
+      const parentSessionPath = session.sessionFile;
       // Resolve the entry kind from the session state protected by the same
       // replacement boundary as the fork, not Pi's text-only /fork selector.
       const position = this.forkPosition(session, entryId);
       const forkResult = await active.runtime.fork(entryId, { position });
-      if (!forkResult.cancelled) this.tryNameRelatedSession(active.runtime.session, relatedName);
+      if (!forkResult.cancelled) {
+        this.tryNameRelatedSession(active.runtime.session, relatedName);
+        this.markMainFork(active.runtime.session, { parentSessionId, parentSessionPath, entryId });
+      }
       return forkResult;
     });
     if (result.cancelled) return { type: "done", message: "Fork cancelled" };
-    return { type: "done", message: "Session forked", session: clientSessionFromRuntime(active.runtime), ...promptDraft(result.selectedText) };
+    return {
+      type: "done",
+      message: "Session forked",
+      session: { ...clientSessionFromRuntime(active.runtime), parentSessionRelation: "fork" },
+      ...promptDraft(result.selectedText),
+    };
   }
 
   private nameSession(active: CommandActiveSession<TSession>, name: string): ClientCommandResult {
@@ -194,6 +211,7 @@ export class SessionCommandService<TSession extends CommandSession = CommandSess
 
   private async clone(active: CommandActiveSession<TSession>): Promise<ClientCommandResult> {
     if (this.hasActiveWork(active.runtime.session)) return forkActiveUnsupported("clone");
+    if (active.runtime.session.sessionManager.appendCustomEntry === undefined) return forkLineageUnavailableUnsupported("clone");
     const initialLeafId = active.runtime.session.sessionManager.getLeafId();
     if (initialLeafId === null || initialLeafId === "") return { type: "unsupported", message: "Cannot clone: no current session entry" };
     const relatedName = await this.nextRelatedSessionName(active, "copy");
@@ -204,12 +222,17 @@ export class SessionCommandService<TSession extends CommandSession = CommandSess
     const leafId = active.runtime.session.sessionManager.getLeafId();
     if (leafId === null || leafId === "") return { type: "unsupported", message: "Cannot clone: no current session entry" };
     const result = await this.runSessionReplacement(active.runtime, async () => {
+      const parentSessionId = active.runtime.session.sessionId;
+      const parentSessionPath = active.runtime.session.sessionFile;
       const cloneResult = await active.runtime.fork(leafId, { position: "at" });
-      if (!cloneResult.cancelled) this.tryNameRelatedSession(active.runtime.session, relatedName);
+      if (!cloneResult.cancelled) {
+        this.tryNameRelatedSession(active.runtime.session, relatedName);
+        this.markMainFork(active.runtime.session, { parentSessionId, parentSessionPath, entryId: leafId });
+      }
       return cloneResult;
     });
     if (result.cancelled) return { type: "done", message: "Clone cancelled" };
-    return { type: "done", message: "Session cloned", session: clientSessionFromRuntime(active.runtime) };
+    return { type: "done", message: "Session cloned", session: { ...clientSessionFromRuntime(active.runtime), parentSessionRelation: "fork" } };
   }
 
   private fork(active: CommandActiveSession<TSession>): ClientCommandResult {
@@ -256,6 +279,18 @@ export class SessionCommandService<TSession extends CommandSession = CommandSess
   private runSessionReplacement<T>(runtime: CommandRuntime<TSession>, operation: () => Promise<T>): Promise<T> {
     const runReplacement = this.lifecycle.runSessionReplacement;
     return runReplacement === undefined ? operation() : runReplacement(runtime.session, operation);
+  }
+
+  private markMainFork(
+    session: TSession,
+    source: { parentSessionId: string; parentSessionPath: string | undefined; entryId: string },
+  ): void {
+    if (session.sessionManager.appendCustomEntry === undefined) throw new Error("Fork lineage recording is unavailable in this Pi runtime");
+    session.sessionManager.appendCustomEntry(MAIN_FORK_CUSTOM_TYPE, {
+      parentSessionId: source.parentSessionId,
+      ...(source.parentSessionPath === undefined ? {} : { parentSessionPath: source.parentSessionPath }),
+      entryId: source.entryId,
+    });
   }
 
   private async nextRelatedSessionName(active: CommandActiveSession<TSession>, kind: RelatedSessionKind): Promise<string> {
@@ -365,6 +400,10 @@ function sessionHasActiveWork(session: CommandSession): boolean {
 
 function forkActiveUnsupported(command: "fork" | "clone"): ClientCommandResult {
   return { type: "unsupported", message: `Cannot ${command} while the session is active. Stop current activity before ${command === "fork" ? "forking" : "cloning"}.` };
+}
+
+function forkLineageUnavailableUnsupported(command: "fork" | "clone"): ClientCommandResult {
+  return { type: "unsupported", message: `Cannot ${command}: this Pi runtime cannot durably record main-session lineage.` };
 }
 
 function treeUnavailableUnsupported(): ClientCommandResult {

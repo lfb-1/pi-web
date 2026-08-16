@@ -559,6 +559,40 @@ describe("SessionController session tree navigation", () => {
 });
 
 describe("SessionController session tree fork", () => {
+  it("forks directly from an assistant response without requiring the tree dialog", async () => {
+    let state: AppState = { ...initialAppState(), selectedWorkspace: workspace, selectedSession: oldSession, sessions: [oldSession] };
+    const forkTree = vi.fn<typeof defaultApi.forkTree>(() => Promise.resolve({
+      cancelled: false,
+      session: { ...replacementSession, parentSessionPath: oldSession.path, parentSessionRelation: "fork" },
+    }));
+    const api: typeof defaultApi = {
+      ...defaultApi,
+      forkTree,
+      messages: () => Promise.resolve(page("forked response branch", 1)),
+      status: () => Promise.resolve(status(replacementSession.id)),
+      streamSnapshot: () => Promise.resolve({ seq: 0, partial: null }),
+      thinkingLevels: () => Promise.resolve({ levels: [] }),
+    };
+    const controller = new SessionController(
+      () => state,
+      (patch) => { state = { ...state, ...patch }; },
+      () => undefined,
+      undefined,
+      { api, socket: new FakeSocket() },
+    );
+
+    await controller.forkFromMessage("assistant-9");
+    await vi.waitFor(() => { expect(state.selectedSession?.id).toBe(replacementSession.id); });
+
+    expect(forkTree).toHaveBeenCalledWith(oldSession, { entryId: "assistant-9" }, "local");
+    expect(state.sessions[0]).toMatchObject({
+      id: replacementSession.id,
+      parentSessionPath: oldSession.path,
+      parentSessionRelation: "fork",
+    });
+    expect(state.treeDialog).toBeUndefined();
+  });
+
   it("forks into a new session, stores the draft under the forked key, and switches to it", async () => {
     const oldCacheKey = machineSessionKey("local", oldSession.id);
     const forkedCacheKey = machineSessionKey("local", replacementSession.id);

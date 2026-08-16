@@ -532,8 +532,8 @@ function sessionTreeNavigateRequestFromBody(body: Record<string, unknown>): Sess
 
 function sessionTreeForkRequestFromBody(body: Record<string, unknown>): SessionTreeForkRequest {
   const entryId = requireNonEmptyString(body, "entryId");
-  const expectedLeafId = requireNullableString(body, "expectedLeafId");
-  return { entryId, expectedLeafId };
+  if (!Object.hasOwn(body, "expectedLeafId")) return { entryId };
+  return { entryId, expectedLeafId: requireNullableString(body, "expectedLeafId") };
 }
 
 function sessionTreeSummaryChoice(value: unknown): SessionTreeSummaryChoice {

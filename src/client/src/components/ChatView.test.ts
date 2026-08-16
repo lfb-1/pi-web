@@ -19,7 +19,7 @@ import {
   chatQueuedSectionShowsClearAction,
   chatSessionWarningRows,
 } from "./ChatView";
-import { templateEventHandlerAfterMarker, templateEventHandlerNearMarker } from "../templateInspection.testSupport";
+import { templateEventHandlerAfterMarker, templateEventHandlerNearMarker, templateText } from "../templateInspection.testSupport";
 
 describe("chatQueuedMessageSections", () => {
   it("labels client-side pending-start sends separately from server queued messages", () => {
@@ -166,6 +166,33 @@ describe("ChatView session-warning dismiss wiring", () => {
 });
 
 describe("ChatView notification tray wiring", () => {
+  it("keeps monitoring-style updates in one persistent collapsed banner", () => {
+    const view = withNotificationInbox(new ChatView());
+    invokeWillUpdate(view, new Map<string, unknown>([
+      ["sessionId", ""],
+      ["notificationInbox", undefined],
+    ]));
+    const inbox = requireNotificationInbox(view);
+    const collapsedTargetKeys: unknown = Reflect.get(view, "collapsedNotificationTargetKeys");
+    if (!(collapsedTargetKeys instanceof Set)) throw new Error("Expected collapsed notification target keys");
+    expect(notificationTrayIsCollapsed(collapsedTargetKeys, inbox)).toBe(true);
+    expect(templateText(renderNotificationTray(view))).toContain("plain <strong>text</strong>");
+
+    const previous = inbox.notifications[0];
+    if (previous === undefined) throw new Error("expected a retained notification");
+    view.notificationInbox = {
+      ...inbox,
+      notifications: [{ ...previous, id: "daemon-a:2", order: 2, message: "Slurm 72677: RUNNING · next check in 5m" }, previous],
+      retainedCount: 2,
+    };
+    invokeWillUpdate(view, new Map<string, unknown>([["notificationInbox", inbox]]));
+
+    const updated = templateText(renderNotificationTray(view));
+    expect(updated).toContain("Slurm 72677: RUNNING");
+    expect(updated).toContain("Notifications (2)");
+    expect(notificationTrayIsCollapsed(collapsedTargetKeys, requireNotificationInbox(view))).toBe(true);
+  });
+
   // Escape hatch: these cases verify only the tray buttons' Lit callback wiring.
   // Content and identity decisions use pure seams; Vitest has no shadow-DOM
   // harness, so stable semantic class markers keep handler extraction narrow.
@@ -240,6 +267,38 @@ describe("ChatView notification tray wiring", () => {
     expect(notificationTrayIsCollapsed(collapsedTargetKeys, { ...newArrival, cwd: "/other" })).toBe(false);
     expect(notificationTrayIsCollapsed(collapsedTargetKeys, { ...newArrival, machineId: "remote" })).toBe(false);
     expect(collapsedTargetKeys.has(notificationTargetKey(inbox))).toBe(true);
+  });
+});
+
+describe("ChatView assistant response actions", () => {
+  it("forks from the durable assistant entry and disables the action during activity", async () => {
+    const message: ChatLine = {
+      role: "assistant",
+      parts: [{ type: "text", text: "Answer" }],
+      meta: { entryId: "assistant-9" },
+    };
+    const view = new ChatView();
+    const onForkMessage = vi.fn(() => Promise.resolve());
+    view.onForkMessage = onForkMessage;
+
+    const actions = renderMessageActions(view, message, "message-1");
+    if (actions === null) throw new Error("expected assistant response actions");
+    templateEventHandlerAfterMarker(actions, "msg-fork-action")(new Event("click"));
+    await vi.waitFor(() => { expect(onForkMessage).toHaveBeenCalledExactlyOnceWith("assistant-9"); });
+
+    view.isSendingPrompt = true;
+    expect(templateText(renderMessageActions(view, message, "message-1"))).toContain("Wait for current session activity to finish");
+    const messageWithoutEntry: ChatLine = { role: "assistant", parts: message.parts };
+    expect(templateText(renderMessageActions(view, messageWithoutEntry, "message-2"))).not.toContain("msg-fork-action");
+  });
+
+  it("handles rejected fork callbacks at the click boundary", async () => {
+    const view = new ChatView();
+    view.onForkMessage = () => Promise.reject(new Error("fork failed"));
+    const method: unknown = Reflect.get(view, "forkMessage");
+    if (typeof method !== "function") throw new Error("ChatView.forkMessage is unavailable");
+
+    await expect(Reflect.apply(method, view, ["assistant-9", new Event("click")])).resolves.toBeUndefined();
   });
 });
 
@@ -454,6 +513,25 @@ function requireSection(section: ReturnType<typeof chatQueuedMessageSections>[nu
 function withStatus(view: ChatView, status: SessionStatus): ChatView {
   view.status = status;
   return view;
+}
+
+function renderMessageActions(view: ChatView, message: ChatLine, key: string): TemplateResult | null {
+  const method: unknown = Reflect.get(view, "renderMessageActions");
+  if (typeof method !== "function") throw new Error("ChatView.renderMessageActions is unavailable");
+  const rendered: unknown = Reflect.apply(method, view, [message, key]);
+  if (rendered === null) return null;
+  if (!isTemplateResultValue(rendered)) throw new Error("ChatView.renderMessageActions returned an unexpected value");
+  return rendered;
+}
+
+function isTemplateResultValue(value: unknown): value is TemplateResult {
+  return typeof value === "object" && value !== null && "strings" in value && "values" in value;
+}
+
+function invokeWillUpdate(view: ChatView, changed: Map<string, unknown>): void {
+  const method: unknown = Reflect.get(view, "willUpdate");
+  if (typeof method !== "function") throw new Error("ChatView.willUpdate is unavailable");
+  Reflect.apply(method, view, [changed]);
 }
 
 function withNotificationInbox(view: ChatView): ChatView {

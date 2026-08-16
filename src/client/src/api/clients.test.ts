@@ -377,6 +377,15 @@ describe("session API compatibility", () => {
     expect(JSON.parse(requestBody(init))).toEqual({ cwd: "/repo with spaces", ...fork });
   });
 
+  it("omits the stale-tree guard for direct assistant-response forks", async () => {
+    const fetchMock = stubJsonFetch({ cancelled: true });
+
+    await sessionsApi.forkTree({ id: "s1", cwd: "/repo" }, { entryId: "assistant-9" });
+
+    const [, init] = fetchCall(fetchMock, 0);
+    expect(JSON.parse(requestBody(init))).toEqual({ cwd: "/repo", entryId: "assistant-9" });
+  });
+
   it("recognizes an old daemon only from the missing tree/fork route response", async () => {
     stubResponseFetch(new Response(JSON.stringify({
       statusCode: 404,
