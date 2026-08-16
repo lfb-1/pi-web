@@ -35,8 +35,8 @@ export interface PendingExtensionDialogOpenInput {
   runScoped: boolean;
 }
 
-/** Why a dialog was closed without an answer. `"answered"` is {@link answer}'s reason, not a cancel reason. */
-export type ExtensionDialogCancelReason = Exclude<ExtensionDialogCloseReason, "answered">;
+/** Why a dialog was closed without an answer. Timeout has its own transition because it may apply a recommendation. */
+export type ExtensionDialogCancelReason = Exclude<ExtensionDialogCloseReason, "answered" | "timeout">;
 
 /**
  * Result of answering or cancelling a dialog. `"stale"` means the dialog named
@@ -46,7 +46,9 @@ export type ExtensionDialogCancelReason = Exclude<ExtensionDialogCloseReason, "a
  */
 export type PendingExtensionDialogCloseResult =
   | { status: "closed"; outcome: ExtensionDialogOutcome }
-  | { status: "stale" };
+  | { status: "stale"; outcome?: ExtensionDialogOutcome };
+
+const RECENT_EXTENSION_DIALOG_OUTCOME_LIMIT = 256;
 
 /** Rejected input: the dialog is malformed, or an answer does not fit its kind. */
 export class PendingExtensionDialogValidationError extends Error {
@@ -65,7 +67,7 @@ export class PendingExtensionDialogValidationError extends Error {
  * timers. It validates dialogs and answers and owns the open/answer/cancel
  * transitions; callers hold the waiting Promise resolvers, publish the
  * returned records and outcomes, and own the timers that turn `timeoutAt`
- * into a `"timeout"` cancel.
+ * into an auditable `"timeout"` transition.
  *
  * State is deliberately daemon-lifetime and in-memory. An open dialog is
  * meaningful only while the session runtime whose extension is waiting on it
@@ -77,6 +79,8 @@ export class PendingExtensionDialogStore {
   private readonly createDialogId: () => string;
   /** Per-session open dialogs in insertion order, so `pendingDialogs` reads oldest first. */
   private readonly openBySessionId = new Map<string, Map<string, PendingExtensionDialog>>();
+  /** Bounded race cache so a losing HTTP close can return the outcome that already won. */
+  private readonly recentOutcomes = new Map<string, ExtensionDialogOutcome>();
 
   constructor(options: PendingExtensionDialogStoreOptions = {}) {
     this.now = options.now ?? (() => new Date());
@@ -104,6 +108,7 @@ export class PendingExtensionDialogStore {
       runScoped: input.runScoped,
     };
     const dialogs = this.openBySessionId.get(sessionId) ?? new Map<string, PendingExtensionDialog>();
+    this.recentOutcomes.delete(dialogOutcomeKey(sessionId, dialog.dialogId));
     if (dialogs.has(dialog.dialogId)) {
       throw new Error(`Dialog id ${dialog.dialogId} is already open in session ${sessionId}`);
     }
@@ -118,17 +123,32 @@ export class PendingExtensionDialogStore {
    * dialog open for the browser to correct.
    */
   answer(sessionId: string, dialogId: string, value: ExtensionDialogAnswer): PendingExtensionDialogCloseResult {
-    const dialog = this.openBySessionId.get(requireSessionId(sessionId))?.get(dialogId);
-    if (dialog === undefined) return { status: "stale" };
+    const normalizedSessionId = requireSessionId(sessionId);
+    const dialog = this.openBySessionId.get(normalizedSessionId)?.get(dialogId);
+    if (dialog === undefined) return this.staleResult(normalizedSessionId, dialogId);
     const answer = validateAnswer(dialog, value);
-    return { status: "closed", outcome: this.requireClose(sessionId, dialog, "answered", answer) };
+    return { status: "closed", outcome: this.requireClose(normalizedSessionId, dialog, "answered", answer) };
+  }
+
+  /**
+   * Close an elapsed dialog. Confirm defaults to its primary Yes action and a
+   * select defaults to its first (recommended) option; input has no safe
+   * inferred text and therefore closes without an answer. The timeout reason
+   * is retained in the outcome even when a recommendation is applied.
+   */
+  timeout(sessionId: string, dialogId: string): PendingExtensionDialogCloseResult {
+    const normalizedSessionId = requireSessionId(sessionId);
+    const dialog = this.openBySessionId.get(normalizedSessionId)?.get(dialogId);
+    if (dialog === undefined) return this.staleResult(normalizedSessionId, dialogId);
+    return { status: "closed", outcome: this.requireClose(normalizedSessionId, dialog, "timeout", recommendedTimeoutAnswer(dialog)) };
   }
 
   /** Close the dialog without an answer; the extension's wait settles with its kind's cancel value. */
   cancel(sessionId: string, dialogId: string, reason: ExtensionDialogCancelReason): PendingExtensionDialogCloseResult {
-    const dialog = this.openBySessionId.get(requireSessionId(sessionId))?.get(dialogId);
-    if (dialog === undefined) return { status: "stale" };
-    return { status: "closed", outcome: this.requireClose(sessionId, dialog, reason, undefined) };
+    const normalizedSessionId = requireSessionId(sessionId);
+    const dialog = this.openBySessionId.get(normalizedSessionId)?.get(dialogId);
+    if (dialog === undefined) return this.staleResult(normalizedSessionId, dialogId);
+    return { status: "closed", outcome: this.requireClose(normalizedSessionId, dialog, reason, undefined) };
   }
 
   private requireClose(
@@ -142,18 +162,46 @@ export class PendingExtensionDialogStore {
       throw new Error(`Dialog ${dialog.dialogId} of session ${sessionId} disappeared while closing`);
     }
     if (dialogs.size === 0) this.openBySessionId.delete(sessionId);
-    return {
+    const outcome: ExtensionDialogOutcome = {
       dialogId: dialog.dialogId,
       reason,
       ...(answer === undefined ? {} : { answer }),
       askedAt: dialog.askedAt,
       closedAt: this.timestamp(),
     };
+    this.rememberOutcome(sessionId, outcome);
+    return { ...outcome };
+  }
+
+  private staleResult(sessionId: string, dialogId: string): PendingExtensionDialogCloseResult {
+    const outcome = this.recentOutcomes.get(dialogOutcomeKey(sessionId, dialogId));
+    return { status: "stale", ...(outcome === undefined ? {} : { outcome: { ...outcome } }) };
+  }
+
+  private rememberOutcome(sessionId: string, outcome: ExtensionDialogOutcome): void {
+    const key = dialogOutcomeKey(sessionId, outcome.dialogId);
+    this.recentOutcomes.delete(key);
+    this.recentOutcomes.set(key, { ...outcome });
+    while (this.recentOutcomes.size > RECENT_EXTENSION_DIALOG_OUTCOME_LIMIT) {
+      const oldest = this.recentOutcomes.keys().next().value;
+      if (oldest === undefined) break;
+      this.recentOutcomes.delete(oldest);
+    }
   }
 
   private timestamp(): string {
     return this.now().toISOString();
   }
+}
+
+function dialogOutcomeKey(sessionId: string, dialogId: string): string {
+  return JSON.stringify([sessionId, dialogId]);
+}
+
+function recommendedTimeoutAnswer(dialog: PendingExtensionDialog): ExtensionDialogAnswer | undefined {
+  if (dialog.kind === "confirm") return true;
+  if (dialog.kind === "select") return dialog.options?.[0];
+  return undefined;
 }
 
 function validateAnswer(dialog: PendingExtensionDialog, value: ExtensionDialogAnswer): ExtensionDialogAnswer {

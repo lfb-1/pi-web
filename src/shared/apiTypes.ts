@@ -193,8 +193,8 @@ export interface PiWebConfigValues {
    */
   environmentFacts?: boolean;
   /**
-   * How long an extension dialog may wait for an answer before the daemon
-   * auto-cancels it, in milliseconds. Applies only when the extension set no
+   * How long an extension dialog may wait before the daemon applies its
+   * timeout policy, in milliseconds. Applies only when the extension set no
    * `timeout` of its own (the sooner of the two wins); `0` waits forever.
    * Tuning knob only — extension dialogs are always enabled.
    */
@@ -776,16 +776,15 @@ export const EXTENSION_DIALOG_INPUT_MAX_LENGTH = 4_000;
 export type ExtensionDialogKind = "confirm" | "select" | "input";
 
 /**
- * The value a user gave in an extension dialog: a boolean for `confirm`, the
- * chosen option for `select`, the typed text for `input`. Absent when the
- * dialog closed without an answer.
+ * The value selected in an extension dialog: a boolean for `confirm`, the
+ * chosen option for `select`, or typed text for `input`. An `"answered"`
+ * close contains the user selection. A `"timeout"` close also contains the
+ * recommended selection for confirm/select dialogs; input has no recommended
+ * value and therefore times out without an answer.
  */
 export type ExtensionDialogAnswer = boolean | string;
 
-/**
- * Why a dialog stopped being open. `"answered"` carries an
- * {@link ExtensionDialogAnswer}; every other reason is a close without one.
- */
+/** Why a dialog stopped being open. Timeout remains distinct for auditability even when it applies a recommended answer. */
 export type ExtensionDialogCloseReason = "answered" | "cancelled" | "timeout" | "aborted" | "session-ended";
 
 /**
@@ -804,14 +803,14 @@ export interface PendingExtensionDialog {
   title: string;
   /** Supporting line of a `confirm` dialog. */
   message?: string;
-  /** Offered choices of a `select` dialog. */
+  /** Offered choices of a `select` dialog. The first option is the recommended timeout default. */
   options?: string[];
   /** Placeholder text of an `input` dialog. */
   placeholder?: string;
   askedAt: string;
   /**
-   * When the dialog auto-cancels, as ISO: the sooner of the extension's own
-   * `timeout` and the daemon's `extensionDialogsTimeoutMs` default. Absent
+   * When the dialog timeout policy runs, as ISO: the sooner of the extension's
+   * own `timeout` and the daemon's `extensionDialogsTimeoutMs` default. Absent
    * when the dialog waits forever.
    */
   timeoutAt?: string;
@@ -828,7 +827,7 @@ export interface PendingExtensionDialog {
 export interface ExtensionDialogOutcome {
   dialogId: string;
   reason: ExtensionDialogCloseReason;
-  /** Present only when `reason` is `"answered"`. */
+  /** Present for `"answered"`, and for `"timeout"` when confirm/select supplied a recommended default. */
   answer?: ExtensionDialogAnswer;
   askedAt: string;
   closedAt: string;
@@ -856,12 +855,14 @@ export interface ExtensionDialogCancelRequest {
  * Result of the browser answering or cancelling an extension dialog. Mirrors
  * {@link AskUserCloseResponse}: `"stale"` is an ordinary lost race — another
  * browser, a timeout, or a teardown closed the dialog first — not an error.
- * The browser drops its card and trusts `sessionStatus`, which is returned in
- * both cases so closing a dialog needs no follow-up status request.
+ * The browser trusts `sessionStatus`, which is returned in both cases so closing
+ * a dialog needs no follow-up status request. A stale response may include the
+ * recently retained winner outcome so HTTP/WebSocket arrival order cannot hide
+ * an auditable timeout recommendation.
  */
 export interface ExtensionDialogCloseResponse {
   result: "closed" | "stale";
-  /** Present only when this call is the one that closed the dialog. */
+  /** Present for the winning close, and for a stale close while its winner remains in the bounded race cache. */
   outcome?: ExtensionDialogOutcome;
   sessionStatus: SessionStatus;
 }

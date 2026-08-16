@@ -1411,6 +1411,10 @@ export class SessionController {
 
   private recordClosedDialog(closed: ClosedExtensionDialog): void {
     const state = this.getState();
+    if (!isValidRecommendedTimeout(closed)) {
+      this.setState({ error: `Invalid recommended timeout result for ${closed.dialog.kind} dialog ${closed.dialog.dialogId}` });
+      return;
+    }
     if (state.closedDialogs.some((entry) => entry.dialog.dialogId === closed.dialog.dialogId)) return;
     this.setState({
       pendingDialogs: state.pendingDialogs.filter((pending) => pending.dialogId !== closed.dialog.dialogId),
@@ -1824,6 +1828,13 @@ function bulkFailureMessages(failures: readonly SessionBulkFailure[]): string[] 
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isValidRecommendedTimeout(closed: ClosedExtensionDialog): boolean {
+  if (closed.reason !== "timeout") return true;
+  if (closed.dialog.kind === "confirm") return closed.answer === true;
+  if (closed.dialog.kind === "select") return closed.answer === closed.dialog.options?.[0];
+  return closed.answer === undefined;
 }
 
 function sessionMessageCountPatch(state: AppState, sessionId: string, messageCount: number | undefined): Pick<Partial<AppState>, "sessions" | "selectedSession"> {

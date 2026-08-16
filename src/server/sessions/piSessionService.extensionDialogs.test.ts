@@ -57,8 +57,8 @@ async function settledValue(promise: Promise<boolean | string | undefined>): Pro
   ]);
 }
 
-function openDialog(events: CapturingSessionEventHub): PendingExtensionDialog {
-  const opened = dialogEvents(events).find(({ event }) => event.type === "dialog.opened");
+function openDialog(events: CapturingSessionEventHub, index = 0): PendingExtensionDialog {
+  const opened = dialogEvents(events).filter(({ event }) => event.type === "dialog.opened")[index];
   if (opened?.event.type !== "dialog.opened") throw new Error("no dialog.opened event published");
   return opened.event.dialog;
 }
@@ -250,7 +250,7 @@ describe("PiSessionService extension dialog timeout", () => {
     vi.useRealTimers();
   });
 
-  it("auto-cancels an unanswered dialog when the daemon default timeout elapses", async () => {
+  it("selects the recommended confirm action when the daemon default timeout elapses", async () => {
     vi.useFakeTimers();
     const { service, store, events, fake } = dialogService({ extensionDialogsTimeoutMs: 300_000 });
     const ui = await boundUiContext(service, fake);
@@ -261,11 +261,33 @@ describe("PiSessionService extension dialog timeout", () => {
     ]);
     await vi.advanceTimersByTimeAsync(300_000);
 
-    await expect(parked).resolves.toBe(false);
+    await expect(parked).resolves.toBe(true);
     expect(store.pendingDialogs(ACTIVE_SESSION_ID)).toEqual([]);
+    const stale = await service.answerDialog(sessionRef(ACTIVE_SESSION_ID), "dialog-1", false);
+    expect(stale).toMatchObject({ result: "stale", outcome: { reason: "timeout", answer: true } });
     expect(dialogEvents(events).map(({ event }) => event)).toEqual([
       { type: "dialog.opened", dialog: openDialog(events) },
-      { type: "dialog.closed", dialogId: "dialog-1", reason: "timeout" },
+      { type: "dialog.closed", dialogId: "dialog-1", reason: "timeout", answer: true },
+    ]);
+    await service.dispose();
+  });
+
+  it("selects the first option on select timeout but leaves input timeout unanswered", async () => {
+    vi.useFakeTimers();
+    const { service, events, fake } = dialogService({ extensionDialogsTimeoutMs: 300_000 });
+    const ui = await boundUiContext(service, fake);
+    const selected = ui.select("Pick", ["recommended", "other"]);
+    const typed = ui.input("Name");
+
+    await vi.advanceTimersByTimeAsync(300_000);
+
+    await expect(selected).resolves.toBe("recommended");
+    await expect(typed).resolves.toBeUndefined();
+    expect(dialogEvents(events).map(({ event }) => event)).toEqual([
+      { type: "dialog.opened", dialog: openDialog(events, 0) },
+      { type: "dialog.opened", dialog: openDialog(events, 1) },
+      { type: "dialog.closed", dialogId: "dialog-1", reason: "timeout", answer: "recommended" },
+      { type: "dialog.closed", dialogId: "dialog-2", reason: "timeout" },
     ]);
     await service.dispose();
   });

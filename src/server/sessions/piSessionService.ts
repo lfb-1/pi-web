@@ -819,9 +819,9 @@ export interface PiSessionServiceDependencies {
   /** Daemon-lifetime open-dialog state; defaults to an in-memory store in tests. */
   pendingExtensionDialogStore?: PendingExtensionDialogStore;
   /**
-   * How long an extension dialog with no extension-set `timeout` waits for an
-   * answer before the daemon auto-cancels it; `0` waits forever. A tuning
-   * knob, not a gate: extension dialogs are always on.
+   * How long an extension dialog with no extension-set `timeout` waits before
+   * the daemon applies its recommended timeout result; `0` waits forever. A
+   * tuning knob, not a gate: extension dialogs are always on.
    */
   extensionDialogsTimeoutMs?: number;
   /** Structured logger for notable runtime events (e.g. spawns). */
@@ -1397,7 +1397,9 @@ export class PiSessionService implements SessionRouteService {
     await this.assertWritable(ref);
     const session = await this.sessionForStatusOrDialogClose(ref);
     const result = this.pendingExtensionDialogStore.answer(session.sessionId, dialogId, value);
-    if (result.status === "stale") return { result: "stale", sessionStatus: this.statusFromSession(session) };
+    if (result.status === "stale") {
+      return { result: "stale", ...(result.outcome === undefined ? {} : { outcome: result.outcome }), sessionStatus: this.statusFromSession(session) };
+    }
     const { outcome } = result;
     this.publishDialogClosed(session.sessionId, outcome);
     // `value` is what the store validated and recorded as the outcome's answer.
@@ -1411,7 +1413,9 @@ export class PiSessionService implements SessionRouteService {
     await this.assertWritable(ref);
     const session = await this.sessionForStatusOrDialogClose(ref);
     const result = this.pendingExtensionDialogStore.cancel(session.sessionId, dialogId, "cancelled");
-    if (result.status === "stale") return { result: "stale", sessionStatus: this.statusFromSession(session) };
+    if (result.status === "stale") {
+      return { result: "stale", ...(result.outcome === undefined ? {} : { outcome: result.outcome }), sessionStatus: this.statusFromSession(session) };
+    }
     const { outcome } = result;
     this.publishDialogClosed(session.sessionId, outcome);
     this.dialogWaiters.settleWithCancelValue(dialogId);
@@ -1465,11 +1469,14 @@ export class PiSessionService implements SessionRouteService {
    * whether this call closed the dialog; a stale close means a browser answer
    * or an earlier trigger already settled everything.
    */
-  private closeExtensionDialogFromTrigger(sessionId: string, dialogId: string, reason: ExtensionDialogCancelReason): boolean {
-    const result = this.pendingExtensionDialogStore.cancel(sessionId, dialogId, reason);
+  private closeExtensionDialogFromTrigger(sessionId: string, dialogId: string, reason: ExtensionDialogCancelReason | "timeout"): boolean {
+    const result = reason === "timeout"
+      ? this.pendingExtensionDialogStore.timeout(sessionId, dialogId)
+      : this.pendingExtensionDialogStore.cancel(sessionId, dialogId, reason);
     if (result.status !== "closed") return false;
     this.publishDialogClosed(sessionId, result.outcome);
-    this.dialogWaiters.settleWithCancelValue(dialogId);
+    if (result.outcome.answer === undefined) this.dialogWaiters.settleWithCancelValue(dialogId);
+    else this.dialogWaiters.settleWithAnswer(dialogId, result.outcome.answer);
     return true;
   }
 

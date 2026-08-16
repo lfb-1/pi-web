@@ -30,7 +30,7 @@ describe("extension-dialog-card confirm dialog", () => {
     expect(root.querySelector(".dialog-message")?.textContent).toBe("The extension wants to write files.");
     expect(root.querySelector("input, select, textarea")).toBeNull();
 
-    buttonWithText(root, "Yes").click();
+    buttonWithText(root, "Yes (Recommended)").click();
     await flushClose(card);
     expect(onAnswer).toHaveBeenCalledWith("dlg-1", true);
 
@@ -50,7 +50,7 @@ describe("extension-dialog-card confirm dialog", () => {
     const card = await mountOpenDialog(openDialog(), { onAnswer });
     const root = renderRoot(card);
 
-    const yes = buttonWithText(root, "Yes");
+    const yes = buttonWithText(root, "Yes (Recommended)");
     yes.click();
     await card.updateComplete;
 
@@ -76,6 +76,7 @@ describe("extension-dialog-card select dialog", () => {
     const root = renderRoot(card);
 
     expect(buttonsWithText(root, "Yes")).toHaveLength(0);
+    expect(buttonWithText(root, "Staging (Recommended)")).toBeTruthy();
     buttonWithText(root, "Production").click();
     await Promise.resolve();
 
@@ -143,11 +144,11 @@ describe("extension-dialog-card countdown", () => {
     const root = renderRoot(card);
     const countdown = requiredElement(root.querySelector(".countdown"), "countdown");
 
-    expect(countdown.textContent).toBe("Auto-cancels in 1m 30s");
+    expect(countdown.textContent).toBe("Uses recommendation in 1m 30s");
 
     await vi.advanceTimersByTimeAsync(30_000);
     await card.updateComplete;
-    expect(countdown.textContent).toBe("Auto-cancels in 1m 0s");
+    expect(countdown.textContent).toBe("Uses recommendation in 1m 0s");
   });
 
   it("is decorative: no live region announcing every second", async () => {
@@ -182,7 +183,7 @@ describe("extension-dialog-card countdown", () => {
     await card.updateComplete;
 
     expect(renderRoot(card).textContent).toBe(before);
-    expect(renderRoot(card).querySelector("[role='status']")).toBeNull();
+    expect(renderRoot(card).querySelector("[role='status']")).not.toBeNull();
   });
 });
 
@@ -205,15 +206,21 @@ describe("extension-dialog-card closed outcome", () => {
     expect(onDismiss).toHaveBeenCalledWith("dlg-1");
   });
 
-  it("shows the timeout outcome without an answer", async () => {
+  it("shows whether timeout applied a recommendation", async () => {
     const card = new ExtensionDialogCard();
-    card.outcome = closedDialog("timeout");
+    card.outcome = closedDialog("timeout", true);
     document.body.append(card);
     await card.updateComplete;
     const root = renderRoot(card);
 
     expect(root.querySelector(".header-status")?.textContent).toBe("Timed out");
-    expect(root.querySelector(".closed-summary")?.textContent).toContain("timed out");
+    expect(root.querySelector(".closed-card")?.getAttribute("role")).toBe("status");
+    expect(root.querySelector(".closed-card")?.getAttribute("aria-live")).toBe("polite");
+    expect(root.querySelector(".closed-summary")?.textContent).toBe("Timed out; selected recommended option: Yes");
+
+    card.outcome = closedDialog("timeout");
+    await card.updateComplete;
+    expect(root.querySelector(".closed-summary")?.textContent).toContain("No recommended answer");
   });
 });
 
@@ -259,6 +266,7 @@ describe("extensionDialogCloseLabel and extensionDialogCloseSummary", () => {
   it("summarizes closes without an answer", () => {
     expect(extensionDialogCloseSummary(closedDialog("cancelled"))).toBe("Dismissed without an answer.");
     expect(extensionDialogCloseSummary(closedDialog("timeout"))).toContain("timed out");
+    expect(extensionDialogCloseSummary(closedDialog("timeout", "Staging"))).toContain("recommended option: Staging");
     expect(extensionDialogCloseSummary(closedDialog("aborted"))).toContain("run ended");
     expect(extensionDialogCloseSummary(closedDialog("session-ended"))).toContain("session ended");
   });

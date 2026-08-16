@@ -29,7 +29,7 @@ export interface SessionServiceDependencyInput {
   askUserEnabled: boolean;
   /** Deployment facts appended to session system prompts; empty when there are none. */
   appendSystemPromptSections: readonly string[];
-  /** Auto-cancel delay for extension dialogs whose extension set no timeout; `0` waits forever. */
+  /** Recommendation deadline for extension dialogs whose extension set no timeout; `0` waits forever. */
   extensionDialogsTimeoutMs: number;
 }
 

@@ -434,9 +434,9 @@ export function parseExtensionDialogCloseResponse(value: unknown): ExtensionDial
   const result = record["result"];
   if (result !== "closed" && result !== "stale") throw new Error("Invalid dialog close result");
   const outcome = record["outcome"] === undefined ? undefined : parseExtensionDialogOutcome(record["outcome"]);
-  // Only the call that actually closed the dialog carries an outcome; a stale
-  // close reports none and is trusted for the session status alone.
-  if ((result === "closed") !== (outcome !== undefined)) throw new Error("Dialog close response outcome mismatch");
+  // A successful close always carries its outcome. A stale close may carry the
+  // recently retained winner so HTTP response/event reordering preserves audit.
+  if (result === "closed" && outcome === undefined) throw new Error("Dialog close response outcome mismatch");
   return {
     result,
     ...(outcome === undefined ? {} : { outcome }),
@@ -517,9 +517,10 @@ export function parseSessionDialogClosedEvent(value: unknown): { type: "dialog.c
   if (record["type"] !== "dialog.closed") throw new Error("Invalid dialog closed event type");
   const reason = parseExtensionDialogCloseReason(record["reason"]);
   const answer = record["answer"] === undefined ? undefined : parseExtensionDialogAnswer(record["answer"]);
-  // Only an answered close carries a value; any other combination cannot be
-  // rendered honestly as the dialog's result.
-  if ((reason === "answered") !== (answer !== undefined)) throw new Error("Dialog closed event answer mismatch");
+  // A direct answer always carries a value. Timeout may carry the recommended
+  // confirm/select default, while every other unattended close carries none.
+  if (reason === "answered" && answer === undefined) throw new Error("Dialog closed event answer mismatch");
+  if (answer !== undefined && reason !== "answered" && reason !== "timeout") throw new Error("Dialog closed event answer mismatch");
   return {
     type: "dialog.closed",
     dialogId: requireBoundedNonEmptyString(record, "dialogId", EXTENSION_DIALOG_ID_MAX_LENGTH),
@@ -532,7 +533,8 @@ export function parseExtensionDialogOutcome(value: unknown): ExtensionDialogOutc
   const record = requireRecord(value);
   const reason = parseExtensionDialogCloseReason(record["reason"]);
   const answer = record["answer"] === undefined ? undefined : parseExtensionDialogAnswer(record["answer"]);
-  if ((reason === "answered") !== (answer !== undefined)) throw new Error("Dialog outcome answer mismatch");
+  if (reason === "answered" && answer === undefined) throw new Error("Dialog outcome answer mismatch");
+  if (answer !== undefined && reason !== "answered" && reason !== "timeout") throw new Error("Dialog outcome answer mismatch");
   return {
     dialogId: requireBoundedNonEmptyString(record, "dialogId", EXTENSION_DIALOG_ID_MAX_LENGTH),
     reason,

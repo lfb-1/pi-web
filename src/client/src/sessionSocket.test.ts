@@ -146,6 +146,8 @@ describe("notification socket guards", () => {
       .toEqual({ type: "dialog.closed", dialogId: "dialog-1", reason: "answered", answer: "SQLite" });
     expect(parseSessionSocketEvent({ type: "dialog.closed", dialogId: "dialog-1", reason: "timeout" }))
       .toEqual({ type: "dialog.closed", dialogId: "dialog-1", reason: "timeout" });
+    expect(parseSessionSocketEvent({ type: "dialog.closed", dialogId: "dialog-1", reason: "timeout", answer: "Postgres" }))
+      .toEqual({ type: "dialog.closed", dialogId: "dialog-1", reason: "timeout", answer: "Postgres" });
     expect(parseSessionSocketEvent({ type: "dialog.opened", dialog: { ...dialog, kind: "modal" } })).toBeUndefined();
     expect(parseSessionSocketEvent({ type: "dialog.opened" })).toBeUndefined();
     expect(parseSessionSocketEvent({ type: "dialog.closed", dialogId: "dialog-1", reason: "ignored" })).toBeUndefined();

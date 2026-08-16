@@ -63,6 +63,38 @@ describe("research workflow state", () => {
     expect(parsed.state.workItems[0]?.acceptanceCriteria[0]?.result).toBe("pending");
   });
 
+  it("preserves the conservative authority-dialog provenance mode", () => {
+    const state = validState();
+    const item = state.workItems[0];
+    if (item === undefined) throw new Error("expected work item");
+    item.objectiveStatus = "confirmed";
+    item.authoritySource = {
+      kind: "user",
+      ref: "session:s-1#entry-1",
+      at: "2026-08-15T20:00:00.000Z",
+      authorityMode: "dialog-or-recommended-timeout-policy",
+    };
+
+    const parsed = parseResearchWorkflowStateText(JSON.stringify(state));
+
+    expect(parsed).toMatchObject({
+      ok: true,
+      state: { workItems: [{ authoritySource: { authorityMode: "dialog-or-recommended-timeout-policy" } }] },
+    });
+  });
+
+  it("rejects authority-dialog mode on a non-user source", () => {
+    const state = validState();
+    const item = state.workItems[0];
+    if (item === undefined) throw new Error("expected work item");
+    item.source = { ...source, authorityMode: "dialog-or-recommended-timeout-policy" };
+
+    const parsed = parseResearchWorkflowStateText(JSON.stringify(state));
+
+    expect(parsed).toMatchObject({ ok: false });
+    if (!parsed.ok) expect(parsed.error).toContain("requires source kind user");
+  });
+
   it("keeps legacy states without a semantic brief compatible", () => {
     const state = validState();
     if (state.workItems[0] !== undefined) delete state.workItems[0].brief;

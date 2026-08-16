@@ -4,7 +4,7 @@ import type { ExtensionDialogAnswer, ExtensionDialogKind, PendingExtensionDialog
 export type ExtensionDialogWaiterTrigger = "timeout" | "cancelled";
 
 export interface ExtensionDialogWaiterTriggers {
-  /** Effective auto-cancel delay; omitted (or resolved away) means the dialog waits forever. */
+  /** Effective timeout-policy delay; omitted (or resolved away) means the dialog waits forever. */
   timeoutMs?: number | undefined;
   /** The extension's own abort signal, subscribed once and unsubscribed on settle. */
   signal?: AbortSignal | undefined;
@@ -31,7 +31,7 @@ export function extensionDialogCancelValue(kind: ExtensionDialogKind): boolean |
 }
 
 /**
- * The auto-cancel delay of one dialog: the sooner of the extension's own
+ * The timeout-policy delay of one dialog: the sooner of the extension's own
  * `timeout` and the daemon's `extensionDialogsTimeoutMs` default, where `0`
  * (or an invalid extension value, defensively ignored) means "waits forever".
  */

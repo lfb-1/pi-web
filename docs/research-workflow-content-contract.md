@@ -40,7 +40,10 @@ browser-only panel and a Pi extension instead.
 
 The model can propose and organize content. The model does not gain authority to approve a
 criterion, resolve a decision, accept a finding, or authorize follow-up compute. The companion
-extension requests a real user confirmation before writing those transitions.
+extension opens an authority dialog before writing those transitions. A direct user answer controls
+the result; when the host has a user-delegated recommended-timeout policy, an unanswered dialog may
+apply that visibly identified recommendation at the configured deadline. The settled dialog retains
+the timeout reason for auditability.
 
 ## Data flow
 
@@ -65,7 +68,10 @@ The panel is a deterministic projection of the JSON state. Semantic reasoning oc
 updates the durable brief, not when the panel opens. It never treats chat prose as an approved
 field. Every mutable record includes creation provenance with source kind, source reference, and
 timestamp. Authority-bearing records additionally store `authoritySource`; this prevents a later
-Pi update from obscuring the user confirmation that approved the transition.
+Pi update from obscuring the user-owned dialog policy that approved the transition. Because Pi's
+`ctx.ui` API returns only the selected primitive, durable records conservatively label the mode as
+`dialog-or-recommended-timeout-policy`; the browser-local settled card provides the more specific
+`Answered` or `Timed out` outcome while it remains available.
 
 ## Stable identity
 

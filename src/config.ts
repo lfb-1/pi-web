@@ -52,12 +52,12 @@ export const DEFAULT_MAX_UPLOAD_BYTES = 64 * 1024 * 1024;
 export const DEFAULT_UPLOADS_FOLDER = ".pi-web/uploads";
 
 /**
- * Default auto-cancel delay for extension dialogs whose extension set no
- * `timeout` of its own: five minutes. `extensionDialogsTimeoutMs: 0` waits
- * forever. Tunes the unattended-dialog safety valve only; dialogs are always
- * enabled.
+ * Default resolution delay for extension dialogs whose extension set no
+ * `timeout` of its own: one hour. `extensionDialogsTimeoutMs: 0` waits forever.
+ * Confirm/select dialogs apply their recommended option at the deadline;
+ * input dialogs close without an answer. Dialogs are always enabled.
  */
-export const DEFAULT_EXTENSION_DIALOGS_TIMEOUT_MS = 300_000;
+export const DEFAULT_EXTENSION_DIALOGS_TIMEOUT_MS = 3_600_000;
 
 export const PI_WEB_AGENT_COMMAND_ENV = "PI_WEB_AGENT_COMMAND";
 export const PI_WEB_AGENT_DIR_ENV = "PI_WEB_AGENT_DIR";

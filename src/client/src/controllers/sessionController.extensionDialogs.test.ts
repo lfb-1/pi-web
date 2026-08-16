@@ -105,6 +105,19 @@ describe("SessionController extension dialog state", () => {
     expect(harness.state().closedDialogs).toEqual([{ dialog: dialog("dialog-1", "select"), reason: "answered", answer: "SQLite" }]);
   });
 
+  it("records a recommended timeout answer and rejects a mismatched recommendation", async () => {
+    const harness = await liveSession();
+
+    harness.socket.emit({ type: "dialog.opened", dialog: dialog("dialog-1", "select") });
+    harness.socket.emit({ type: "dialog.closed", dialogId: "dialog-1", reason: "timeout", answer: "Postgres" });
+    expect(harness.state().closedDialogs).toEqual([{ dialog: dialog("dialog-1", "select"), reason: "timeout", answer: "Postgres" }]);
+
+    harness.socket.emit({ type: "dialog.opened", dialog: dialog("dialog-2") });
+    harness.socket.emit({ type: "dialog.closed", dialogId: "dialog-2", reason: "timeout", answer: false });
+    expect(harness.state().error).toContain("Invalid recommended timeout result");
+    expect(harness.state().pendingDialogs.map((pending) => pending.dialogId)).toEqual(["dialog-2"]);
+  });
+
   it("records a close without an answer for cancel-like reasons", async () => {
     const harness = await liveSession();
 
@@ -162,7 +175,7 @@ describe("SessionController extension dialog state", () => {
 
   it("drops a closed dialog's outcome card when it is dismissed", async () => {
     const harness = await liveSession({}, statusWithDialogs(oldSession.id, [dialog("dialog-1")]));
-    harness.socket.emit({ type: "dialog.closed", dialogId: "dialog-1", reason: "timeout" });
+    harness.socket.emit({ type: "dialog.closed", dialogId: "dialog-1", reason: "timeout", answer: true });
     expect(harness.state().closedDialogs).toHaveLength(1);
 
     harness.controller.dismissClosedDialog("dialog-1");
@@ -228,7 +241,36 @@ describe("SessionController extension dialog answers", () => {
     expect(state.pendingDialogs).toEqual([]);
   });
 
-  it("trusts the status of a stale close without an error or an outcome card", async () => {
+  it("records the retained winner outcome when a stale HTTP close beats its WebSocket event", async () => {
+    const pending = dialog("dialog-1");
+    const winner: ExtensionDialogCloseResponse = {
+      result: "stale",
+      outcome: {
+        dialogId: "dialog-1",
+        reason: "timeout",
+        answer: true,
+        askedAt: pending.askedAt,
+        closedAt: "2026-07-20T01:00:00.000Z",
+      },
+      sessionStatus: status(oldSession.id),
+    };
+    let state = selectedState({ pendingDialogs: [pending] });
+    const api: typeof defaultApi = { ...defaultApi, answerDialog: () => Promise.resolve(winner) };
+    const controller = new SessionController(
+      () => state,
+      (patch) => { state = { ...state, ...patch }; },
+      () => undefined,
+      undefined,
+      { api, socket: new FakeSocket() },
+    );
+
+    await controller.answerDialog("dialog-1", false);
+
+    expect(state.closedDialogs).toEqual([{ dialog: pending, reason: "timeout", answer: true }]);
+    expect(state.pendingDialogs).toEqual([]);
+  });
+
+  it("trusts the status of an unknown stale close without an error or an outcome card", async () => {
     let state = selectedState({ pendingDialogs: [dialog("dialog-1")] });
     const api: typeof defaultApi = {
       ...defaultApi,

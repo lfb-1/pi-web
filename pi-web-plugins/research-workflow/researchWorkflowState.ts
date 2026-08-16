@@ -13,6 +13,7 @@ export const workflowPhases = [
 
 export type WorkflowPhase = (typeof workflowPhases)[number];
 export type SourceKind = "pi" | "user" | "runtime" | "repository" | "monitor";
+export type AuthorityMode = "dialog-or-recommended-timeout-policy";
 export type ObjectiveStatus = "proposed" | "confirmed";
 export type CriterionStatus = "proposed" | "approved";
 export type CriterionResult = "pending" | "passed" | "failed" | "not-run";
@@ -28,6 +29,8 @@ export interface RecordSource {
   kind: SourceKind;
   ref: string;
   at: string;
+  /** Present on authority sources when direct selection and delegated timeout share the host dialog channel. */
+  authorityMode?: AuthorityMode;
 }
 
 export interface ReferenceRecord {
@@ -143,6 +146,7 @@ export type ParseResearchWorkflowStateResult =
 
 const idPattern = /^[a-z][a-z0-9.-]*$/u;
 export const sourceKinds = ["pi", "user", "runtime", "repository", "monitor"] as const;
+export const authorityModes = ["dialog-or-recommended-timeout-policy"] as const;
 export const objectiveStatuses = ["proposed", "confirmed"] as const;
 export const criterionStatuses = ["proposed", "approved"] as const;
 export const criterionResults = ["pending", "passed", "failed", "not-run"] as const;
@@ -372,10 +376,16 @@ function optionalSource(value: unknown, path: string): RecordSource | undefined 
 
 function parseSource(value: unknown, path: string): RecordSource {
   const record = objectValue(value, path);
+  const kind = enumValue(record["kind"], sourceKinds, `${path}.kind`);
+  const authorityMode = record["authorityMode"] === undefined
+    ? undefined
+    : enumValue(record["authorityMode"], authorityModes, `${path}.authorityMode`);
+  if (authorityMode !== undefined && kind !== "user") throw new Error(`${path}.authorityMode requires source kind user`);
   return {
-    kind: enumValue(record["kind"], sourceKinds, `${path}.kind`),
+    kind,
     ref: nonEmptyString(record["ref"], `${path}.ref`),
     at: timestampValue(record["at"], `${path}.at`),
+    ...(authorityMode === undefined ? {} : { authorityMode }),
   };
 }
 

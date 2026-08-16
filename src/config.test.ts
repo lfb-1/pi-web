@@ -246,7 +246,8 @@ describe("maxUploadBytes", () => {
 });
 
 describe("extensionDialogsTimeoutMs", () => {
-  it("defaults to five minutes when nothing is configured", () => {
+  it("defaults to one hour when nothing is configured", () => {
+    expect(DEFAULT_EXTENSION_DIALOGS_TIMEOUT_MS).toBe(3_600_000);
     expect(effectivePiWebConfig(testOptions()).config.extensionDialogsTimeoutMs).toBe(DEFAULT_EXTENSION_DIALOGS_TIMEOUT_MS);
   });
 

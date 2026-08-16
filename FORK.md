@@ -65,8 +65,9 @@ explicit guidance. HTTPS or localhost access is recommended for reliable microph
 The bundled `research-workflow` plugin adds a workspace panel for objective, definition of
 done, acceptance criteria, decisions, runs, findings, artifacts, evidence, and linked runtime
 records. The companion `research_workflow` Pi extension writes validated workspace-local state,
-records provenance, injects the active objective into Pi turns, and requires a user dialog for
-authority-bearing transitions.
+records provenance, injects the active objective into Pi turns, and requires an authority dialog
+for authority-bearing transitions. Under this fork's user-configured timeout policy, an unanswered
+confirmation applies its visibly marked **Yes** recommendation at the deadline.
 
 The Stage 1 state contract is documented in
 `docs/research-workflow-content-contract.md`. The prototype uses
@@ -96,6 +97,15 @@ Session notifications use one fixed banner above the chat transcript. Each new u
 the banner's visible status in place and reports the retained update count, so periodic experiment
 monitor checks do not create a growing stack in the middle panel. The complete bounded notification
 history remains available through the banner disclosure and existing clear controls.
+
+### Recommended extension-dialog timeouts
+
+Extension dialogs now default to a one-hour deadline. Confirm dialogs mark **Yes** as the
+recommended action, and select dialogs visibly mark their first option as recommended. If no user
+answer arrives before the deadline, the session daemon applies that recommendation while retaining
+`timeout` as the audited close reason and showing the selected value in the settled card. Input
+dialogs have no inferred recommendation and continue to close without text. Explicit cancellation,
+**No**, run abort, and runtime replacement remain non-authorizing outcomes.
 
 ## Upstream maintenance
 

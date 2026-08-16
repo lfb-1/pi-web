@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   authorityRequestFor,
+  authoritySourceForSessionManager,
   mutateState,
   type ResearchWorkflowParameters,
 } from "./research-workflow.js";
@@ -39,6 +40,22 @@ function createWorkItem(state: ResearchWorkflowState): ResearchWorkflowState {
   };
   return mutateState(state, params, piSource, undefined);
 }
+
+describe("research_workflow authority provenance", () => {
+  it("labels authority as direct dialog or delegated recommended-timeout policy", () => {
+    const sessionManager = {
+      getBranch: () => [],
+      getLeafId: () => "entry-1",
+      getSessionId: () => "session-1",
+    };
+
+    expect(authoritySourceForSessionManager(sessionManager)).toMatchObject({
+      kind: "user",
+      ref: "session:session-1#entry-1",
+      authorityMode: "dialog-or-recommended-timeout-policy",
+    });
+  });
+});
 
 describe("research_workflow extension state transitions", () => {
   it("creates proposed work with Pi provenance", () => {

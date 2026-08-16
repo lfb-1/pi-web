@@ -91,7 +91,7 @@ export interface AppState {
 export interface ClosedExtensionDialog {
   dialog: PendingExtensionDialog;
   reason: ExtensionDialogCloseReason;
-  /** Present only when `reason` is `"answered"`. */
+  /** Present for a direct answer or a recommended confirm/select timeout default. */
   answer?: ExtensionDialogAnswer;
 }
 

@@ -63,7 +63,7 @@ Process restarts depend on the key:
   "spawnSessions": true,
   "subsessions": true,
   "askUser": true,
-  "extensionDialogsTimeoutMs": 300000,
+  "extensionDialogsTimeoutMs": 3600000,
   "plugins": {
     "workspace-tasks": { "enabled": true },
     "updates": { "enabled": true },
@@ -157,7 +157,7 @@ Rows with JSON key `—` are runtime-only environment variables, not config-file
 | Agent can spawn sessions | `spawnSessions` | `PI_WEB_SPAWN_SESSIONS` | Global/session daemon | Not supported locally | Restart session daemon on that machine |
 | Tracked subsessions | `subsessions` | `PI_WEB_SUBSESSIONS` | Global/session daemon | Not supported locally; also requires `spawnSessions` | Restart session daemon on that machine |
 | Agent can post question forms | `askUser` | `PI_WEB_ASK_USER` | Global/session daemon | Not supported locally | Restart session daemon on that machine |
-| Extension dialog auto-cancel timeout | `extensionDialogsTimeoutMs` | — | Global/session daemon | Not supported locally | Restart session daemon on that machine |
+| Extension dialog recommendation deadline | `extensionDialogsTimeoutMs` | — | Global/session daemon | Not supported locally | Restart session daemon on that machine |
 | Session environment facts | `environmentFacts` | `PI_WEB_ENVIRONMENT_FACTS` | Global/session daemon | Not supported locally | Restart session daemon on that machine |
 | PI WEB plugin desired enablement/settings | `plugins.<id>.enabled`, `plugins.<id>.settings` | — | Global + sessiond startup snapshot for server entries | Not core local config; plugins may read their own project files | Browser-only: reload tab. Server-backed: manually restart sessiond, then reload tab |
 | Server-plugin safe start | `serverPlugins.safeStart` | — | Global/offline recovery | Not supported locally; manage with `pi-web plugins safe-start ...` | Applied before discovery/import on next sessiond start |
@@ -344,7 +344,7 @@ Restart the session daemon after changing `askUser` or after upgrading PI WEB to
 
 Pi extensions can ask the user questions from `ctx.ui.confirm()`, `ctx.ui.select()`, and `ctx.ui.input()` — including from `session_start` hooks and in-flight `tool_call` hooks. PI WEB renders these dialogs inline in the session transcript and answers them through a dedicated session-daemon channel, never the prompt queue, so a dialog parked inside a `tool_call` hook cannot deadlock the run. Dialog support is always on; there is no enable flag. See [Pi extension dialogs in PI WEB](https://pi-web.dev/plugins#pi-extension-dialogs) for behavior details and author guidance.
 
-`extensionDialogsTimeoutMs` is the unattended-dialog safety valve: how long the session daemon waits for an answer before settling the dialog with its kind's cancel value (`false` for confirm, `undefined` for select and input). It defaults to `300000` (5 minutes); set it to `0` to wait forever. An extension's own `timeout` option still applies, and the effective deadline is the sooner of the two.
+`extensionDialogsTimeoutMs` is the unattended-dialog deadline. It defaults to `3600000` (1 hour); set it to `0` to wait forever. At the deadline, confirm resolves to its primary **Yes** recommendation and select resolves to its first, visibly labeled recommended option. Input has no inferred text and resolves to `undefined`. The outcome remains labeled `timeout` for auditability. An extension's own `timeout` option still applies, and the effective deadline is the sooner of the two.
 
 The key is edited directly in the global config file. Restart the session daemon after changing it — for the systemd user service, run `systemctl --user restart pi-web-sessiond`.
 

@@ -158,7 +158,7 @@ export default function researchWorkflowExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "research_workflow",
     label: "Research Workflow",
-    description: `Read or update ${RESEARCH_WORKFLOW_STATE_PATH}. Manages research objectives, a plain-language semantic brief, acceptance criteria, decisions, runs, artifacts, findings, and runtime links with stable ids and provenance. Authority-bearing transitions require a real user confirmation.`,
+    description: `Read or update ${RESEARCH_WORKFLOW_STATE_PATH}. Manages research objectives, a plain-language semantic brief, acceptance criteria, decisions, runs, artifacts, findings, and runtime links with stable ids and provenance. Authority-bearing transitions require an authority dialog; the host may apply its configured recommended timeout result.`,
     promptSnippet: "Maintain the structured research workflow and its evidence-backed plain-language brief",
     promptGuidelines: [
       "Use research_workflow when the current research objective, semantic brief, definition of done, acceptance criteria, decision state, experiment run, artifact, or finding changes.",
@@ -184,7 +184,7 @@ export default function researchWorkflowExtension(pi: ExtensionAPI): void {
           if (!ctx.hasUI) throw new Error(`User confirmation is required: ${authorityRequest.message}`);
           const confirmed = await ctx.ui.confirm("Research Workflow authority", authorityRequest.message);
           if (!confirmed) throw new Error("Research Workflow update was not authorized by the user");
-          authoritySource = sourceFor(ctx, "user");
+          authoritySource = authoritySourceFor(ctx);
         }
         const next = mutateState(latest.state, params, sourceFor(ctx, "pi"), authoritySource);
         next.updatedAt = new Date().toISOString();
@@ -672,9 +672,23 @@ async function writeStateAtomically(path: string, state: ResearchWorkflowState):
   await rename(temporaryPath, path);
 }
 
+type SourceSessionManager = Pick<ExtensionContext["sessionManager"], "getBranch" | "getLeafId" | "getSessionId">;
+
+export function authoritySourceFor(ctx: ExtensionContext): RecordSource {
+  return sourceForSessionManager(ctx.sessionManager, "user");
+}
+
+export function authoritySourceForSessionManager(sessionManager: SourceSessionManager): RecordSource {
+  return sourceForSessionManager(sessionManager, "user");
+}
+
 function sourceFor(ctx: ExtensionContext, kind: "pi" | "user"): RecordSource {
-  const branch = ctx.sessionManager.getBranch();
-  let entryId = ctx.sessionManager.getLeafId() ?? "no-entry";
+  return sourceForSessionManager(ctx.sessionManager, kind);
+}
+
+function sourceForSessionManager(sessionManager: SourceSessionManager, kind: "pi" | "user"): RecordSource {
+  const branch = sessionManager.getBranch();
+  let entryId = sessionManager.getLeafId() ?? "no-entry";
   for (let index = branch.length - 1; index >= 0; index -= 1) {
     const entry = branch[index];
     if (entry?.type === "message" && entry.message.role === "user") {
@@ -684,8 +698,9 @@ function sourceFor(ctx: ExtensionContext, kind: "pi" | "user"): RecordSource {
   }
   return {
     kind,
-    ref: `session:${ctx.sessionManager.getSessionId()}#${entryId}`,
+    ref: `session:${sessionManager.getSessionId()}#${entryId}`,
     at: new Date().toISOString(),
+    ...(kind === "user" ? { authorityMode: "dialog-or-recommended-timeout-policy" } : {}),
   };
 }
 

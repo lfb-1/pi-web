@@ -372,7 +372,7 @@ function renderAuthoritySource(source: RecordSource | undefined): string {
   if (source === undefined) return "";
   return `
     <details class="provenance authority-source">
-      <summary>Confirmed by ${escapeHtml(source.kind)} · ${escapeHtml(formatTimestamp(source.at))}</summary>
+      <summary>Confirmed by ${escapeHtml(source.kind)}${source.authorityMode === undefined ? "" : " · direct or recommended-timeout policy"} · ${escapeHtml(formatTimestamp(source.at))}</summary>
       <code>${escapeHtml(source.ref)}</code>
     </details>
   `;

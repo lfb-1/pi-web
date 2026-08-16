@@ -219,15 +219,44 @@ describe("PendingExtensionDialogStore answer", () => {
     expect(store.answer(sessionId, "dialog-other", true)).toEqual({ status: "stale" });
     expect(store.answer("session-2", "dialog-1", true)).toEqual({ status: "stale" });
 
-    store.answer(sessionId, "dialog-1", false);
-    expect(store.answer(sessionId, "dialog-1", true)).toEqual({ status: "stale" });
+    const winner = store.answer(sessionId, "dialog-1", false);
+    const stale = store.answer(sessionId, "dialog-1", true);
+    expect(stale).toEqual({ status: "stale", outcome: winner.status === "closed" ? winner.outcome : undefined });
+  });
+});
+
+describe("PendingExtensionDialogStore timeout", () => {
+  it("applies the recommended answer to confirm and select while leaving input unanswered", () => {
+    const store = testStore();
+    store.open({ sessionId, kind: "confirm", title: "Proceed?", runScoped: false });
+    store.open({ sessionId, kind: "select", title: "Pick", options: ["recommended", "other"], runScoped: false });
+    store.open({ sessionId, kind: "input", title: "Name", runScoped: false });
+
+    expect(store.timeout(sessionId, "dialog-1")).toMatchObject({
+      status: "closed",
+      outcome: { reason: "timeout", answer: true },
+    });
+    expect(store.timeout(sessionId, "dialog-2")).toMatchObject({
+      status: "closed",
+      outcome: { reason: "timeout", answer: "recommended" },
+    });
+    const input = store.timeout(sessionId, "dialog-3");
+    expect(input).toMatchObject({ status: "closed", outcome: { reason: "timeout" } });
+    if (input.status !== "closed") throw new Error("expected input timeout to close");
+    expect(input.outcome).not.toHaveProperty("answer");
+    expect(store.pendingDialogs(sessionId)).toEqual([]);
+  });
+
+  it("treats a timeout for a dialog that is no longer open as stale", () => {
+    const store = testStore();
+    expect(store.timeout(sessionId, "dialog-other")).toEqual({ status: "stale" });
   });
 });
 
 describe("PendingExtensionDialogStore cancel", () => {
   it("closes a dialog without an answer for every cancel reason", () => {
     const store = testStore();
-    const reasons: ExtensionDialogCancelReason[] = ["cancelled", "timeout", "aborted", "session-ended"];
+    const reasons: ExtensionDialogCancelReason[] = ["cancelled", "aborted", "session-ended"];
 
     for (const reason of reasons) {
       const dialog = store.open({ sessionId, kind: "confirm", title: `${reason}?`, runScoped: false });
@@ -258,7 +287,7 @@ describe("PendingExtensionDialogStore cancel", () => {
     const store = testStore();
     store.open({ sessionId, kind: "confirm", title: "Sure?", runScoped: false });
 
-    const result = store.cancel(sessionId, "dialog-1", "timeout");
+    const result = store.timeout(sessionId, "dialog-1");
 
     expect(result).toMatchObject({
       status: "closed",
@@ -273,7 +302,8 @@ describe("PendingExtensionDialogStore cancel", () => {
     expect(store.cancel(sessionId, "dialog-other", "cancelled")).toEqual({ status: "stale" });
     expect(store.cancel("session-2", "dialog-1", "cancelled")).toEqual({ status: "stale" });
 
-    store.cancel(sessionId, "dialog-1", "aborted");
-    expect(store.cancel(sessionId, "dialog-1", "cancelled")).toEqual({ status: "stale" });
+    const winner = store.cancel(sessionId, "dialog-1", "aborted");
+    const stale = store.cancel(sessionId, "dialog-1", "cancelled");
+    expect(stale).toEqual({ status: "stale", outcome: winner.status === "closed" ? winner.outcome : undefined });
   });
 });

@@ -211,7 +211,7 @@
   "spawnSessions": true,
   "subsessions": true,
   "askUser": true,
-  "extensionDialogsTimeoutMs": 300000,
+  "extensionDialogsTimeoutMs": 3600000,
   "plugins": {
     "workspace-tasks": { "enabled": true },
     "updates": { "enabled": true },
@@ -422,7 +422,7 @@ worktree_path="$1"
                       <td>Restart session daemon on that machine</td>
                     </tr>
                     <tr>
-                      <td>Extension dialog auto-cancel timeout</td>
+                      <td>Extension dialog recommendation deadline</td>
                       <td><code>extensionDialogsTimeoutMs</code></td>
                       <td>—</td>
                       <td>Global/session daemon</td>
@@ -1038,10 +1038,11 @@ PI_CODING_AGENT_SESSION_DIR=/opt/pi-profiles/lab-sessions</code></pre>
                 guidance.
               </p>
               <p>
-                <code>extensionDialogsTimeoutMs</code> is the unattended-dialog safety valve: how long the session daemon
-                waits for an answer before settling the dialog with its kind's cancel value (<code>false</code> for
-                confirm, <code>undefined</code> for select and input). It defaults to <code>300000</code> (5 minutes);
-                set it to <code>0</code> to wait forever. An extension's own <code>timeout</code> option still applies,
+                <code>extensionDialogsTimeoutMs</code> is the unattended-dialog deadline. It defaults to
+                <code>3600000</code> (1 hour); set it to <code>0</code> to wait forever. At the deadline, confirm resolves
+                to its primary <strong>Yes</strong> recommendation and select resolves to its first, visibly labeled
+                recommended option. Input has no inferred text and resolves to <code>undefined</code>. The settled outcome
+                remains labeled as a timeout for auditability. An extension's own <code>timeout</code> option still applies,
                 and the effective deadline is the sooner of the two.
               </p>
               <div class="callout warning">

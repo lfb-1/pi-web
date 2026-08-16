@@ -1095,17 +1095,30 @@ describe("API parsers", () => {
     expect(response.sessionStatus.sessionId).toBe("s1");
   });
 
-  it("parses a stale dialog close as an ordinary race with no outcome", () => {
-    const response = parseExtensionDialogCloseResponse({ result: "stale", sessionStatus: statusWire() });
+  it("parses a timeout outcome carrying the recommended option", () => {
+    const response = parseExtensionDialogCloseResponse({
+      result: "closed",
+      outcome: { ...dialogOutcomeWire(), reason: "timeout", answer: "Recommended" },
+      sessionStatus: statusWire(),
+    });
 
-    expect(response).toEqual({ result: "stale", sessionStatus: parseSessionStatus(statusWire()) });
+    expect(response.outcome).toMatchObject({ reason: "timeout", answer: "Recommended" });
+  });
+
+  it("parses a stale dialog close with or without its recently retained winner", () => {
+    const withoutOutcome = parseExtensionDialogCloseResponse({ result: "stale", sessionStatus: statusWire() });
+    const withOutcome = parseExtensionDialogCloseResponse({ result: "stale", outcome: dialogOutcomeWire(), sessionStatus: statusWire() });
+
+    expect(withoutOutcome).toEqual({ result: "stale", sessionStatus: parseSessionStatus(statusWire()) });
+    expect(withOutcome).toMatchObject({ result: "stale", outcome: { reason: "answered", answer: true } });
   });
 
   it("rejects dialog close responses whose outcome contradicts itself", () => {
     const outcome = dialogOutcomeWire();
     expect(() => parseExtensionDialogCloseResponse({ result: "closed", sessionStatus: statusWire() })).toThrow("Dialog close response outcome mismatch");
-    expect(() => parseExtensionDialogCloseResponse({ result: "stale", outcome, sessionStatus: statusWire() })).toThrow("Dialog close response outcome mismatch");
-    expect(() => parseExtensionDialogCloseResponse({ result: "closed", outcome: { ...outcome, reason: "timeout" }, sessionStatus: statusWire() })).toThrow("Dialog outcome answer mismatch");
+    expect(parseExtensionDialogCloseResponse({ result: "stale", outcome, sessionStatus: statusWire() }).outcome).toEqual(outcome);
+    expect(() => parseExtensionDialogCloseResponse({ result: "closed", outcome: { ...outcome, reason: "answered", answer: undefined }, sessionStatus: statusWire() })).toThrow("Dialog outcome answer mismatch");
+    expect(() => parseExtensionDialogCloseResponse({ result: "closed", outcome: { ...outcome, reason: "cancelled" }, sessionStatus: statusWire() })).toThrow("Dialog outcome answer mismatch");
     expect(() => parseExtensionDialogCloseResponse({ result: "closed", outcome: { ...outcome, answer: 1 }, sessionStatus: statusWire() })).toThrow("Invalid extension dialog answer");
     expect(() => parseExtensionDialogCloseResponse({ result: "closed", outcome: { ...outcome, reason: "ignored" }, sessionStatus: statusWire() })).toThrow("Invalid extension dialog close reason");
   });

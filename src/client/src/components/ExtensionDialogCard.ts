@@ -38,35 +38,40 @@ export function extensionDialogCloseSummary(closed: ClosedExtensionDialog): stri
       return answer === "" ? "Answered with an empty response." : `Answered: ${answer}`;
     }
     case "cancelled": return "Dismissed without an answer.";
-    case "timeout": return "No answer was given before the dialog timed out.";
+    case "timeout": {
+      if (closed.answer === undefined) return "No recommended answer was available before the dialog timed out.";
+      const answer = typeof closed.answer === "boolean" ? (closed.answer ? "Yes" : "No") : closed.answer;
+      return `Timed out; selected recommended option: ${answer}`;
+    }
     case "aborted": return "The run ended before this dialog was answered.";
     case "session-ended": return "The session ended before this dialog was answered.";
   }
 }
 
 /**
- * Remaining-time label for an open dialog's auto-cancel deadline. Display
+ * Remaining-time label for an open dialog's timeout-policy deadline. Display
  * only: the daemon owns the real timeout and publishes `dialog.closed`, so a
  * card whose countdown reaches zero simply waits for that event.
  */
-export function extensionDialogCountdownText(timeoutAt: string | undefined, nowMs: number): string | undefined {
+export function extensionDialogCountdownText(timeoutAt: string | undefined, nowMs: number, usesRecommendation = false): string | undefined {
   if (timeoutAt === undefined) return undefined;
   const deadline = Date.parse(timeoutAt);
   if (!Number.isFinite(deadline)) return undefined;
   const remainingMs = deadline - nowMs;
-  if (remainingMs <= 0) return "Auto-cancel imminent";
+  const prefix = usesRecommendation ? "Uses recommendation in" : "Auto-cancels in";
+  if (remainingMs <= 0) return usesRecommendation ? "Recommended selection imminent" : "Auto-cancel imminent";
   const seconds = Math.ceil(remainingMs / 1000);
   if (seconds >= 3600) {
     const hours = Math.floor(seconds / 3600);
     // Floor, not round: rounding yields "1h 60m" in the last half-minute of an hour.
     const minutes = Math.floor((seconds % 3600) / 60);
-    return `Auto-cancels in ${String(hours)}h ${String(minutes)}m`;
+    return `${prefix} ${String(hours)}h ${String(minutes)}m`;
   }
   if (seconds >= 60) {
     const minutes = Math.floor(seconds / 60);
-    return `Auto-cancels in ${String(minutes)}m ${String(seconds % 60)}s`;
+    return `${prefix} ${String(minutes)}m ${String(seconds % 60)}s`;
   }
-  return `Auto-cancels in ${String(seconds)}s`;
+  return `${prefix} ${String(seconds)}s`;
 }
 
 /**
@@ -124,7 +129,11 @@ export class ExtensionDialogCard extends LitElement {
   }
 
   private renderOpen(dialog: PendingExtensionDialog): TemplateResult {
-    const countdown = extensionDialogCountdownText(dialog.timeoutAt, this.countdownNow === 0 ? Date.now() : this.countdownNow);
+    const countdown = extensionDialogCountdownText(
+      dialog.timeoutAt,
+      this.countdownNow === 0 ? Date.now() : this.countdownNow,
+      dialog.kind !== "input",
+    );
     return html`
       <article class="card open-card" aria-labelledby="extension-dialog-heading">
         <header class="card-header">
@@ -153,7 +162,7 @@ export class ExtensionDialogCard extends LitElement {
       <footer class="dialog-footer">
         <button class="secondary-action" type="button" ?disabled=${this.closing} @click=${() => { this.cancelDialog(dialog); }}>Cancel</button>
         <button class="secondary-action" type="button" ?disabled=${this.closing} @click=${() => { this.answerDialog(dialog, false); }}>No</button>
-        <button class="primary-action" type="button" ?disabled=${this.closing} @click=${() => { this.answerDialog(dialog, true); }}>Yes</button>
+        <button class="primary-action" type="button" ?disabled=${this.closing} @click=${() => { this.answerDialog(dialog, true); }}>Yes <span class="recommended-label">(Recommended)</span></button>
       </footer>
     `;
   }
@@ -161,8 +170,10 @@ export class ExtensionDialogCard extends LitElement {
   private renderSelectBody(dialog: PendingExtensionDialog): TemplateResult {
     return html`
       <div class="dialog-options" role="group" aria-label="Choices">
-        ${(dialog.options ?? []).map((option) => html`
-          <button class="option-button" type="button" ?disabled=${this.closing} @click=${() => { this.answerDialog(dialog, option); }}>${option}</button>
+        ${(dialog.options ?? []).map((option, index) => html`
+          <button class="option-button" type="button" ?disabled=${this.closing} @click=${() => { this.answerDialog(dialog, option); }}>
+            ${option}${index === 0 ? html` <span class="recommended-label">(Recommended)</span>` : null}
+          </button>
         `)}
       </div>
       <footer class="dialog-footer">
@@ -195,7 +206,12 @@ export class ExtensionDialogCard extends LitElement {
 
   private renderClosed(closed: ClosedExtensionDialog): TemplateResult {
     return html`
-      <article class="card closed-card" aria-labelledby="extension-dialog-closed-heading">
+      <article
+        class="card closed-card"
+        aria-labelledby="extension-dialog-closed-heading"
+        role=${ifDefined(closed.reason === "timeout" ? "status" : undefined)}
+        aria-live=${ifDefined(closed.reason === "timeout" ? "polite" : undefined)}
+      >
         <header class="card-header">
           <h2 id="extension-dialog-closed-heading">${closed.dialog.title}</h2>
           <span class=${`header-status ${closed.reason}`}>${extensionDialogCloseLabel(closed.reason)}</span>
@@ -326,6 +342,7 @@ export class ExtensionDialogCard extends LitElement {
       overflow-wrap: anywhere;
     }
     .option-button:hover:not(:disabled) { border-color: var(--pi-accent); background: var(--pi-surface-hover); }
+    .recommended-label { font-size: 11px; font-weight: 650; opacity: .82; }
     .dialog-input-form { display: grid; }
     .dialog-input {
       box-sizing: border-box;
