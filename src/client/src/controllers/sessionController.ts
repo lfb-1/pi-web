@@ -966,9 +966,9 @@ export class SessionController {
     try {
       const response = await close(session, machineId);
       if (!this.isCurrentSessionSelection(session.id, machineId, selectionSeq)) return;
-      // When this call closed the dialog, its outcome is recorded right away so
-      // the card shows what the user gave; the daemon's dialog.closed event
-      // then finds the dialog already closed here and stays a no-op.
+      // Apply the winning outcome immediately. User-answered dialogs disappear;
+      // non-answer outcomes remain visible for review. The daemon's paired
+      // dialog.closed event then finds the dialog already closed and is a no-op.
       const outcome: ExtensionDialogOutcome | undefined = response.outcome;
       if (outcome !== undefined) {
         const dialog = this.getState().pendingDialogs.find((pending) => pending.dialogId === outcome.dialogId);
@@ -998,9 +998,9 @@ export class SessionController {
     try {
       const response = await close({ ...session, id: backendSessionId }, pending.machineId);
       if (selectionSeq !== this.selectionSeq || this.getState().selectedSession?.id !== session.id) return;
-      // Same outcome-first ordering as the ready-session path: the card shows
-      // what the user gave, and the daemon's dialog.closed frame then finds
-      // the dialog already closed here and stays a no-op.
+      // Same outcome-first ordering as the ready-session path: user-answered
+      // dialogs disappear, while non-answer outcomes remain visible. The
+      // daemon's dialog.closed frame then finds the dialog already closed.
       const outcome: ExtensionDialogOutcome | undefined = response.outcome;
       if (outcome !== undefined) {
         const dialog = this.getState().pendingDialogs.find((candidate) => candidate.dialogId === outcome.dialogId);
@@ -1426,14 +1426,23 @@ export class SessionController {
       this.setState({ error: `Invalid recommended timeout result for ${closed.dialog.kind} dialog ${closed.dialog.dialogId}` });
       return;
     }
+    const pendingDialogs = state.pendingDialogs.filter((pending) => pending.dialogId !== closed.dialog.dialogId);
+    // A deliberate selection already communicates success through the control
+    // the user activated. Remove it immediately instead of requiring a second
+    // Dismiss click. Timeout, cancellation, and interruption outcomes remain
+    // visible because they convey information beyond that selection.
+    if (closed.reason === "answered") {
+      this.setState({ pendingDialogs });
+      return;
+    }
     if (state.closedDialogs.some((entry) => entry.dialog.dialogId === closed.dialog.dialogId)) return;
     this.setState({
-      pendingDialogs: state.pendingDialogs.filter((pending) => pending.dialogId !== closed.dialog.dialogId),
+      pendingDialogs,
       closedDialogs: [...state.closedDialogs, closed],
     });
   }
 
-  /** Drop a closed dialog's transient outcome card (e.g. the user dismissed it). */
+  /** Drop a retained non-answer outcome card (e.g. the user dismissed it). */
   dismissClosedDialog(dialogId: string): void {
     const state = this.getState();
     if (!state.closedDialogs.some((entry) => entry.dialog.dialogId === dialogId)) return;

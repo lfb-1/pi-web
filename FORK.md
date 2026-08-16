@@ -115,8 +115,10 @@ Extension dialogs now default to a one-hour deadline. Confirm dialogs mark **Yes
 recommended action, and select dialogs visibly mark their first option as recommended. If no user
 answer arrives before the deadline, the session daemon applies that recommendation while retaining
 `timeout` as the audited close reason and showing the selected value in the settled card. Input
-dialogs have no inferred recommendation and continue to close without text. Explicit cancellation,
-**No**, run abort, and runtime replacement remain non-authorizing outcomes.
+dialogs have no inferred recommendation and continue to close without text. A dialog answered by
+the user disappears immediately after the selected option is accepted, without a separate
+**Dismiss** step. Timeout, cancellation, and interruption outcomes remain visible for review.
+Explicit cancellation, **No**, run abort, and runtime replacement remain non-authorizing outcomes.
 
 ## Upstream maintenance
 

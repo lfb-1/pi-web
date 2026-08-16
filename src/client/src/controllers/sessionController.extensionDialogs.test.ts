@@ -108,13 +108,14 @@ describe("SessionController extension dialog state", () => {
     expect(harness.state().pendingDialogs.map((pending) => pending.dialogId)).toEqual(["dialog-2"]);
   });
 
-  it("keeps the closed dialog's outcome so the card can render what happened", async () => {
+  it("removes an answered option dialog without retaining a Dismiss card", async () => {
     const harness = await liveSession();
 
     harness.socket.emit({ type: "dialog.opened", dialog: dialog("dialog-1", "select") });
     harness.socket.emit({ type: "dialog.closed", dialogId: "dialog-1", reason: "answered", answer: "SQLite" });
 
-    expect(harness.state().closedDialogs).toEqual([{ dialog: dialog("dialog-1", "select"), reason: "answered", answer: "SQLite" }]);
+    expect(harness.state().pendingDialogs).toEqual([]);
+    expect(harness.state().closedDialogs).toEqual([]);
   });
 
   it("records a recommended timeout answer and rejects a mismatched recommendation", async () => {
@@ -197,7 +198,7 @@ describe("SessionController extension dialog state", () => {
 });
 
 describe("SessionController extension dialog answers", () => {
-  it("answers a dialog, records the outcome, and applies the returned status", async () => {
+  it("answers a dialog, removes its card, and applies the returned status", async () => {
     const answerCalls: { dialogId: string; value: unknown; machineId: string }[] = [];
     const closedStatus = status(oldSession.id);
     let state = selectedState({ status: statusWithDialogs(oldSession.id, [dialog("dialog-1")]), pendingDialogs: [dialog("dialog-1")] });
@@ -219,7 +220,7 @@ describe("SessionController extension dialog answers", () => {
     await controller.answerDialog("dialog-1", true);
 
     expect(answerCalls).toEqual([{ dialogId: "dialog-1", value: true, machineId: "local" }]);
-    expect(state.closedDialogs).toEqual([{ dialog: dialog("dialog-1"), reason: "answered", answer: true }]);
+    expect(state.closedDialogs).toEqual([]);
     expect(state.pendingDialogs).toEqual([]);
     expect(state.status).toEqual(closedStatus);
   });
