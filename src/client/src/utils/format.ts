@@ -12,9 +12,3 @@ export function formatFileSize(size: number): string {
 function formatScaledFileSize(value: number): string {
   return value >= 10 ? String(Math.round(value)) : value.toFixed(1);
 }
-
-export function formatCost(cost: number): string {
-  if (!Number.isFinite(cost) || cost === 0) return "$0";
-  if (cost < 0.01) return `$${cost.toFixed(4)}`;
-  return `$${cost.toFixed(2)}`;
-}

@@ -1,7 +1,6 @@
 import { LitElement, html } from "lit";
 import { customElement, property } from "lit/decorators.js";
 import type { SessionStatus } from "../api";
-import { formatCost } from "../utils/format";
 import { renderSessionWarningIcon, statusBarStyles } from "./shared";
 
 export interface StatusBarWarningControlContent {
@@ -33,6 +32,8 @@ export class StatusBar extends LitElement {
     const status = this.status;
     if (status === undefined) return html`<div class="bar muted">No session status yet</div>`;
     const warningControl = statusBarWarningControlContent(this.warningCount, this.warningsExpanded);
+    const showWarningControl = warningControl !== undefined && this.onToggleWarnings !== undefined;
+    if (!showWarningControl && status.pendingMessageCount === 0) return null;
     return html`
       <div class="bar">
         ${warningControl === undefined || this.onToggleWarnings === undefined ? null : html`
@@ -48,7 +49,6 @@ export class StatusBar extends LitElement {
             <span>${warningControl.countText}</span>
           </button>
         `}
-        <span>${formatCost(status.cost)}</span>
         ${status.pendingMessageCount > 0 ? html`<span>${String(status.pendingMessageCount)} queued</span>` : null}
       </div>
     `;

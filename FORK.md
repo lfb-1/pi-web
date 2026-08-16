@@ -105,8 +105,8 @@ General → Attention alerts**, the same events also produce an operating-system
 Replay and reconnect frames are deduplicated within the browser page lifetime. Informational
 monitor updates remain quiet.
 
-The middle panel's bottom status bar keeps warning controls, cost, and queued-message state while
-omitting cumulative input/output token counts and context-window percentage. Voice input keeps
+The middle panel's bottom status bar appears only for warning controls or queued-message state;
+usage, context-window, and cost metrics are omitted. Voice input keeps
 state and error feedback but no longer renders a permanent idle privacy notice.
 
 ### Recommended extension-dialog timeouts
