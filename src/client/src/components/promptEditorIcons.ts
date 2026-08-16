@@ -13,6 +13,19 @@ export function renderAttachIcon(): TemplateResult {
   `;
 }
 
+export function renderMicrophoneIcon(active = false): TemplateResult {
+  return svg`
+    <svg class="prompt-action-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      ${active ? svg`<rect class="voice-stop-mark" x="7" y="7" width="10" height="10" rx="1.5"></rect>` : svg`
+        <rect x="9" y="3" width="6" height="11" rx="3"></rect>
+        <path d="M5.5 10.5v.5a6.5 6.5 0 0 0 13 0v-.5"></path>
+        <path d="M12 17.5V21"></path>
+        <path d="M8.5 21h7"></path>
+      `}
+    </svg>
+  `;
+}
+
 export function renderSendIcon(): TemplateResult {
   return svg`
     <svg class="prompt-action-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">

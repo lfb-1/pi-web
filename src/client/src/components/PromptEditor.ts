@@ -14,12 +14,15 @@ import { detectPromptCompletionTrigger, fileCompletionInsertText, modelCompletio
 import { clearDraft, loadDraft, saveDraft } from "../promptDraftStorage";
 import { loadAttachmentDelivery, saveAttachmentDelivery } from "../attachmentPreferences";
 import { createMobilePromptEnterMedia, readPromptEnterPreference, shouldSendPromptOnEnterShortcut, shouldUsePromptEnterShiftShortcut } from "../promptEnterBehavior";
+import { browserIsSecureContext, browserSpeechRecognitionConstructor, recognitionTranscripts, voiceRecognitionErrorMessage, voiceTranscriptInsertion, type SpeechRecognitionLike, type VoiceInputLanguage } from "../voiceInput";
+import { loadVoiceInputLanguage, saveVoiceInputLanguage } from "../voiceInputPreferences";
 import { promptEditorStyles, type CompletionItem } from "./shared";
-import { renderAttachIcon, renderSendIcon, renderQueueIcon, renderSteerIcon, renderStopIcon, renderThinkingGauge } from "./promptEditorIcons";
+import { renderAttachIcon, renderMicrophoneIcon, renderSendIcon, renderQueueIcon, renderSteerIcon, renderStopIcon, renderThinkingGauge } from "./promptEditorIcons";
 import { thinkingGauge, thinkingLevelLabel } from "../../../shared/thinkingLevels";
 import "./AutocompleteMenu";
 
 type PendingAttachment = CapturedAttachment & { id: string };
+type VoiceInputState = "idle" | "starting" | "listening" | "stopping";
 
 @customElement("prompt-editor")
 export class PromptEditor extends LitElement {
@@ -54,6 +57,16 @@ export class PromptEditor extends LitElement {
   @state() private attachments: PendingAttachment[] = [];
   @state() private attachmentDelivery: PromptAttachmentDelivery = loadAttachmentDelivery();
   @state() private attachmentError: string | undefined = undefined;
+  @state() private voiceInputState: VoiceInputState = "idle";
+  @state() private voiceInputLanguage: VoiceInputLanguage = loadVoiceInputLanguage();
+  @state() private voiceInputSupported = browserSpeechRecognitionConstructor() !== undefined;
+  @state() private voiceInputMessage: string | undefined = undefined;
+  @state() private voiceInputError: string | undefined = undefined;
+  @state() private voiceInputInterim = "";
+  private voiceRecognition: SpeechRecognitionLike | undefined;
+  private voiceRecognitionGeneration = 0;
+  private voiceHadFinalResult = false;
+  private readonly voiceSecureContext = browserIsSecureContext();
   private attachmentSeq = 0;
   private requestVersion = 0;
   private editor: EditorView | undefined;
@@ -64,6 +77,7 @@ export class PromptEditor extends LitElement {
 
   protected override willUpdate(changed: PropertyValues<this>) {
     if (!changed.has("sessionId") && !changed.has("machineId")) return;
+    this.cancelVoiceInput();
     const previousSessionId = changed.has("sessionId") ? changed.get("sessionId") : this.sessionId;
     const previousMachineId = changed.has("machineId") ? changed.get("machineId") : this.machineId;
     const previousKey = draftStorageKey(previousMachineId, previousSessionId);
@@ -93,9 +107,11 @@ export class PromptEditor extends LitElement {
   protected override updated(changed: PropertyValues) {
     if (changed.has("disabled")) this.updateEditorDisabledState();
     if (changed.has("sessionId") || changed.has("machineId")) this.syncEditorDoc();
+    if ((changed.has("disabled") || changed.has("sending")) && (this.disabled || this.sending)) this.cancelVoiceInput();
   }
 
   override disconnectedCallback(): void {
+    this.cancelVoiceInput();
     this.editor?.destroy();
     this.editor = undefined;
     super.disconnectedCallback();
@@ -117,8 +133,10 @@ export class PromptEditor extends LitElement {
           ${this.renderAttachments()}
           <autocomplete-menu .items=${this.completions} .selectedIndex=${this.selectedIndex} .onPick=${(item: CompletionItem) => { this.pick(item); }}></autocomplete-menu>
         </div>
+        ${this.renderVoiceInputFeedback()}
         <div class="actions">
           ${this.renderCompactStatus()}
+          ${this.renderVoiceInputControls(busy)}
           <button class="icon-button send-button" ?disabled=${busy} title=${queuesInput ? "Queue until the current activity finishes" : "Send message"} aria-label=${queuesInput ? "Queue message" : "Send message"} @click=${() => { this.send("followUp"); }}>${queuesInput ? renderQueueIcon() : renderSendIcon()}</button>
           ${this.canSteer && !this.isCompacting ? html`<button class="icon-button steer-button" ?disabled=${busy} title="Steer the current response before the next model call" aria-label="Steer current response" @click=${() => { this.send("steer"); }}>${renderSteerIcon()}</button>` : null}
           <button class="icon-button stop-button" ?disabled=${this.disabled || !this.canStop} title=${this.canStop ? "Stop current work and clear queued messages" : "Nothing running"} aria-label="Stop current work" @click=${() => this.onStop?.()}>${renderStopIcon()}</button>
@@ -129,6 +147,63 @@ export class PromptEditor extends LitElement {
 
   focusInput() {
     this.editor?.focus();
+  }
+
+  private renderVoiceInputControls(busy: boolean) {
+    const active = this.voiceInputState !== "idle";
+    const unavailable = !this.voiceInputSupported;
+    const stopping = this.voiceInputState === "stopping";
+    const title = unavailable
+      ? "Voice input requires a browser with Web Speech recognition, such as Chrome"
+      : active
+        ? stopping ? "Finishing voice input" : "Stop voice input"
+        : this.voiceSecureContext
+          ? "Start voice input. Chrome may send audio to its speech-recognition service"
+          : "Start voice input. Chrome may send audio to its speech-recognition service and may require HTTPS or localhost";
+    const label = stopping ? "Finishing voice input" : active ? "Stop voice input" : "Start voice input";
+    return html`
+      <div class="voice-input-controls" aria-label="Voice input controls">
+        <select
+          class="voice-language"
+          title="Voice input language"
+          aria-label="Voice input language"
+          .value=${this.voiceInputLanguage}
+          ?disabled=${busy || active}
+          @change=${(event: Event) => { this.changeVoiceInputLanguage(event); }}
+        >
+          <option value="zh-CN">中文</option>
+          <option value="en-US">English</option>
+        </select>
+        <button
+          class=${`icon-button voice-input-button${active ? " voice-input-active" : ""}`}
+          ?disabled=${busy || unavailable || stopping}
+          title=${title}
+          aria-label=${unavailable ? title : label}
+          aria-describedby="voice-input-feedback"
+          aria-pressed=${active ? "true" : "false"}
+          @click=${() => { this.toggleVoiceInput(); }}
+        >${renderMicrophoneIcon(active)}</button>
+      </div>
+    `;
+  }
+
+  private renderVoiceInputFeedback() {
+    if (this.voiceInputError !== undefined) {
+      return html`<div id="voice-input-feedback" class="voice-input-feedback voice-input-error" role="alert">${this.voiceInputError}</div>`;
+    }
+    if (!this.voiceInputSupported) {
+      const guidance = this.voiceSecureContext
+        ? "Voice input requires Chrome or another browser with Web Speech recognition."
+        : "Voice input requires a compatible Chrome browser and may require Pi Web to be opened over HTTPS or localhost.";
+      return html`<div id="voice-input-feedback" class="voice-input-feedback voice-input-guidance">${guidance}</div>`;
+    }
+    if (this.voiceInputInterim !== "") {
+      return html`<div id="voice-input-feedback" class="voice-input-feedback" aria-live="off">Hearing: ${this.voiceInputInterim}</div>`;
+    }
+    if (this.voiceInputMessage !== undefined) {
+      return html`<div id="voice-input-feedback" class="voice-input-feedback" role="status" aria-live="polite">${this.voiceInputMessage}</div>`;
+    }
+    return html`<div id="voice-input-feedback" class="voice-input-feedback voice-input-guidance">Chrome may send voice audio to its speech-recognition service. Review inserted text before sending.</div>`;
   }
 
   replaceText(text: string): void {
@@ -169,6 +244,166 @@ export class PromptEditor extends LitElement {
         <button class="select-thinking icon-button" title=${`Thinking level: ${thinkingLevelLabel(status.thinkingLevel)}`} aria-label=${`Thinking level: ${thinkingLevelLabel(status.thinkingLevel)}`} @click=${() => this.onSelectThinking?.()}>${renderThinkingGauge(thinkingGauge(status.thinkingLevel, this.availableThinkingLevels))}</button>
       </div>
     `;
+  }
+
+  private changeVoiceInputLanguage(event: Event) {
+    if (!(event.target instanceof HTMLSelectElement)) return;
+    const language = event.target.value;
+    if (language !== "zh-CN" && language !== "en-US") {
+      event.target.value = this.voiceInputLanguage;
+      return;
+    }
+    this.voiceInputLanguage = language;
+    saveVoiceInputLanguage(language);
+    this.voiceInputMessage = undefined;
+    this.voiceInputError = undefined;
+  }
+
+  private toggleVoiceInput() {
+    if (this.voiceInputState === "idle") {
+      this.startVoiceInput();
+      return;
+    }
+    if (this.voiceInputState === "starting") {
+      this.cancelVoiceInput();
+      this.voiceInputMessage = "Voice input cancelled.";
+      return;
+    }
+    if (this.voiceInputState === "listening") this.stopVoiceInput();
+  }
+
+  private startVoiceInput() {
+    if (this.disabled || this.sending) return;
+    const Recognition = browserSpeechRecognitionConstructor();
+    if (Recognition === undefined) {
+      this.voiceInputSupported = false;
+      this.voiceInputError = "Voice input is unavailable in this browser. Open Pi Web in Chrome and try again.";
+      return;
+    }
+
+    this.cancelVoiceInput();
+    let recognition: SpeechRecognitionLike;
+    try {
+      recognition = new Recognition();
+    } catch {
+      this.voiceInputError = "Chrome could not initialize speech recognition. Reload Pi Web and try again.";
+      return;
+    }
+    const generation = ++this.voiceRecognitionGeneration;
+    this.voiceRecognition = recognition;
+    this.voiceHadFinalResult = false;
+    this.voiceInputState = "starting";
+    this.voiceInputMessage = this.voiceInputLanguage === "zh-CN" ? "Starting Chinese voice input…" : "Starting English voice input…";
+    this.voiceInputError = undefined;
+    this.voiceInputInterim = "";
+    recognition.lang = this.voiceInputLanguage;
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.maxAlternatives = 1;
+    recognition.onstart = () => {
+      if (!this.isCurrentRecognition(recognition, generation)) return;
+      this.voiceInputState = "listening";
+      this.voiceInputMessage = this.voiceInputLanguage === "zh-CN" ? "Listening in Chinese…" : "Listening in English…";
+    };
+    recognition.onresult = (event) => {
+      if (!this.isCurrentRecognition(recognition, generation)) return;
+      const transcripts = recognitionTranscripts(event, this.voiceInputLanguage);
+      this.voiceInputInterim = transcripts.interim;
+      if (transcripts.final !== "") {
+        this.voiceHadFinalResult = true;
+        this.insertVoiceTranscript(transcripts.final);
+        this.voiceInputMessage = "Voice input added to the draft. Listening…";
+      }
+    };
+    recognition.onerror = (event) => {
+      if (!this.isCurrentRecognition(recognition, generation)) return;
+      const message = voiceRecognitionErrorMessage(event.error, this.voiceSecureContext);
+      if (message !== undefined) this.voiceInputError = message;
+      this.voiceInputInterim = "";
+    };
+    recognition.onend = () => {
+      if (!this.isCurrentRecognition(recognition, generation)) return;
+      this.releaseVoiceRecognition(recognition);
+      this.voiceInputState = "idle";
+      this.voiceInputInterim = "";
+      if (this.voiceInputError === undefined) {
+        this.voiceInputMessage = this.voiceHadFinalResult ? "Voice input added to the draft." : "Voice input stopped.";
+      }
+    };
+
+    try {
+      recognition.start();
+    } catch {
+      this.releaseVoiceRecognition(recognition);
+      this.voiceInputState = "idle";
+      this.voiceInputError = this.voiceSecureContext
+        ? "Chrome could not start voice input. Check microphone permission and try again."
+        : "Chrome could not start voice input on this HTTP address. Open Pi Web over HTTPS or localhost and try again.";
+    }
+  }
+
+  private stopVoiceInput() {
+    const recognition = this.voiceRecognition;
+    if (recognition === undefined) return;
+    this.voiceInputState = "stopping";
+    this.voiceInputInterim = "";
+    this.voiceInputMessage = "Finishing voice input…";
+    try {
+      recognition.stop();
+    } catch {
+      this.cancelVoiceInput();
+      this.voiceInputMessage = "Voice input stopped.";
+    }
+  }
+
+  private cancelVoiceInput() {
+    const recognition = this.voiceRecognition;
+    this.voiceRecognition = undefined;
+    this.voiceRecognitionGeneration += 1;
+    this.voiceInputState = "idle";
+    this.voiceInputInterim = "";
+    this.voiceInputMessage = undefined;
+    this.voiceInputError = undefined;
+    if (recognition === undefined) return;
+    this.clearVoiceRecognitionHandlers(recognition);
+    try {
+      recognition.abort();
+    } catch {
+      // Cancellation is best-effort when the browser has already ended recognition.
+    }
+  }
+
+  private releaseVoiceRecognition(recognition: SpeechRecognitionLike) {
+    if (this.voiceRecognition === recognition) this.voiceRecognition = undefined;
+    this.clearVoiceRecognitionHandlers(recognition);
+  }
+
+  private clearVoiceRecognitionHandlers(recognition: SpeechRecognitionLike) {
+    recognition.onstart = null;
+    recognition.onresult = null;
+    recognition.onerror = null;
+    recognition.onend = null;
+  }
+
+  private isCurrentRecognition(recognition: SpeechRecognitionLike, generation: number): boolean {
+    return this.voiceRecognition === recognition && this.voiceRecognitionGeneration === generation;
+  }
+
+  private insertVoiceTranscript(transcript: string) {
+    const editor = this.editor;
+    if (editor === undefined) {
+      this.replaceText(`${this.draft}${transcript}`);
+      return;
+    }
+    const selection = editor.state.selection.main;
+    const draft = editor.state.doc.toString();
+    const insertion = voiceTranscriptInsertion(draft, selection.from, selection.to, transcript, this.voiceInputLanguage);
+    if (insertion === undefined) return;
+    editor.dispatch({
+      changes: { from: insertion.from, to: insertion.to, insert: insertion.insert },
+      selection: EditorSelection.cursor(insertion.cursor),
+      scrollIntoView: true,
+    });
   }
 
   private renderAttachments() {
@@ -474,6 +709,7 @@ export class PromptEditor extends LitElement {
     const behavior = this.canSteer || this.isCompacting ? streamingBehavior : undefined;
     const attachments = pending.length > 0 ? this.currentAttachments() : undefined;
     const delivery = this.effectiveAttachmentDelivery();
+    this.cancelVoiceInput();
     this.resetComposer();
     // Sending is owned by the controller (it drives the chat activity dock and,
     // for folder mode, orchestrates the upload + reference rewrite), so this is

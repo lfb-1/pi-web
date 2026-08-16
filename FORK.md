@@ -47,6 +47,19 @@ partially streamed formulas do not break the surrounding message. The chat parse
 isolated Marked instance so the KaTeX extension does not change stricter workspace Markdown
 preview behavior.
 
+### Voice input
+
+The prompt editor provides Chrome-first speech-to-text through the browser Web Speech API.
+Users select Chinese (`zh-CN`) or English (`en-US`), click the microphone to start or stop,
+and review the final transcript inserted at the current editor selection before sending.
+Interim recognition stays in a status line and does not modify the draft.
+
+The implementation uses `SpeechRecognition` with the Chrome-compatible
+`webkitSpeechRecognition` fallback. It does not upload audio through PI WEB, but Chrome may
+send audio to its own speech-recognition service. Unsupported browsers, denied microphone
+permission, missing audio capture, recognition network failures, and remote HTTP origins receive
+explicit guidance. HTTPS or localhost access is recommended for reliable microphone permission.
+
 ### Research Workflow prototype
 
 The bundled `research-workflow` plugin adds a workspace panel for objective, definition of
@@ -97,6 +110,8 @@ npm run build
 
 The LaTeX contract tests are in
 `src/client/src/formatting/markdown.test.ts`. File-language detection tests are in
-`src/server/workspaces/fileContentService.read.test.ts`. Research Workflow parser, panel, and
+`src/server/workspaces/fileContentService.read.test.ts`. Voice-input behavior is covered by
+`src/client/src/voiceInput.test.ts` and
+`src/client/src/components/PromptEditor.voice.test.ts`. Research Workflow parser, panel, and
 extension tests are under `pi-web-plugins/research-workflow/` and
 `extensions/research-workflow-extension.test.ts`.

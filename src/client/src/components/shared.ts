@@ -526,6 +526,14 @@ export const promptEditorStyles = css`
   .compact-status { display: flex; min-width: 0; align-items: center; gap: 6px; color: var(--pi-muted); font-size: 12px; flex: 1 1 0; }
   .compact-status > button { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .select-model { max-width: min(42vw, 320px); }
+  .voice-input-controls { display: flex; flex: 0 0 auto; align-items: center; gap: 6px; }
+  .voice-language { box-sizing: border-box; width: 86px; height: 36px; border: 1px solid var(--pi-border); border-radius: 8px; background: var(--pi-surface); color: var(--pi-text); padding: 0 7px; font: 13px system-ui, sans-serif; }
+  .voice-language:disabled { opacity: .5; cursor: not-allowed; }
+  .voice-input-button.voice-input-active { border-color: var(--pi-danger); color: var(--pi-danger); }
+  .voice-input-button .voice-stop-mark { fill: currentColor; stroke: none; }
+  .voice-input-feedback { min-width: 0; overflow: hidden; color: var(--pi-muted); font-size: 12px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+  .voice-input-guidance { white-space: normal; }
+  .voice-input-error { color: var(--pi-danger); white-space: normal; }
   .icon-button { flex: 0 0 auto; display: inline-grid; place-items: center; width: 36px; height: 36px; padding: 0; }
   .icon-button .prompt-action-icon, .icon-button .prompt-thinking-gauge { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; pointer-events: none; }
   .icon-button .prompt-action-icon-filled { fill: currentColor; stroke: none; }
@@ -563,9 +571,12 @@ export const promptEditorStyles = css`
     button { padding: 6px 8px; }
   }
   @media (max-width: 430px) {
-    .compact-status { flex-basis: 170px; font-size: 11px; }
-    .select-model { max-width: 48vw; }
+    .compact-status { flex-basis: 112px; font-size: 11px; }
+    .select-model { max-width: 32vw; }
+    .voice-input-controls { gap: 4px; }
+    .voice-language { width: 72px; height: 44px; padding: 0 4px; font-size: 12px; }
     button { padding: 5px 7px; }
     .icon-button { width: 34px; height: 34px; }
+    .voice-input-button { width: 44px; height: 44px; }
   }
 `;
