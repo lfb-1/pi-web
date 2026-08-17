@@ -209,6 +209,7 @@ export default function researchWorkflowExtension(pi: ExtensionAPI): void {
     promptSnippet: "Maintain the research causal graph from hypothesis through validation, analysis, conclusion, and next direction",
     promptGuidelines: [
       "Use research_workflow whenever a hypothesis, validation, analysis, conclusion, or resulting research direction changes. Call action=get first when state may have changed; update one entity at a time and preserve stable ids.",
+      `Never create, edit, copy, or overwrite ${RESEARCH_WORKFLOW_STATE_PATH} with file, shell, or text-edit tools. Only research_workflow may write it because the tool injects nested provenance, validates evidence references, checks the explicit active path, and writes atomically. If action=get reports invalid state, stop and report the exact validation error instead of replacing the file.`,
       "The causal graph is the primary human view. Keep it current automatically: hypothesis -> validation -> analysis -> conclusion, then connect a conclusion to each new hypothesis with a motivates edge whose direction explains the causal reason. Branches and merges are allowed; cycles are not.",
       "Graph nodes are concise semantic summaries. Never put code, paths, job metadata, long metric tables, or implementation detail in them. A validation node states only what was tested and its status; an analysis node states the short interpretation; a conclusion node uses confirmed, denied, or unsure while preserving scope and uncertainty.",
       "Keep detailed runs, artifacts, criteria, and findings durable for traceability, but do not copy their detail into the graph. Link a graph node to its branch with workItemId when available.",
@@ -295,7 +296,7 @@ export default function researchWorkflowExtension(pi: ExtensionAPI): void {
         ...(activeNode === undefined ? [] : [`- Active causal node: ${activeNode.id} [${activeNode.kind}] ${activeNode.title}`]),
         `- Critical blocking decisions: ${criticalDecisions.length === 0 ? "none" : criticalDecisions.map((decision) => `${decision.id}: ${decision.question}`).join("; ")}`,
         `- Active runs: ${activeRuns.length === 0 ? "none" : activeRuns.map((run) => `${run.id}: ${run.status}`).join("; ")}`,
-        `Use research_workflow to keep ${RESEARCH_WORKFLOW_STATE_PATH} synchronized. Maintain the causal graph automatically after material hypothesis, validation, analysis, conclusion, or direction changes. Ask the user only for a critical blocker or an authority transition.`,
+        `Use research_workflow exclusively to keep ${RESEARCH_WORKFLOW_STATE_PATH} synchronized; never write that file with file, shell, or text-edit tools. Maintain the causal graph automatically after material hypothesis, validation, analysis, conclusion, or direction changes. Ask the user only for a critical blocker or an authority transition.`,
       ].join("\n");
       return { systemPrompt: `${event.systemPrompt}\n\n${summary}` };
     } catch {
