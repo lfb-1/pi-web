@@ -38,6 +38,8 @@ export class AgentSessionGraphElement extends LitElement {
   @property({ attribute: false }) statuses: Record<string, SessionStatus> = {};
   @property({ attribute: false }) activities: Record<string, SessionActivity> = {};
   @property({ attribute: false }) onSelectSession: (session: SessionInfo, rootSession: SessionInfo) => void = () => undefined;
+  @property({ type: Boolean }) showCollapseControl = false;
+  @property({ attribute: false }) onCollapse: () => void = () => undefined;
 
   @state() private zoom = 1;
   @state() private panX = 0;
@@ -88,10 +90,13 @@ export class AgentSessionGraphElement extends LitElement {
             <strong>Agents</strong>
             <span>${String(mainCount)} main · ${String(subagentCount)} subagent${subagentCount === 1 ? "" : "s"}${hiddenCount === 0 ? "" : ` · ${String(hiddenCount)} folded`}${activeCount === 0 ? "" : ` · ${String(activeCount)} active`}</span>
           </div>
-          <div class="zoom-controls" aria-label="Agent graph zoom controls">
-            <button type="button" title="Zoom out" aria-label="Zoom out agent graph" @click=${() => { this.changeZoom(-ZOOM_STEP); }}>−</button>
-            <button type="button" class="zoom-value" title="Reset view" aria-label="Reset agent graph view" @click=${() => { this.resetView(); }}>${Math.round(this.zoom * 100)}%</button>
-            <button type="button" title="Zoom in" aria-label="Zoom in agent graph" @click=${() => { this.changeZoom(ZOOM_STEP); }}>+</button>
+          <div class="header-actions">
+            ${this.renderCollapseControl()}
+            <div class="zoom-controls" aria-label="Agent graph zoom controls">
+              <button type="button" title="Zoom out" aria-label="Zoom out agent graph" @click=${() => { this.changeZoom(-ZOOM_STEP); }}>−</button>
+              <button type="button" class="zoom-value" title="Reset view" aria-label="Reset agent graph view" @click=${() => { this.resetView(); }}>${Math.round(this.zoom * 100)}%</button>
+              <button type="button" title="Zoom in" aria-label="Zoom in agent graph" @click=${() => { this.changeZoom(ZOOM_STEP); }}>+</button>
+            </div>
           </div>
         </header>
         <div class="canvas-frame">
@@ -122,13 +127,18 @@ export class AgentSessionGraphElement extends LitElement {
   private renderEmptyState() {
     return html`
       <section class="graph-shell empty" aria-label="Agent session graph">
-        <header><div class="graph-title"><strong>Agents</strong></div></header>
+        <header><div class="graph-title"><strong>Agents</strong></div>${this.renderCollapseControl()}</header>
         <div class="empty-state" role="status">
           <strong>Select a main-agent session</strong>
           <span>Its subagent sessions will appear in this graph.</span>
         </div>
       </section>
     `;
+  }
+
+  private renderCollapseControl(): TemplateResult | null {
+    if (!this.showCollapseControl) return null;
+    return html`<button class="collapse-control" type="button" title="Collapse Agents panel" aria-label="Collapse Agents panel" aria-expanded="true" @click=${() => { this.onCollapse(); }}>⌄</button>`;
   }
 
   private renderEdge(layout: AgentSessionGraphLayout, parentId: string, childId: string): TemplateResult | null {
@@ -285,11 +295,14 @@ export class AgentSessionGraphElement extends LitElement {
     .graph-title { min-width: 0; display: flex; align-items: baseline; gap: 7px; }
     .graph-title strong { color: var(--pi-text); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
     .graph-title span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--pi-muted); }
+    .header-actions { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; }
     .zoom-controls { flex: 0 0 auto; display: inline-flex; align-items: center; }
-    button { min-width: 28px; min-height: 28px; display: inline-grid; place-items: center; border: 1px solid var(--pi-border); border-right: 0; border-radius: 0; background: var(--pi-bg); color: var(--pi-text); padding: 2px 6px; cursor: pointer; font: inherit; }
-    button:first-child { border-radius: 6px 0 0 6px; }
-    button:last-child { border-right: 1px solid var(--pi-border); border-radius: 0 6px 6px 0; }
+    button { min-width: 28px; min-height: 28px; display: inline-grid; place-items: center; border: 1px solid var(--pi-border); border-radius: 6px; background: var(--pi-bg); color: var(--pi-text); padding: 2px 6px; cursor: pointer; font: inherit; }
+    .zoom-controls button { border-right: 0; border-radius: 0; }
+    .zoom-controls button:first-child { border-radius: 6px 0 0 6px; }
+    .zoom-controls button:last-child { border-right: 1px solid var(--pi-border); border-radius: 0 6px 6px 0; }
     button:hover, button:focus-visible { color: var(--pi-accent); background: var(--pi-selection-bg); }
+    .collapse-control { font-size: 16px; line-height: 1; }
     .zoom-value { min-width: 48px; color: var(--pi-muted); }
     .canvas-frame { position: relative; flex: 1 1 auto; min-height: 0; overflow: hidden; background-image: radial-gradient(circle, color-mix(in srgb, var(--pi-border) 60%, transparent) 0.8px, transparent 0.9px); background-size: 16px 16px; }
     svg { display: block; width: 100%; height: 100%; min-height: 0; touch-action: none; cursor: grab; user-select: none; }

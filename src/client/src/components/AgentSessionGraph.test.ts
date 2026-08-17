@@ -124,11 +124,14 @@ describe("AgentSessionGraphElement", () => {
     expect(graph.shadowRoot?.querySelector(".agent-node")).toBeNull();
   });
 
-  it("provides zoom controls and keeps details off the canvas", async () => {
+  it("provides zoom and optional panel-collapse controls while keeping details off the canvas", async () => {
     const main = session("main");
+    const collapse = vi.fn();
     const graph = new AgentSessionGraphElement();
     graph.sessions = [main];
     graph.selectedSession = main;
+    graph.showCollapseControl = true;
+    graph.onCollapse = collapse;
     document.body.append(graph);
     await graph.updateComplete;
 
@@ -137,6 +140,8 @@ describe("AgentSessionGraphElement", () => {
     await graph.updateComplete;
 
     expect(graph.shadowRoot?.querySelector(".zoom-value")?.textContent).toBe("120%");
+    graph.shadowRoot?.querySelector<HTMLButtonElement>('[aria-label="Collapse Agents panel"]')?.click();
+    expect(collapse).toHaveBeenCalledOnce();
     expect(graph.shadowRoot?.querySelector("details")).toBeNull();
     expect(graph.shadowRoot?.textContent).toContain("Subagents and main-session forks will appear here");
   });

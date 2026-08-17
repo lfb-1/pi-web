@@ -3,6 +3,7 @@ import { html } from "lit";
 import { afterEach, describe, expect, it } from "vitest";
 import type { SessionInfo, Workspace } from "../api";
 import type { QualifiedWorkspacePanelContribution } from "../plugins/types";
+import { AgentSessionGraphElement } from "./AgentSessionGraph";
 import { WorkspacePanel } from "./WorkspacePanel";
 
 afterEach(() => {
@@ -11,7 +12,7 @@ afterEach(() => {
 });
 
 describe("WorkspacePanel agent graph split", () => {
-  it("keeps the selected workspace tool above a persistent agent graph", async () => {
+  it("keeps Agents folded by default and lets the user expand and collapse it", async () => {
     const panel = new WorkspacePanel();
     panel.workspace = workspace();
     // The selected fixture panel does not inspect context; set the public Lit
@@ -23,9 +24,26 @@ describe("WorkspacePanel agent graph split", () => {
     document.body.append(panel);
     await panel.updateComplete;
 
-    const split = panel.shadowRoot?.querySelector(".workspace-content-split");
+    let split = panel.shadowRoot?.querySelector(".workspace-content-split");
     expect(split?.querySelector(".workspace-tool-pane")?.textContent).toContain("Workspace tool content");
-    expect(split?.querySelector(".agent-graph-pane agent-session-graph")).not.toBeNull();
+    expect(split?.classList.contains("agents-collapsed")).toBe(true);
+    expect(split?.querySelector(".agent-graph-pane agent-session-graph")).toBeNull();
+
+    const expand = split?.querySelector<HTMLButtonElement>(".agent-graph-expand");
+    expect(expand?.getAttribute("aria-expanded")).toBe("false");
+    expand?.click();
+    await panel.updateComplete;
+
+    split = panel.shadowRoot?.querySelector(".workspace-content-split");
+    expect(split?.classList.contains("agents-expanded")).toBe(true);
+    const graph = split?.querySelector<AgentSessionGraphElement>("agent-session-graph");
+    expect(graph).not.toBeNull();
+    await graph?.updateComplete;
+    graph?.shadowRoot?.querySelector<HTMLButtonElement>('[aria-label="Collapse Agents panel"]')?.click();
+    await panel.updateComplete;
+
+    expect(panel.shadowRoot?.querySelector(".workspace-content-split")?.classList.contains("agents-collapsed")).toBe(true);
+    expect(panel.shadowRoot?.querySelector("agent-session-graph")).toBeNull();
   });
 });
 

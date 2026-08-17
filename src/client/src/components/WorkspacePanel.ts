@@ -1,4 +1,4 @@
-import { LitElement, css, html, type TemplateResult } from "lit";
+import { LitElement, css, html, type PropertyValues, type TemplateResult } from "lit";
 import { customElement, property, query, state } from "lit/decorators.js";
 import type { SessionActivity, SessionInfo, SessionStatus, Workspace } from "../api";
 import type { QualifiedContributionId, QualifiedWorkspacePanelContribution, WorkspacePanelContext } from "../plugins/types";
@@ -30,6 +30,7 @@ export class WorkspacePanel extends LitElement {
   @query(".workspace-header-strip") private workspaceHeaderStrip?: HTMLElement | null;
   @state() private workspaceHeaderCanScrollLeft = false;
   @state() private workspaceHeaderCanScrollRight = false;
+  @state() private agentsExpanded = false;
 
   private observedWorkspaceHeaderStrip: HTMLElement | undefined;
   private workspaceHeaderResizeObserver: ResizeObserver | undefined;
@@ -42,9 +43,11 @@ export class WorkspacePanel extends LitElement {
     this.updateWorkspaceHeaderScrollState();
   }
 
-  override updated(): void {
+  override updated(changed: PropertyValues<this>): void {
     this.observeWorkspaceHeaderStrip();
     this.updateWorkspaceHeaderScrollState();
+    const previousWorkspace = changed.get("workspace");
+    if (previousWorkspace !== undefined && previousWorkspace.id !== this.workspace?.id && this.agentsExpanded) this.agentsExpanded = false;
   }
 
   override disconnectedCallback(): void {
@@ -88,7 +91,7 @@ export class WorkspacePanel extends LitElement {
           </div>
         </header>
       `}
-      <div class="workspace-content-split">
+      <div class=${`workspace-content-split ${this.agentsExpanded ? "agents-expanded" : "agents-collapsed"}`}>
         <div class="workspace-tool-pane">
           ${selectedPanel === undefined ? this.renderEmptyState({
             title: "No workspace tools available",
@@ -100,14 +103,24 @@ export class WorkspacePanel extends LitElement {
           `}
         </div>
         <div class="agent-graph-pane">
-          <agent-session-graph
-            .sessions=${this.sessions}
-            .selectedSession=${this.selectedSession}
-            .messages=${this.messages}
-            .statuses=${this.sessionStatuses}
-            .activities=${this.sessionActivities}
-            .onSelectSession=${this.onSelectSession}
-          ></agent-session-graph>
+          ${this.agentsExpanded ? html`
+            <agent-session-graph
+              .sessions=${this.sessions}
+              .selectedSession=${this.selectedSession}
+              .messages=${this.messages}
+              .statuses=${this.sessionStatuses}
+              .activities=${this.sessionActivities}
+              .onSelectSession=${this.onSelectSession}
+              .showCollapseControl=${true}
+              .onCollapse=${() => { this.agentsExpanded = false; }}
+            ></agent-session-graph>
+          ` : html`
+            <button class="agent-graph-expand" type="button" aria-expanded="false" @click=${() => { this.agentsExpanded = true; }}>
+              <span class="expand-chevron" aria-hidden="true">⌃</span>
+              <strong>Agents</strong>
+              <span>Show panel</span>
+            </button>
+          `}
         </div>
       </div>
     `;
@@ -180,10 +193,16 @@ export class WorkspacePanel extends LitElement {
 
   static override styles = [workspacePanelStyles, css`
     :host { overflow: hidden; }
-    .workspace-content-split { flex: 1 1 auto; min-height: 0; display: grid; grid-template-rows: minmax(140px, 56%) minmax(160px, 44%); overflow: hidden; }
+    .workspace-content-split { flex: 1 1 auto; min-height: 0; display: grid; grid-template-rows: minmax(0, 1fr) 38px; overflow: hidden; }
+    .workspace-content-split.agents-expanded { grid-template-rows: minmax(140px, 56%) minmax(160px, 44%); }
     .workspace-tool-pane { min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
     .workspace-tool-pane > .empty-state { flex: 1 1 auto; }
-    .agent-graph-pane { min-height: 0; overflow: hidden; border-top: 1px solid var(--pi-border); }
+    .agent-graph-pane { min-height: 0; display: flex; flex-direction: column; overflow: hidden; border-top: 1px solid var(--pi-border); }
+    .agent-graph-expand { flex: 1 1 auto; width: 100%; display: flex; align-items: center; gap: 7px; border: 0; background: var(--pi-surface); color: var(--pi-text); padding: 0 10px; cursor: pointer; font: inherit; text-align: left; }
+    .agent-graph-expand:hover, .agent-graph-expand:focus-visible { background: var(--pi-surface-hover); color: var(--pi-accent); }
+    .agent-graph-expand strong { font-size: 11px; letter-spacing: .04em; text-transform: uppercase; }
+    .agent-graph-expand > span:last-child { margin-left: auto; color: var(--pi-muted); font-size: 10px; }
+    .expand-chevron { color: var(--pi-muted); }
     agent-session-graph { height: 100%; }
   `];
 }
