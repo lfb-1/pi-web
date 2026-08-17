@@ -1,4 +1,5 @@
-export const RESEARCH_WORKFLOW_STATE_PATH = ".pi-web/research-workflow.json";
+export const RESEARCH_WORKFLOW_STATE_PATH = ".pi-web/research-workflow-v2.json";
+export const LEGACY_RESEARCH_WORKFLOW_STATE_PATH = ".pi-web/research-workflow.json";
 
 export const workflowPhases = [
   "research",
@@ -19,11 +20,17 @@ export type CriterionStatus = "proposed" | "approved";
 export type CriterionResult = "pending" | "passed" | "failed" | "not-run";
 export type DecisionKind = "config-approval" | "ambiguity" | "result-acceptance" | "follow-up-compute" | "other";
 export type DecisionStatus = "open" | "resolved" | "void";
+export type DecisionImportance = "routine" | "important" | "critical";
 export type RunKind = "pi-session" | "subsession" | "terminal" | "slurm" | "external";
 export type RunStatus = "queued" | "running" | "waiting" | "succeeded" | "failed" | "cancelled";
 export type FindingStatus = "provisional" | "accepted" | "rejected";
 export type BriefConfidence = "low" | "medium" | "high";
 export type NextActionOwner = "user" | "pi" | "runtime" | "none";
+export type CausalGraphStatus = "active" | "completed";
+export type CausalNodeKind = "hypothesis" | "validation" | "analysis" | "conclusion";
+export type CausalNodeStatus = "proposed" | "active" | "completed" | "blocked" | "abandoned";
+export type CausalConclusion = "confirmed" | "denied" | "unsure";
+export type CausalEdgeKind = "tests" | "produces" | "concludes" | "motivates";
 
 export interface RecordSource {
   kind: SourceKind;
@@ -57,6 +64,8 @@ export interface DecisionRecord {
   question: string;
   impact: string;
   status: DecisionStatus;
+  importance?: DecisionImportance;
+  blocking?: boolean;
   resolution?: string;
   source: RecordSource;
   authoritySource?: RecordSource;
@@ -113,6 +122,40 @@ export interface ResearchBrief {
   source: RecordSource;
 }
 
+export interface CausalNode {
+  id: string;
+  kind: CausalNodeKind;
+  title: string;
+  summary: string;
+  status: CausalNodeStatus;
+  conclusion?: CausalConclusion;
+  workItemId?: string;
+  evidenceRefs: string[];
+  source: RecordSource;
+  updatedSource?: RecordSource;
+}
+
+export interface CausalEdge {
+  id: string;
+  from: string;
+  to: string;
+  kind: CausalEdgeKind;
+  direction?: string;
+  source: RecordSource;
+  updatedSource?: RecordSource;
+}
+
+export interface ResearchCausalGraph {
+  title: string;
+  status: CausalGraphStatus;
+  activeNodeId?: string;
+  activePathEdgeIds: string[];
+  nodes: CausalNode[];
+  edges: CausalEdge[];
+  source: RecordSource;
+  authoritySource?: RecordSource;
+}
+
 export interface ResearchWorkItem {
   id: string;
   title: string;
@@ -134,9 +177,10 @@ export interface ResearchWorkItem {
 }
 
 export interface ResearchWorkflowState {
-  version: 1;
+  version: 2;
   updatedAt: string;
   activeWorkItemId?: string;
+  causalGraph?: ResearchCausalGraph;
   workItems: ResearchWorkItem[];
 }
 
@@ -152,12 +196,18 @@ export const criterionStatuses = ["proposed", "approved"] as const;
 export const criterionResults = ["pending", "passed", "failed", "not-run"] as const;
 export const decisionKinds = ["config-approval", "ambiguity", "result-acceptance", "follow-up-compute", "other"] as const;
 export const decisionStatuses = ["open", "resolved", "void"] as const;
+export const decisionImportances = ["routine", "important", "critical"] as const;
 export const runKinds = ["pi-session", "subsession", "terminal", "slurm", "external"] as const;
 export const runStatuses = ["queued", "running", "waiting", "succeeded", "failed", "cancelled"] as const;
 export const artifactKinds = ["file", "log", "checkpoint", "metric", "report", "url", "other"] as const;
 export const findingStatuses = ["provisional", "accepted", "rejected"] as const;
 export const briefConfidences = ["low", "medium", "high"] as const;
 export const nextActionOwners = ["user", "pi", "runtime", "none"] as const;
+export const causalGraphStatuses = ["active", "completed"] as const;
+export const causalNodeKinds = ["hypothesis", "validation", "analysis", "conclusion"] as const;
+export const causalNodeStatuses = ["proposed", "active", "completed", "blocked", "abandoned"] as const;
+export const causalConclusions = ["confirmed", "denied", "unsure"] as const;
+export const causalEdgeKinds = ["tests", "produces", "concludes", "motivates"] as const;
 
 export function parseResearchWorkflowStateText(text: string): ParseResearchWorkflowStateResult {
   let value: unknown;
@@ -182,9 +232,15 @@ export function activeWorkItem(state: ResearchWorkflowState): ResearchWorkItem |
   return state.workItems[0];
 }
 
+/** Only decisions that truly block safe autonomous progress should interrupt the user. */
+export function decisionRequiresAttention(decision: DecisionRecord): boolean {
+  return decision.status === "open" && (decision.blocking === true || decision.importance === "critical");
+}
+
 function parseState(value: unknown): ResearchWorkflowState {
   const record = objectValue(value, "state");
-  if (record["version"] !== 1) throw new Error("state.version must be 1");
+  const storedVersion = record["version"];
+  if (storedVersion !== 1 && storedVersion !== 2) throw new Error("state.version must be 1 or 2");
   const updatedAt = timestampValue(record["updatedAt"], "state.updatedAt");
   const workItems = arrayValue(record["workItems"], "state.workItems").map((item, index) => parseWorkItem(item, `state.workItems[${String(index)}]`));
   requireUniqueIds(workItems, "state.workItems");
@@ -192,9 +248,186 @@ function parseState(value: unknown): ResearchWorkflowState {
   if (activeWorkItemId !== undefined && !workItems.some((item) => item.id === activeWorkItemId)) {
     throw new Error(`state.activeWorkItemId references missing work item ${activeWorkItemId}`);
   }
-  return activeWorkItemId === undefined
-    ? { version: 1, updatedAt, workItems }
-    : { version: 1, updatedAt, activeWorkItemId, workItems };
+  const causalGraph = storedVersion === 2 ? optionalCausalGraph(record["causalGraph"], "state.causalGraph", workItems) : undefined;
+  return {
+    version: 2,
+    updatedAt,
+    ...(activeWorkItemId === undefined ? {} : { activeWorkItemId }),
+    ...(causalGraph === undefined ? {} : { causalGraph }),
+    workItems,
+  };
+}
+
+function optionalCausalGraph(value: unknown, path: string, workItems: ResearchWorkItem[]): ResearchCausalGraph | undefined {
+  if (value === undefined) return undefined;
+  const record = objectValue(value, path);
+  const nodes = parseArray(record["nodes"], `${path}.nodes`, parseCausalNode);
+  const edges = parseArray(record["edges"], `${path}.edges`, parseCausalEdge);
+  if (nodes.length > 256) throw new Error(`${path}.nodes must contain at most 256 entries`);
+  if (edges.length > 512) throw new Error(`${path}.edges must contain at most 512 entries`);
+  requireUniqueIds(nodes, `${path}.nodes`);
+  requireUniqueIds(edges, `${path}.edges`);
+  const nodeIds = new Set(nodes.map((node) => node.id));
+  const workItemIds = new Set(workItems.map((item) => item.id));
+  for (const node of nodes) {
+    if (node.workItemId !== undefined && !workItemIds.has(node.workItemId)) {
+      throw new Error(`${path}.nodes references missing work item ${node.workItemId}`);
+    }
+    validateCausalEvidenceRefs(node, workItems, `${path}.nodes.${node.id}`);
+  }
+  for (const edge of edges) validateCausalEdge(edge, nodes, nodeIds, `${path}.edges`);
+  validateCausalGraphIsAcyclic(nodes, edges, path);
+  const activeNodeId = optionalIdValue(record["activeNodeId"], `${path}.activeNodeId`);
+  if (activeNodeId !== undefined && !nodeIds.has(activeNodeId)) {
+    throw new Error(`${path}.activeNodeId references missing node ${activeNodeId}`);
+  }
+  const activePathEdgeIds = stringArray(record["activePathEdgeIds"], `${path}.activePathEdgeIds`);
+  validateActivePath(activeNodeId, activePathEdgeIds, edges, path);
+  const status = enumValue(record["status"], causalGraphStatuses, `${path}.status`);
+  const authoritySource = optionalSource(record["authoritySource"], `${path}.authoritySource`);
+  if (status === "completed" && authoritySource === undefined) {
+    throw new Error(`${path}.authoritySource is required when status is completed`);
+  }
+  if (status === "completed" && authoritySource?.kind !== "user") {
+    throw new Error(`${path}.authoritySource must be a user source when status is completed`);
+  }
+  const hasUnfinishedNode = nodes.some((node) => node.status === "active" || node.status === "proposed" || node.status === "blocked");
+  if (status === "completed" && (activeNodeId !== undefined || activePathEdgeIds.length > 0 || hasUnfinishedNode)) {
+    throw new Error(`${path} cannot retain an active path or unfinished node when status is completed`);
+  }
+  return {
+    title: boundedString(record["title"], `${path}.title`, 160),
+    status,
+    ...(activeNodeId === undefined ? {} : { activeNodeId }),
+    activePathEdgeIds,
+    nodes,
+    edges,
+    source: parseSource(record["source"], `${path}.source`),
+    ...(authoritySource === undefined ? {} : { authoritySource }),
+  };
+}
+
+function parseCausalNode(value: unknown, path: string): CausalNode {
+  const record = objectValue(value, path);
+  const kind = enumValue(record["kind"], causalNodeKinds, `${path}.kind`);
+  const conclusion = record["conclusion"] === undefined
+    ? undefined
+    : enumValue(record["conclusion"], causalConclusions, `${path}.conclusion`);
+  if (kind === "conclusion" && conclusion === undefined) throw new Error(`${path}.conclusion is required for a conclusion node`);
+  if (kind !== "conclusion" && conclusion !== undefined) throw new Error(`${path}.conclusion is only valid for a conclusion node`);
+  const workItemId = optionalIdValue(record["workItemId"], `${path}.workItemId`);
+  const updatedSource = optionalSource(record["updatedSource"], `${path}.updatedSource`);
+  return {
+    id: idValue(record["id"], `${path}.id`),
+    kind,
+    title: boundedString(record["title"], `${path}.title`, 240),
+    summary: boundedString(record["summary"], `${path}.summary`, 700),
+    status: enumValue(record["status"], causalNodeStatuses, `${path}.status`),
+    ...(conclusion === undefined ? {} : { conclusion }),
+    ...(workItemId === undefined ? {} : { workItemId }),
+    evidenceRefs: stringArray(record["evidenceRefs"], `${path}.evidenceRefs`),
+    source: parseSource(record["source"], `${path}.source`),
+    ...(updatedSource === undefined ? {} : { updatedSource }),
+  };
+}
+
+function parseCausalEdge(value: unknown, path: string): CausalEdge {
+  const record = objectValue(value, path);
+  const kind = enumValue(record["kind"], causalEdgeKinds, `${path}.kind`);
+  const direction = optionalBoundedString(record["direction"], `${path}.direction`, 360);
+  if (kind === "motivates" && direction === undefined) throw new Error(`${path}.direction is required for a motivates edge`);
+  if (kind !== "motivates" && direction !== undefined) throw new Error(`${path}.direction is only valid for a motivates edge`);
+  const updatedSource = optionalSource(record["updatedSource"], `${path}.updatedSource`);
+  return {
+    id: idValue(record["id"], `${path}.id`),
+    from: idValue(record["from"], `${path}.from`),
+    to: idValue(record["to"], `${path}.to`),
+    kind,
+    ...(direction === undefined ? {} : { direction }),
+    source: parseSource(record["source"], `${path}.source`),
+    ...(updatedSource === undefined ? {} : { updatedSource }),
+  };
+}
+
+function validateCausalEdge(edge: CausalEdge, nodes: CausalNode[], nodeIds: Set<string>, path: string): void {
+  if (!nodeIds.has(edge.from)) throw new Error(`${path} edge ${edge.id} references missing source node ${edge.from}`);
+  if (!nodeIds.has(edge.to)) throw new Error(`${path} edge ${edge.id} references missing target node ${edge.to}`);
+  if (edge.from === edge.to) throw new Error(`${path} edge ${edge.id} cannot connect a node to itself`);
+  const fromKind = nodes.find((node) => node.id === edge.from)?.kind;
+  const toKind = nodes.find((node) => node.id === edge.to)?.kind;
+  const expected: Record<CausalEdgeKind, readonly [CausalNodeKind, CausalNodeKind]> = {
+    tests: ["hypothesis", "validation"],
+    produces: ["validation", "analysis"],
+    concludes: ["analysis", "conclusion"],
+    motivates: ["conclusion", "hypothesis"],
+  };
+  const [expectedFrom, expectedTo] = expected[edge.kind];
+  if (fromKind !== expectedFrom || toKind !== expectedTo) {
+    throw new Error(`${path} edge ${edge.id} (${edge.kind}) must connect ${expectedFrom} to ${expectedTo}`);
+  }
+}
+
+function validateCausalEvidenceRefs(node: CausalNode, workItems: ResearchWorkItem[], path: string): void {
+  if ((node.kind === "analysis" || node.kind === "conclusion") && node.status === "completed" && node.evidenceRefs.length === 0) {
+    throw new Error(`${path}.evidenceRefs requires at least one typed reference for a completed ${node.kind} node`);
+  }
+  for (const ref of node.evidenceRefs) {
+    const match = /^([a-z][a-z0-9.-]*)\/(run|artifact|finding|criterion|decision):([a-z][a-z0-9.-]*)$/u.exec(ref);
+    if (match === null) throw new Error(`${path}.evidenceRefs contains invalid typed reference ${ref}`);
+    const workItemId = match[1];
+    const kind = match[2];
+    const recordId = match[3];
+    if (workItemId === undefined || kind === undefined || recordId === undefined) {
+      throw new Error(`${path}.evidenceRefs contains invalid typed reference ${ref}`);
+    }
+    const item = workItems.find((candidate) => candidate.id === workItemId);
+    if (item === undefined) throw new Error(`${path}.evidenceRefs references missing work item ${workItemId}`);
+    const exists = kind === "run" ? item.runs.some((record) => record.id === recordId)
+      : kind === "artifact" ? item.artifacts.some((record) => record.id === recordId)
+        : kind === "finding" ? item.findings.some((record) => record.id === recordId)
+          : kind === "criterion" ? item.acceptanceCriteria.some((record) => record.id === recordId)
+            : item.decisions.some((record) => record.id === recordId);
+    if (!exists) throw new Error(`${path}.evidenceRefs references missing ${kind} ${recordId} in ${workItemId}`);
+  }
+}
+
+function validateActivePath(activeNodeId: string | undefined, edgeIds: string[], edges: CausalEdge[], path: string): void {
+  if (new Set(edgeIds).size !== edgeIds.length) throw new Error(`${path}.activePathEdgeIds must not contain duplicates`);
+  if (edgeIds.length === 0) return;
+  if (activeNodeId === undefined) throw new Error(`${path}.activePathEdgeIds requires activeNodeId`);
+  const pathEdges = edgeIds.map((id) => {
+    const edge = edges.find((candidate) => candidate.id === id);
+    if (edge === undefined) throw new Error(`${path}.activePathEdgeIds references missing edge ${id}`);
+    return edge;
+  });
+  for (let index = 1; index < pathEdges.length; index += 1) {
+    if (pathEdges[index - 1]?.to !== pathEdges[index]?.from) {
+      throw new Error(`${path}.activePathEdgeIds must form one ordered continuous path`);
+    }
+  }
+  if (pathEdges.at(-1)?.to !== activeNodeId) throw new Error(`${path}.activePathEdgeIds must end at activeNodeId ${activeNodeId}`);
+}
+
+function validateCausalGraphIsAcyclic(nodes: CausalNode[], edges: CausalEdge[], path: string): void {
+  const indegree = new Map(nodes.map((node) => [node.id, 0]));
+  const outgoing = new Map<string, string[]>(nodes.map((node) => [node.id, []]));
+  for (const edge of edges) {
+    indegree.set(edge.to, (indegree.get(edge.to) ?? 0) + 1);
+    outgoing.get(edge.from)?.push(edge.to);
+  }
+  const ready = nodes.filter((node) => indegree.get(node.id) === 0).map((node) => node.id);
+  let visited = 0;
+  while (ready.length > 0) {
+    const id = ready.shift();
+    if (id === undefined) break;
+    visited += 1;
+    for (const target of outgoing.get(id) ?? []) {
+      const next = (indegree.get(target) ?? 0) - 1;
+      indegree.set(target, next);
+      if (next === 0) ready.push(target);
+    }
+  }
+  if (visited !== nodes.length) throw new Error(`${path} must be a directed acyclic graph`);
 }
 
 function parseWorkItem(value: unknown, path: string): ResearchWorkItem {
@@ -289,6 +522,10 @@ function parseDecision(value: unknown, path: string): DecisionRecord {
   const resolution = optionalNonEmptyString(record["resolution"], `${path}.resolution`);
   const authoritySource = optionalSource(record["authoritySource"], `${path}.authoritySource`);
   const status = enumValue(record["status"], decisionStatuses, `${path}.status`);
+  const importance = record["importance"] === undefined
+    ? undefined
+    : enumValue(record["importance"], decisionImportances, `${path}.importance`);
+  const blocking = optionalBoolean(record["blocking"], `${path}.blocking`);
   if (status === "resolved" && resolution === undefined) throw new Error(`${path}.resolution is required when status is resolved`);
   return {
     id: idValue(record["id"], `${path}.id`),
@@ -296,6 +533,8 @@ function parseDecision(value: unknown, path: string): DecisionRecord {
     question: nonEmptyString(record["question"], `${path}.question`),
     impact: nonEmptyString(record["impact"], `${path}.impact`),
     status,
+    ...(importance === undefined ? {} : { importance }),
+    ...(blocking === undefined ? {} : { blocking }),
     ...(resolution === undefined ? {} : { resolution }),
     source: parseSource(record["source"], `${path}.source`),
     ...(authoritySource === undefined ? {} : { authoritySource }),
@@ -414,6 +653,12 @@ function nonEmptyString(value: unknown, path: string): string {
 
 function optionalNonEmptyString(value: unknown, path: string): string | undefined {
   return value === undefined ? undefined : nonEmptyString(value, path);
+}
+
+function optionalBoolean(value: unknown, path: string): boolean | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "boolean") throw new Error(`${path} must be a boolean`);
+  return value;
 }
 
 function boundedString(value: unknown, path: string, maxLength: number): string {

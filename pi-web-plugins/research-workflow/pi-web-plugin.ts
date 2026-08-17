@@ -17,7 +17,7 @@ const plugin: PiWebPlugin = {
           {
             id: "workspace.open-research-workflow",
             title: "Open Research Workflow",
-            description: "Open the objective, decisions, runs, findings, and evidence for this workspace.",
+            description: "Open the research hypothesis, validation, analysis, conclusion, and direction canvas.",
             group: "Research",
             enabled: (context) => context.state.selectedWorkspace !== undefined,
             run: (context) => {

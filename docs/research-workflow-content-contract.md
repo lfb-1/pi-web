@@ -1,194 +1,222 @@
 # Research Workflow content contract
 
-Status: Stage 1 prototype contract.
+Status: Stage 2 causal-canvas contract.
 
 ## Decision
 
-PI WEB must render durable structured workflow state. It must not ask a model to reconstruct
-research state from chat every time a panel opens. Pi contributes proposed or observed records
-through a validated tool and writes a plain-language semantic brief for human understanding;
-explicit user decisions and runtime evidence remain distinct sources.
+PI WEB renders durable structured research state and does not ask a model to reconstruct the
+research history whenever the panel opens. The first screen is a causal canvas for the overall
+research idea. Pi maintains the canvas when a hypothesis, validation, analysis, conclusion, or
+next direction changes. Detailed criteria, runs, artifacts, findings, and provenance remain durable
+but stay outside the graph.
 
-The Stage 1 prototype stores workspace-local operational state at:
-
-```text
-.pi-web/research-workflow.json
-```
-
-This location lets the browser plugin and the Pi extension use the same file through their
-supported APIs. Projects may ignore the file when the state should remain local. Accepted plans,
-findings, and evidence continue to be exported to the repository paths required by each
-project's process rules.
-
-PI WEB data-directory storage remains the target after a general server-plugin state API exists.
-The current server-plugin backend is available only to the plugin that owns a workspace. Making
-the prototype a workspace provider would displace the Git provider, so Stage 1 uses a
-browser-only panel and a Pi extension instead.
-
-## Content authority
-
-| Content | Pi may create | Authority transition | Verification source |
-| --- | --- | --- | --- |
-| Semantic brief | Evidence-backed plain-language interpretation | No authority transition | Evidence references and Pi session source |
-| Objective and definition of done | Proposed text | User confirmation | User dialog and session reference |
-| Acceptance criterion | Proposed predicate | User approval | User dialog and session reference |
-| Decision request | Open request | User resolution | User dialog and session reference |
-| Run purpose and status | Reported record | Runtime integration in later stages | Session/tool source now; monitor or scheduler event later |
-| Artifact | Observed reference | File/log existence where available | Repository, terminal, or monitor source |
-| Finding | Provisional interpretation | User acceptance | User dialog plus evidence references |
-| Phase | Proposed transition | Completion requires user confirmation | User dialog and acceptance state |
-
-The model can propose and organize content. The model does not gain authority to approve a
-criterion, resolve a decision, accept a finding, or authorize follow-up compute. The companion
-extension opens an authority dialog before writing those transitions. A direct user answer controls
-the result; when the host has a user-delegated recommended-timeout policy, an unanswered dialog may
-apply that visibly identified recommendation at the configured deadline. The settled dialog retains
-the timeout reason for auditability.
-
-## Data flow
+Workspace-local version-2 state is stored at:
 
 ```text
-user instruction / canonical project files / runtime evidence
-                         |
-                         v
-                 Pi reasoning session
-                         |
-              research_workflow tool
-                         |
-       schema validation + authority confirmation
-                         |
-                         v
-          .pi-web/research-workflow.json
-                         |
-                         v
-             Research Workflow panel
+.pi-web/research-workflow-v2.json
 ```
 
-The panel is a deterministic projection of the JSON state. Semantic reasoning occurs when Pi
-updates the durable brief, not when the panel opens. It never treats chat prose as an approved
-field. Every mutable record includes creation provenance with source kind, source reference, and
-timestamp. Authority-bearing records additionally store `authoritySource`; this prevents a later
-Pi update from obscuring the user-owned dialog policy that approved the transition. Because Pi's
-`ctx.ui` API returns only the selected primitive, durable records conservatively label the mode as
-`dialog-or-recommended-timeout-policy`; the browser-local settled card provides the more specific
-`Answered` or `Timed out` outcome while it remains available.
+The legacy version-1 path `.pi-web/research-workflow.json` remains a read-only migration source.
+Using a separate version-2 path prevents a long-running version-1 extension from deleting the
+causal graph when it writes its older schema.
 
-## Stable identity
+The browser plugin and Pi extension share this file through their supported APIs. The browser is a
+deterministic projection. Semantic interpretation occurs during a Pi turn and is written through
+the validated `research_workflow` tool.
 
-- Work-item and child-record IDs match `^[a-z][a-z0-9.-]*$`.
-- IDs remain stable when titles, status, or interpretation change.
-- Session, workspace, Slurm job, terminal, artifact, and acceptance references use their native
-  identifiers when available.
-- Child references are scoped to one work item in Stage 1.
-- A session can be referenced by several work items; the prototype does not infer that relation.
+## Causal model
 
-## Prototype state
+The graph is a directed acyclic graph (DAG) with a strict stage chain:
+
+```text
+Hypothesis --tests--> Validation --produces--> Analysis --concludes--> Conclusion
+                                                                        |
+                                                    motivates + direction
+                                                                        v
+                                                                  Hypothesis
+```
+
+Branches and merges are supported. A conclusion can motivate several hypotheses, and several
+conclusions can motivate one hypothesis. The graph does not infer links from chronology. When the
+causal relationship is unsupported, histories remain separate roots.
+
+The canvas shows only:
+
+- hypothesis and research motivation;
+- validation purpose and status, without code or configuration detail;
+- short analysis, without metric tables or result dumps;
+- a scoped Pi interpretation of `confirmed`, `denied`, or `unsure`;
+- the causal direction that motivates a new hypothesis.
+
+Graph conclusions are evidence-backed Pi interpretations. They do not confirm the research
+objective, approve evaluation criteria, authorize compute, accept a durable finding, or mark the
+overall idea completed.
+
+## Attention and authority
+
+Attention policy and authority policy are separate.
+
+Only an open decision with `importance: "critical"` or `blocking: true` appears in the Research
+badge and critical-question banner. Pi creates such a decision only when safe progress genuinely
+requires one of these inputs:
+
+- a scientific-direction choice that cannot be inferred;
+- substantial unapproved compute;
+- necessary missing information;
+- an irreversible or destructive action.
+
+Routine reversible implementation choices, ordinary result bookkeeping, and evidence-backed graph
+maintenance proceed automatically. They should not become `DecisionRecord` entries. Detailed
+findings stay provisional unless the user explicitly requests formal promotion.
+
+Authority-bearing transitions remain protected:
+
+| Content | Pi may create or update automatically | User-authority transition |
+| --- | --- | --- |
+| Causal node or edge | Evidence-backed concise interpretation | None |
+| Overall causal graph | Active graph, active node, supported active path | Complete or reopen the overall idea |
+| Objective and definition of done | Proposed text | Confirm or change confirmed scope |
+| Acceptance criterion | Proposed predicate and observed result | Approve or change approved criterion |
+| Decision request | Open request with explicit importance/blocking | Resolve, void, or change resolved decision |
+| Run and artifact | Reported runtime record | Compute authorization remains external to the record |
+| Finding | Provisional interpretation | Accept, reject, or change an accepted/rejected finding |
+| Removal | No automatic deletion | Remove any durable record |
+
+The extension uses a host authority dialog for these transitions. A direct answer or the configured
+recommended-timeout policy can resolve that dialog. Durable authority provenance remains labeled
+`dialog-or-recommended-timeout-policy`; the browser-local dialog outcome provides the more specific
+answered or timed-out event while available.
+
+## State versions and migration
+
+Version 2 introduces the top-level causal graph and decision-attention metadata. The parser accepts
+version 1 and version 2. When the version-2 file is absent, the browser and extension read the
+legacy version-1 file and migrate it to the version-2 in-memory shape without inventing a graph.
+The first validated mutation writes the separate version-2 file. Older extensions can continue to
+write only the legacy path and therefore cannot overwrite or delete the causal graph.
 
 ```ts
 interface ResearchWorkflowState {
-  version: 1;
+  version: 2;
   updatedAt: string;
   activeWorkItemId?: string;
+  causalGraph?: ResearchCausalGraph;
   workItems: ResearchWorkItem[];
 }
 
-interface ResearchBrief {
-  question: string;
-  currentAnswer: string;
-  confidence: "low" | "medium" | "high";
-  confidenceReason: string;
-  blockedBecause?: string;
-  nextActionOwner: "user" | "pi" | "runtime" | "none";
-  nextAction: string;
-  recentChange?: string;
-  evidenceRefs: string[];
-  source: RecordSource;
-}
-
-interface ResearchWorkItem {
-  id: string;
+interface ResearchCausalGraph {
   title: string;
-  objective: string;
-  objectiveStatus: "proposed" | "confirmed";
-  rationale?: string;
-  phase: WorkflowPhase;
-  definitionOfDone: string;
-  brief?: ResearchBrief;
-  acceptanceCriteria: AcceptanceCriterion[];
-  decisions: DecisionRecord[];
-  runs: RunRecord[];
-  artifacts: ArtifactRecord[];
-  findings: FindingRecord[];
-  sessions: ReferenceRecord[];
-  workspaces: ReferenceRecord[];
+  status: "active" | "completed";
+  activeNodeId?: string;
+  activePathEdgeIds: string[];
+  nodes: CausalNode[];
+  edges: CausalEdge[];
   source: RecordSource;
   authoritySource?: RecordSource;
 }
+
+interface CausalNode {
+  id: string;
+  kind: "hypothesis" | "validation" | "analysis" | "conclusion";
+  title: string;
+  summary: string;
+  status: "proposed" | "active" | "completed" | "blocked" | "abandoned";
+  conclusion?: "confirmed" | "denied" | "unsure";
+  workItemId?: string;
+  evidenceRefs: string[];
+  source: RecordSource;
+  updatedSource?: RecordSource;
+}
+
+interface CausalEdge {
+  id: string;
+  from: string;
+  to: string;
+  kind: "tests" | "produces" | "concludes" | "motivates";
+  direction?: string;
+  source: RecordSource;
+  updatedSource?: RecordSource;
+}
 ```
 
-Acceptance criteria, decisions, runs, artifacts, findings, and references use stable IDs and
-record-specific status fields. `brief` remains optional for version-1 compatibility. It is a
-model-generated reading aid and does not approve criteria, accept findings, resolve decisions,
-or authorize compute. The checked TypeScript schema is canonical for the exact shape.
+`direction` is required only for `motivates`. A conclusion value is required only for conclusion
+nodes. Completed analysis and conclusion nodes require at least one typed evidence reference.
 
-## Semantic brief contract
+## Evidence and provenance
 
-Pi rewrites source material rather than copying project paragraphs into the first screen:
+Graph evidence references are typed and workspace-local:
 
-- `question` is one plain-language sentence;
-- `currentAnswer` leads with the answer and uses at most three short sentences;
-- `confidenceReason` states both the strongest support and the main limitation;
-- `blockedBecause` contains only the direct reason progress cannot continue;
-- `nextAction` contains one concrete action and names its owner through `nextActionOwner`;
-- `recentChange` records one material change and is omitted when nothing changed;
-- external paths and URLs first receive labeled artifact records; brief `evidenceRefs` contain only
-  artifact, criterion, decision, or run IDs that resolve inside the work item;
-- provisional evidence keeps explicit uncertainty language.
+```text
+<workItemId>/run:<id>
+<workItemId>/artifact:<id>
+<workItemId>/finding:<id>
+<workItemId>/criterion:<id>
+<workItemId>/decision:<id>
+```
 
-The panel presents the brief first and keeps criteria, runs, detailed findings, raw paths, and
-provenance behind progressive disclosure. Session provenance is labeled `Recorded by`;
-`evidenceRefs` are the content sources; user authority is labeled `Confirmed by`.
+The parser resolves every typed reference against the detailed record. Node and edge creation
+provenance is immutable in `source`; later rewrites update `updatedSource`. This keeps automatic
+maintenance auditable without putting paths, job IDs, or raw evidence on the canvas.
+
+The graph is bounded to 256 nodes and 512 edges. IDs remain stable and match
+`^[a-z][a-z0-9.-]*$`. The parser rejects duplicate IDs, missing endpoints, invalid stage transitions,
+self-links, cycles, unresolved evidence references, and malformed active paths.
+
+`activePathEdgeIds` is an optional ordered emphasis path represented as an array that may be empty.
+When present, its edges must form one continuous path ending at `activeNodeId`. In a merged DAG the
+browser does not select an ancestor path itself. Without a persisted path it highlights only the
+active node. A completed graph has no active node or path and may contain only completed or
+abandoned nodes.
+
+## Canvas behavior
+
+The Research panel:
+
+- uses a deterministic layered left-to-right DAG layout;
+- supports pointer drag, wheel pan, Ctrl/Command-wheel zoom, zoom buttons, fit, and active-node
+  focus;
+- opens a concise node inspector for interpretation, next direction, and evidence-link count;
+- lets the user insert a targeted correction prompt for Pi;
+- supports workspace-scoped local hiding and restore without creating synthetic edges;
+- keeps operational record counts behind a secondary disclosure;
+- shows only critical blocking decisions in the badge and attention banner;
+- never calls a model merely because the panel opened.
+
+If a version-1 or version-2 state has no graph, the panel displays an explicit empty state and an
+instruction to ask Pi to build a conservative DAG from durable records. The browser never invents a
+migration graph.
 
 ## Pi responsibilities
 
 The companion extension:
 
-1. exposes `research_workflow` to read and update one entity at a time;
-2. serializes concurrent mutations through Pi's file mutation queue;
-3. validates IDs, enums, required fields, semantic-brief length bounds, and references before writing;
-4. records session-based provenance automatically and refreshes brief provenance on every rewrite;
-5. evaluates authority transitions against the latest queued state and requests confirmation before
-   changing, downgrading, or removing authority-bearing content;
-6. injects the semantic brief, open decisions, and active runs before each agent turn;
-7. asks Pi to refresh the brief after material detailed-record changes;
-8. leaves invalid existing state untouched and reports the validation error.
-
-Pi should call `get` before an update when current state may have changed. It should update run,
-artifact, acceptance, and finding records as an authorized experiment progresses to terminal
-analysis. A successful scheduler submission does not complete a work item.
+1. reads version 2 first, then validates the legacy state only when version 2 is absent;
+2. upgrades version 1 into the separate version-2 file on the first write;
+3. maintains causal graph nodes and edges automatically as the scientific cycle advances;
+4. keeps graph text concise and detailed evidence in work-item records;
+5. records typed evidence and provenance;
+6. rejects invalid stage transitions, cycles, missing references, and invalid active paths;
+7. proceeds automatically for reversible routine work;
+8. asks only for critical blockers or authority-bearing transitions;
+9. records terminal experiments through analysis and conclusion rather than stopping at submission.
 
 ## Browser responsibilities
 
 The browser plugin:
 
-- reads and validates the state through the workspace file helper;
-- shows the research question, current answer, confidence, blocker, next action, and recent change
-  as a 30-second executive view;
-- keeps objective, definition of done, acceptance, decisions, runs, findings, artifacts, and raw
-  provenance available through progressive disclosure;
-- labels proposed, confirmed, provisional, accepted, reported, and runtime-derived content;
-- exposes refresh and prompt-insertion actions;
-- does not silently repair or overwrite invalid state.
+- deterministically reads and validates the state through the workspace file helper;
+- renders the causal canvas as the first screen;
+- distinguishes Pi interpretations from user-authority states;
+- avoids displaying code, raw paths, job metadata, or long results on graph nodes;
+- keeps traceability available through the node inspector and operational index;
+- never repairs or overwrites invalid state.
 
-## Known Stage 1 limitations
+## Known limitations
 
-- The semantic brief requires an explicit Pi update and may temporarily lag detailed records;
-  Stage 1 does not include file watching or automatic reconciliation.
-- Confidence is a model interpretation accompanied by a reason and evidence references; it is not
-  an authority state.
-- Run status written by the model is labeled as Pi-reported until the experiment monitor emits
-  structured runtime events.
-- Workspace-local storage does not yet provide a cross-machine attention inbox.
-- Machine-profile snapshots and configuration drift remain Stage 2 work.
-- The primary Machine → Project → Workspace → Session navigation remains unchanged until the
-  product model has been validated on real ParaFM work.
+- Graph maintenance occurs during Pi turns; there is no independent file watcher or model call from
+  the panel.
+- Local node hiding is presentation state and does not change the shared graph.
+- Detailed runtime truth still depends on Pi, the experiment monitor, or later structured monitor
+  integration updating the durable records.
+- The deterministic layout is designed for the bounded graph size; very dense merge structures may
+  still require local hiding or active-node focus.

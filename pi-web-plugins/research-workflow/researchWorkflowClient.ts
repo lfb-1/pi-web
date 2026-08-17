@@ -1,4 +1,4 @@
-import { parseResearchWorkflowStateText, RESEARCH_WORKFLOW_STATE_PATH, type ResearchWorkflowState } from "./researchWorkflowState.js";
+import { LEGACY_RESEARCH_WORKFLOW_STATE_PATH, parseResearchWorkflowStateText, RESEARCH_WORKFLOW_STATE_PATH, type ResearchWorkflowState } from "./researchWorkflowState.js";
 
 export const researchWorkflowMissingMessage = "No research workflow state exists for this workspace.";
 export const researchWorkflowMissingHint = "Ask Pi to initialize the current research objective and acceptance criteria.";
@@ -17,20 +17,27 @@ export type ResearchWorkflowLoadResult =
   | { kind: "unavailable"; message: string; hint: string; detail?: string };
 
 export async function loadResearchWorkflowState(files: ResearchWorkflowFileReader): Promise<ResearchWorkflowLoadResult> {
+  let path = RESEARCH_WORKFLOW_STATE_PATH;
   let file: Awaited<ReturnType<ResearchWorkflowFileReader["readFile"]>>;
   try {
-    file = await files.readFile(RESEARCH_WORKFLOW_STATE_PATH);
+    file = await files.readFile(path);
   } catch (error) {
-    if (errorMessage(error) === missingWorkspaceFileError) return missing();
-    return unavailable(`Unable to read ${RESEARCH_WORKFLOW_STATE_PATH}: ${formatUnknownError(error)}`);
+    if (errorMessage(error) !== missingWorkspaceFileError) return unavailable(`Unable to read ${path}: ${formatUnknownError(error)}`);
+    path = LEGACY_RESEARCH_WORKFLOW_STATE_PATH;
+    try {
+      file = await files.readFile(path);
+    } catch (legacyError) {
+      if (errorMessage(legacyError) === missingWorkspaceFileError) return missing();
+      return unavailable(`Unable to read ${path}: ${formatUnknownError(legacyError)}`);
+    }
   }
 
-  if (file.binary) return unavailable(`${RESEARCH_WORKFLOW_STATE_PATH} must be a text file`);
-  if (file.truncated) return unavailable(`${RESEARCH_WORKFLOW_STATE_PATH} is too large and was truncated`);
+  if (file.binary) return unavailable(`${path} must be a text file`);
+  if (file.truncated) return unavailable(`${path} is too large and was truncated`);
 
   const parsed = parseResearchWorkflowStateText(file.content);
   if (!parsed.ok) return unavailable(parsed.error);
-  return { kind: "loaded", state: parsed.state, path: RESEARCH_WORKFLOW_STATE_PATH };
+  return { kind: "loaded", state: parsed.state, path };
 }
 
 function missing(): ResearchWorkflowLoadResult {

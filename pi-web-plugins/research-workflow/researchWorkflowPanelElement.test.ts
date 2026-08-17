@@ -1,119 +1,245 @@
 // @vitest-environment happy-dom
 
-import { describe, expect, it } from "vitest";
-import type { RecordSource, ResearchWorkItem } from "./researchWorkflowState.js";
+import type { WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { layoutResearchCausalGraph } from "./researchCausalGraph.js";
 import {
-  renderResearchWorkItem,
+  defineResearchWorkflowPanelElement,
+  refreshResearchWorkflowPanel,
+  renderResearchCanvas,
+  researchWorkflowCorrectionPrompt,
   researchWorkflowInitializePrompt,
   researchWorkflowUpdatePrompt,
 } from "./researchWorkflowPanelElement.js";
+import type { RecordSource, ResearchCausalGraph, ResearchWorkflowState } from "./researchWorkflowState.js";
 
-const source: RecordSource = {
-  kind: "pi",
-  ref: "session:s-1#entry-1",
-  at: "2026-08-15T20:00:00.000Z",
-};
+const source: RecordSource = { kind: "pi", ref: "session:s-1#entry-1", at: "2026-08-17T00:00:00.000Z" };
 
-function workItem(): ResearchWorkItem {
+function state(): ResearchWorkflowState {
   return {
-    id: "parafm.current",
-    title: "Evaluate episode-frame transport",
-    objective: "Determine whether episode-frame transport improves accuracy.",
-    objectiveStatus: "proposed",
-    phase: "blocked",
-    definitionOfDone: "A preregistered comparison reaches a terminal interpretation.",
-    brief: {
-      question: "Does episode-frame transport improve CIFAR-10 accuracy?",
-      currentAnswer: "Current exploratory evidence shows no improvement.",
-      confidence: "medium",
-      confidenceReason: "Four seeds agree, but the run was not preregistered.",
-      blockedBecause: "The available run cannot satisfy the preregistered gate.",
-      nextActionOwner: "user",
-      nextAction: "Decide whether to authorize a new confirmation run.",
-      recentChange: "The existing run was classified as exploratory evidence.",
-      evidenceRefs: ["result.report"],
-      source,
-    },
-    acceptanceCriteria: [],
-    decisions: [{
-      id: "confirmation.run",
-      kind: "follow-up-compute",
-      question: "Should a confirmation run be authorized?",
-      impact: "This determines whether the blocked question receives confirmatory evidence.",
-      status: "open",
+    version: 2,
+    updatedAt: "2026-08-17T00:01:00.000Z",
+    activeWorkItemId: "branch.one",
+    causalGraph: graph(),
+    workItems: [{
+      id: "branch.one",
+      title: "Evaluate the first hypothesis",
+      objective: "Determine whether the method improves accuracy.",
+      objectiveStatus: "proposed",
+      phase: "reviewing-results",
+      definitionOfDone: "Reach a scoped interpretation.",
+      acceptanceCriteria: [],
+      decisions: [],
+      runs: [],
+      artifacts: [{ id: "raw.report", label: "Detailed report", kind: "report", path: "results/private/RESULT.json", source }],
+      findings: [{ id: "result.one", summary: "The method did not improve accuracy.", status: "provisional", evidenceRefs: ["raw.report"], source }],
+      sessions: [],
+      workspaces: [],
       source,
     }],
-    runs: [],
-    artifacts: [{
-      id: "result.report",
-      label: "Episode-frame result report",
-      kind: "report",
-      path: "results/episode/RESULT.md",
-      source,
-    }],
-    findings: [],
-    sessions: [],
-    workspaces: [],
+  };
+}
+
+function graph(): ResearchCausalGraph {
+  return {
+    title: "Accuracy research idea",
+    status: "active",
+    activeNodeId: "hypothesis.next",
+    activePathEdgeIds: ["edge.tests", "edge.produces", "edge.concludes", "edge.motivates"],
+    nodes: [
+      { id: "hypothesis.one", kind: "hypothesis", title: "The method improves accuracy", summary: "Test the primary scientific claim.", status: "completed", workItemId: "branch.one", evidenceRefs: [], source },
+      { id: "validation.one", kind: "validation", title: "Registered comparison", summary: "Compare the treatment and control.", status: "completed", workItemId: "branch.one", evidenceRefs: [], source },
+      { id: "analysis.one", kind: "analysis", title: "No improvement", summary: "The scoped comparison did not show a gain.", status: "completed", workItemId: "branch.one", evidenceRefs: ["branch.one/finding:result.one"], source },
+      { id: "conclusion.one", kind: "conclusion", title: "Primary hypothesis denied", summary: "The registered configuration did not pass.", status: "completed", conclusion: "denied", workItemId: "branch.one", evidenceRefs: ["branch.one/finding:result.one"], source },
+      { id: "conclusion.parallel", kind: "conclusion", title: "Parallel branch unsure", summary: "Evidence remains insufficient.", status: "completed", conclusion: "unsure", workItemId: "branch.one", evidenceRefs: ["branch.one/finding:result.one"], source },
+      { id: "hypothesis.next", kind: "hypothesis", title: "A narrower mechanism may work", summary: "Test a revised mechanism.", status: "active", workItemId: "branch.one", evidenceRefs: [], source },
+    ],
+    edges: [
+      { id: "edge.tests", from: "hypothesis.one", to: "validation.one", kind: "tests", source },
+      { id: "edge.produces", from: "validation.one", to: "analysis.one", kind: "produces", source },
+      { id: "edge.concludes", from: "analysis.one", to: "conclusion.one", kind: "concludes", source },
+      { id: "edge.motivates", from: "conclusion.one", to: "hypothesis.next", kind: "motivates", direction: "Narrow the mechanism instead of repeating the failed setup.", source },
+      { id: "edge.merge", from: "conclusion.parallel", to: "hypothesis.next", kind: "motivates", direction: "Resolve both branches with one targeted hypothesis.", source },
+    ],
     source,
   };
 }
 
-describe("Research Workflow semantic panel", () => {
-  it("puts the human-readable answer before progressive-disclosure details", () => {
-    const rendered = renderResearchWorkItem(workItem(), "2026-08-15T20:01:00.000Z");
+afterEach(() => {
+  document.body.replaceChildren();
+  localStorage.clear();
+});
 
-    expect(rendered.indexOf("Current answer")).toBeGreaterThan(-1);
-    expect(rendered.indexOf("Current answer")).toBeLessThan(rendered.indexOf("Why this is the current answer"));
-    expect(rendered).toContain("Current exploratory evidence shows no improvement.");
-    expect(rendered).toContain("Decide whether to authorize a new confirmation run.");
-    expect(rendered).toContain("Based on 1 source");
-    expect(rendered).toContain("Episode-frame result report");
+describe("Research causal canvas", () => {
+  it("renders hypotheses, concise analysis, conclusions, and next directions without operational detail", () => {
+    const workflow = state();
+    const causalGraph = workflow.causalGraph;
+    if (causalGraph === undefined) throw new Error("expected graph");
+    const rendered = renderResearchCanvas(causalGraph, workflow, layoutResearchCausalGraph(causalGraph));
+
+    expect(rendered).toContain("The method improves accuracy");
+    expect(rendered).toContain("No improvement");
+    expect(rendered).toContain("Pi interpretation · denied");
+    expect(rendered).toContain("Narrow the mechanism instead of repeating the failed setup.");
+    expect(rendered).not.toContain("results/private/RESULT.json");
+    expect(rendered).not.toContain("raw.report");
   });
 
-  it("opens only the user-decision section by default and labels provenance accurately", () => {
-    const rendered = renderResearchWorkItem(workItem(), "2026-08-15T20:01:00.000Z");
+  it("marks only the explicit active path when a merge has another parent", () => {
+    const workflow = state();
+    const causalGraph = workflow.causalGraph;
+    if (causalGraph === undefined) throw new Error("expected graph");
     const container = document.createElement("div");
-    container.innerHTML = rendered;
-    const sections = [...container.querySelectorAll<HTMLDetailsElement>("details.workflow-section")];
-    const decisionSection = sections.find((section) => section.querySelector("summary")?.textContent.includes("Needs your decision") === true);
-    const explanationSection = sections.find((section) => section.querySelector("summary")?.textContent.includes("Why this is the current answer") === true);
+    container.innerHTML = renderResearchCanvas(causalGraph, workflow);
 
-    expect(decisionSection?.open).toBe(true);
-    expect(explanationSection?.open).toBe(false);
-    expect(sections.filter((section) => section.open)).toHaveLength(1);
-    expect(rendered).toContain("Recorded by pi");
-    expect(rendered).not.toContain("Source:");
+    expect(container.querySelector("[data-node-id='conclusion.one']")?.classList.contains("active-path")).toBe(true);
+    expect(container.querySelector("[data-node-id='conclusion.parallel']")?.classList.contains("active-path")).toBe(false);
+    expect(container.querySelector("[data-node-id='hypothesis.next']")?.classList.contains("active-node")).toBe(true);
   });
 
-  it("states when optional blocker and recent-change summaries are absent", () => {
-    const item = workItem();
-    const brief = item.brief;
-    if (brief === undefined) throw new Error("expected brief");
-    delete brief.blockedBecause;
-    delete brief.recentChange;
+  it("shows a concise correction surface for the selected node", () => {
+    const workflow = state();
+    const causalGraph = workflow.causalGraph;
+    if (causalGraph === undefined) throw new Error("expected graph");
+    const rendered = renderResearchCanvas(causalGraph, workflow, undefined, new Set(), "conclusion.one");
 
-    const rendered = renderResearchWorkItem(item, "2026-08-15T20:01:00.000Z");
-
-    expect(rendered).toContain("No blocker recorded in the semantic brief.");
-    expect(rendered).toContain("No recent material change recorded.");
+    expect(rendered).toContain("Revise with Pi");
+    expect(rendered).toContain("Hide locally");
+    expect(rendered).toContain("1 typed reference");
+    const conclusion = causalGraph.nodes.find((node) => node.id === "conclusion.one");
+    if (conclusion === undefined) throw new Error("expected conclusion node");
+    expect(researchWorkflowCorrectionPrompt(conclusion)).toContain("upsert_causal_node");
+    const activeHidden = renderResearchCanvas(causalGraph, workflow, undefined, new Set(["hypothesis.next"]));
+    expect(activeHidden).toContain("Restore active");
   });
 
-  it("keeps legacy work items readable while asking Pi for a semantic summary", () => {
-    const item = workItem();
-    delete item.brief;
-
-    const rendered = renderResearchWorkItem(item, "2026-08-15T20:01:00.000Z");
-
-    expect(rendered).toContain("Plain-language summary not generated yet.");
-    expect(rendered).toContain(item.objective);
-  });
-
-  it("asks Pi to rewrite source material semantically", () => {
+  it("prompts Pi to maintain a conservative graph automatically and ask only for critical blockers", () => {
     const initialize = researchWorkflowInitializePrompt();
-    const update = researchWorkflowUpdatePrompt(workItem());
+    const update = researchWorkflowUpdatePrompt(state());
 
-    expect(initialize).toContain("plain-language semantic synthesis");
-    expect(update).toContain("instead of copying source text");
-    expect(update).toContain("one concrete next action and owner");
+    expect(initialize).toContain("conservative DAG");
+    expect(initialize).toContain("never invent an unsupported causal relationship");
+    expect(update).toContain("Maintain the DAG automatically");
+    expect(update).toContain("Ask me only when safe continuation is blocked");
+  });
+
+  it("keeps the newest state when concurrent refreshes finish out of order", async () => {
+    const olderState = structuredClone(state());
+    const newerState = structuredClone(state());
+    if (olderState.causalGraph === undefined || newerState.causalGraph === undefined) throw new Error("expected graphs");
+    olderState.causalGraph.title = "Older graph";
+    newerState.causalGraph.title = "Newer graph";
+    const older = deferredFile();
+    const newer = deferredFile();
+    let callCount = 0;
+    const context = panelContext(vi.fn(), () => {
+      callCount += 1;
+      return callCount === 1 ? older.promise : newer.promise;
+    }, "workspace-refresh-race");
+
+    const olderRefresh = refreshResearchWorkflowPanel(context);
+    const newerRefresh = refreshResearchWorkflowPanel(context);
+    newer.resolve(fileResponse(newerState));
+    await newerRefresh;
+    older.resolve(fileResponse(olderState));
+    await olderRefresh;
+
+    defineResearchWorkflowPanelElement();
+    const element = document.createElement("pi-web-research-workflow-panel");
+    Reflect.set(element, "context", context);
+    document.body.append(element);
+    await vi.waitFor(() => { expect(element.shadowRoot?.querySelector(".toolbar-title > strong")?.textContent).toBe("Newer graph"); });
+  });
+
+  it("restores control focus after a refresh rerenders the canvas", async () => {
+    defineResearchWorkflowPanelElement();
+    const context = panelContext(vi.fn(), undefined, "workspace-focus-refresh");
+    const element = document.createElement("pi-web-research-workflow-panel");
+    Reflect.set(element, "context", context);
+    document.body.append(element);
+    await vi.waitFor(() => { expect(element.shadowRoot?.querySelector("[data-refresh]:not([disabled])")).not.toBeNull(); });
+    const refresh = element.shadowRoot?.querySelector<HTMLButtonElement>("[data-refresh]");
+    refresh?.focus();
+    expect(element.shadowRoot?.activeElement).toBe(refresh);
+
+    await refreshResearchWorkflowPanel(context);
+
+    await vi.waitFor(() => { expect(element.shadowRoot?.activeElement?.hasAttribute("data-refresh")).toBe(true); });
+  });
+
+  it("lets the user select, revise, hide, and restore a graph node", async () => {
+    defineResearchWorkflowPanelElement();
+    const insertText = vi.fn();
+    const element = document.createElement("pi-web-research-workflow-panel");
+    Reflect.set(element, "context", panelContext(insertText));
+    document.body.append(element);
+
+    await vi.waitFor(() => {
+      const root = element.shadowRoot;
+      expect(root?.querySelector("[data-node-id='conclusion.one']")).not.toBeNull();
+    });
+    const root = element.shadowRoot;
+    const node = root?.querySelector<HTMLButtonElement>("[data-node-id='conclusion.one']");
+    node?.click();
+    root?.querySelector<HTMLButtonElement>("[data-revise-node]")?.click();
+    expect(insertText).toHaveBeenCalledWith(expect.stringContaining("Correct causal node conclusion.one"));
+
+    root?.querySelector<HTMLButtonElement>("[data-hide-node]")?.click();
+    expect(root?.querySelector("[data-node-id='conclusion.one']")).toBeNull();
+    const restore = root?.querySelector<HTMLButtonElement>("[data-restore-hidden]");
+    expect(restore?.textContent).toContain("Restore 1");
+    restore?.click();
+    expect(root?.querySelector("[data-node-id='conclusion.one']")).not.toBeNull();
   });
 });
+
+type PanelFileReader = WorkspacePanelContext["files"]["readFile"];
+type PanelFileResponse = Awaited<ReturnType<PanelFileReader>>;
+
+function panelContext(
+  insertText: (text: string) => void,
+  readFile: PanelFileReader = () => Promise.resolve(fileResponse(state())),
+  workspaceId = "workspace-canvas-test",
+): WorkspacePanelContext {
+  const noop = () => undefined;
+  const rejected = () => Promise.reject(new Error("not used"));
+  return {
+    machine: { id: "local", name: "Local", kind: "local" },
+    workspace: { id: workspaceId, projectId: "project-1", path: "/work/research", label: "research", isMain: true },
+    state: {},
+    files: {
+      readFile,
+      listFiles: rejected,
+      writeFile: rejected,
+      deleteFile: rejected,
+      moveFile: rejected,
+    },
+    host: { requestRender: noop },
+    prompt: { insertText, getText: () => "", getSelection: () => null },
+    terminal: { open: noop, runCommand: rejected },
+  };
+}
+
+function fileResponse(workflow: ResearchWorkflowState): PanelFileResponse {
+  return {
+    path: ".pi-web/research-workflow-v2.json",
+    encoding: "utf8",
+    size: 1,
+    modifiedAt: "2026-08-17T00:01:00.000Z",
+    content: JSON.stringify(workflow),
+    truncated: false,
+    binary: false,
+  };
+}
+
+function deferredFile(): { promise: Promise<PanelFileResponse>; resolve: (value: PanelFileResponse) => void } {
+  let resolver: ((value: PanelFileResponse) => void) | undefined;
+  const promise = new Promise<PanelFileResponse>((resolvePromise) => { resolver = resolvePromise; });
+  return {
+    promise,
+    resolve: (value) => {
+      if (resolver === undefined) throw new Error("deferred file resolver is unavailable");
+      resolver(value);
+    },
+  };
+}

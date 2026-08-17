@@ -6,44 +6,49 @@ import {
   type ResearchWorkflowLoadResult,
 } from "./researchWorkflowClient.js";
 import {
+  activeCausalPath,
+  CAUSAL_NODE_HEIGHT,
+  CAUSAL_NODE_WIDTH,
+  layoutResearchCausalGraph,
+  type ResearchCausalGraphLayout,
+} from "./researchCausalGraph.js";
+import {
   activeWorkItem,
+  decisionRequiresAttention,
   RESEARCH_WORKFLOW_STATE_PATH,
-  type AcceptanceCriterion,
-  type ArtifactRecord,
+  type CausalEdge,
+  type CausalNode,
   type DecisionRecord,
-  type FindingRecord,
-  type RecordSource,
-  type ResearchBrief,
-  type ResearchWorkItem,
-  type RunRecord,
+  type ResearchCausalGraph,
+  type ResearchWorkflowState,
 } from "./researchWorkflowState.js";
 
 export const researchWorkflowPanelTagName = "pi-web-research-workflow-panel";
 
 const stateChangedEvent = "pi-web-research-workflow-state-changed";
+const MIN_SCALE = 0.28;
+const MAX_SCALE = 1.8;
 
 type PanelState = { kind: "loading" } | ResearchWorkflowLoadResult;
 const stateCache = new Map<string, PanelState>();
+const refreshGenerations = new Map<string, number>();
 
 export function defineResearchWorkflowPanelElement(): void {
-  if (!customElements.get(researchWorkflowPanelTagName)) {
-    customElements.define(researchWorkflowPanelTagName, PiWebResearchWorkflowPanel);
-  }
+  if (!customElements.get(researchWorkflowPanelTagName)) customElements.define(researchWorkflowPanelTagName, PiWebResearchWorkflowPanel);
 }
 
 export function researchWorkflowPanelBadge(context: WorkspacePanelContext): string | number | undefined {
   const state = getCachedState(context);
   if (state?.kind === "unavailable") return "!";
   if (state?.kind !== "loaded") return undefined;
-  const item = activeWorkItem(state.state);
-  if (item === undefined) return undefined;
-  const attentionCount = item.decisions.filter((decision) => decision.status === "open").length
-    + item.runs.filter((run) => run.status === "failed").length;
+  const attentionCount = criticalDecisions(state.state).length;
   return attentionCount > 0 ? attentionCount : undefined;
 }
 
 export async function refreshResearchWorkflowPanel(context: WorkspacePanelContext): Promise<void> {
   const key = cacheKeyForContext(context);
+  const generation = (refreshGenerations.get(key) ?? 0) + 1;
+  refreshGenerations.set(key, generation);
   stateCache.set(key, { kind: "loading" });
   const state = await loadResearchWorkflowState(context.files).catch((error: unknown): PanelState => ({
     kind: "unavailable",
@@ -51,6 +56,7 @@ export async function refreshResearchWorkflowPanel(context: WorkspacePanelContex
     hint: researchWorkflowRefreshHint,
     detail: formatUnknownError(error),
   }));
+  if (refreshGenerations.get(key) !== generation) return;
   stateCache.set(key, state);
   context.host.requestRender();
   window.dispatchEvent(new Event(stateChangedEvent));
@@ -58,11 +64,18 @@ export async function refreshResearchWorkflowPanel(context: WorkspacePanelContex
 
 class PiWebResearchWorkflowPanel extends HTMLElement {
   private contextValue: WorkspacePanelContext | undefined;
-  private selectedWorkItemId: string | undefined;
+  private selectedNodeId: string | undefined;
+  private hiddenNodeIds = new Set<string>();
   private readonly root: ShadowRoot;
-  private readonly onStateChanged = () => {
-    this.render();
-  };
+  private layout: ResearchCausalGraphLayout | undefined;
+  private panX = 28;
+  private panY = 28;
+  private scale = 1;
+  private fittedGraphKey: string | undefined;
+  private autoFit = true;
+  private resizeObserver: ResizeObserver | undefined;
+  private dragging: { pointerId: number; clientX: number; clientY: number } | undefined;
+  private readonly onStateChanged = () => { this.render(); };
 
   constructor() {
     super();
@@ -74,7 +87,10 @@ class PiWebResearchWorkflowPanel extends HTMLElement {
     const nextKey = value === undefined ? undefined : cacheKeyForContext(value);
     this.contextValue = value;
     if (previousKey === nextKey) return;
-    this.selectedWorkItemId = undefined;
+    this.selectedNodeId = undefined;
+    this.fittedGraphKey = undefined;
+    this.autoFit = true;
+    this.hiddenNodeIds = nextKey === undefined ? new Set() : loadHiddenNodeIds(nextKey);
     this.render();
   }
 
@@ -85,73 +101,281 @@ class PiWebResearchWorkflowPanel extends HTMLElement {
 
   disconnectedCallback(): void {
     window.removeEventListener(stateChangedEvent, this.onStateChanged);
+    this.resizeObserver?.disconnect();
   }
 
   private render(): void {
+    const focusTarget = this.captureFocusTarget();
+    this.resizeObserver?.disconnect();
     const context = this.contextValue;
     if (context === undefined) {
       this.root.innerHTML = `${styles()}<section class="empty">Select a workspace.</section>`;
       return;
     }
-
     const state = getOrLoadState(context);
-    const selectedItem = this.selectedItem(state);
-    const askPiLabel = state.kind === "missing" ? "Ask Pi to initialize" : selectedItem?.brief === undefined ? "Ask Pi to summarize" : "Ask Pi to refresh summary";
+    const graph = state.kind === "loaded" ? state.state.causalGraph : undefined;
+    const graphKey = graph === undefined || state.kind !== "loaded"
+      ? undefined
+      : `${state.state.updatedAt}:${String(graph.nodes.length)}:${String(graph.edges.length)}:${[...this.hiddenNodeIds].sort().join(",")}`;
+    this.layout = graph === undefined ? undefined : layoutResearchCausalGraph(graph, this.hiddenNodeIds);
+    if (graph !== undefined && this.selectedNodeId !== undefined && !graph.nodes.some((node) => node.id === this.selectedNodeId)) this.selectedNodeId = undefined;
+
     this.root.innerHTML = `
       ${styles()}
       <section class="toolbar">
-        <div>
-          <strong>Research Workflow</strong>
-          <span class="path">${escapeHtml(RESEARCH_WORKFLOW_STATE_PATH)}</span>
+        <div class="toolbar-title">
+          <strong>${graph === undefined ? "Research Canvas" : escapeHtml(graph.title)}</strong>
+          ${graph === undefined ? "" : graphStatus(graph, state.kind === "loaded" ? state.state : undefined)}
         </div>
         <div class="toolbar-actions">
-          <button class="secondary" data-ask-pi>${askPiLabel}</button>
-          <button class="secondary" data-refresh ${state.kind === "loading" ? "disabled" : ""}>Refresh</button>
+          <button class="secondary" data-ask-pi>${graph === undefined ? "Build with Pi" : "Update with Pi"}</button>
+          <button class="secondary icon-button" data-refresh aria-label="Refresh research canvas" title="Refresh" ${state.kind === "loading" ? "disabled" : ""}>↻</button>
         </div>
       </section>
-      <section class="viewer" aria-live="polite" aria-busy="${String(state.kind === "loading")}">${this.renderState(state)}</section>
+      <section class="viewer" aria-busy="${String(state.kind === "loading")}">${this.renderState(state)}</section>
     `;
-
-    this.root.querySelector("button[data-refresh]")?.addEventListener("click", () => {
-      void refreshResearchWorkflowPanel(context);
-    });
-    this.root.querySelector("button[data-ask-pi]")?.addEventListener("click", () => {
-      context.prompt.insertText(state.kind === "missing" ? researchWorkflowInitializePrompt() : researchWorkflowUpdatePrompt(this.selectedItem(state)));
-    });
-    this.root.querySelector("select[data-work-item]")?.addEventListener("change", (event) => {
-      const target = event.currentTarget;
-      if (!(target instanceof HTMLSelectElement)) return;
-      this.selectedWorkItemId = target.value;
-      this.render();
-    });
+    this.bindCommonActions(context, state);
+    if (state.kind === "loaded" && graph !== undefined && this.layout !== undefined) {
+      this.bindCanvasActions(context, state.state, graph);
+      this.observeViewport();
+      this.applyTransform();
+      if (graphKey !== undefined && this.fittedGraphKey !== graphKey) {
+        this.fittedGraphKey = graphKey;
+        this.autoFit = true;
+        requestAnimationFrame(() => { this.fitCanvas(); });
+      }
+    }
+    if (focusTarget !== undefined) this.focusAfterRender(focusTarget);
   }
 
   private renderState(state: PanelState): string {
-    if (state.kind === "loading") return `<p class="muted" role="status">Loading ${escapeHtml(RESEARCH_WORKFLOW_STATE_PATH)}…</p>`;
+    if (state.kind === "loading") return `<p class="muted loading" role="status">Loading research canvas…</p>`;
     if (state.kind === "missing") {
-      return `<div class="empty-state"><strong>${escapeHtml(state.message)}</strong><p>${escapeHtml(state.hint)}</p><p class="muted">The panel renders validated state; it does not infer approved content from chat.</p></div>`;
+      return `<div class="empty-state"><strong>${escapeHtml(state.message)}</strong><p>Ask Pi to initialize the research idea and causal graph from the canonical project state.</p><p class="muted">The canvas is a deterministic view of durable state and never calls a model when opened.</p></div>`;
     }
     if (state.kind === "unavailable") {
       const detail = state.detail === undefined ? "" : `<pre>${escapeHtml(state.detail)}</pre>`;
       return `<div class="status error" role="alert"><strong>${escapeHtml(state.message)}</strong><p>${escapeHtml(state.hint)}</p>${detail}</div>`;
     }
-    if (state.state.workItems.length === 0) {
-      return `<div class="empty-state"><strong>No research work items.</strong><p>Ask Pi to create a proposed work item from the current project objective.</p></div>`;
-    }
-
-    const item = this.selectedItem(state) ?? activeWorkItem(state.state);
-    if (item === undefined) return `<div class="empty-state">No research work items.</div>`;
-    this.selectedWorkItemId = item.id;
-    return `${renderWorkItemPicker(state.state.workItems, item.id)}${renderResearchWorkItem(item, state.state.updatedAt)}`;
+    if (state.state.causalGraph === undefined) return renderMissingGraph(state.state);
+    const graph = state.state.causalGraph;
+    const layout = this.layout ?? layoutResearchCausalGraph(graph, this.hiddenNodeIds);
+    const attention = criticalDecisions(state.state);
+    return `
+      ${attention.length === 0 ? "" : renderCriticalDecisions(attention)}
+      ${renderResearchCanvas(graph, state.state, layout, this.hiddenNodeIds, this.selectedNodeId, this.panX, this.panY, this.scale)}
+      ${renderOperationalIndex(state.state)}
+    `;
   }
 
-  private selectedItem(state: PanelState): ResearchWorkItem | undefined {
-    if (state.kind !== "loaded") return undefined;
-    if (this.selectedWorkItemId !== undefined) {
-      const selected = state.state.workItems.find((item) => item.id === this.selectedWorkItemId);
-      if (selected !== undefined) return selected;
+  private bindCommonActions(context: WorkspacePanelContext, state: PanelState): void {
+    this.root.querySelector("button[data-refresh]")?.addEventListener("click", () => { void refreshResearchWorkflowPanel(context); });
+    this.root.querySelector("button[data-ask-pi]")?.addEventListener("click", () => {
+      if (state.kind !== "loaded" || state.state.causalGraph === undefined) context.prompt.insertText(researchWorkflowInitializePrompt());
+      else context.prompt.insertText(researchWorkflowUpdatePrompt(state.state));
+    });
+  }
+
+  private bindCanvasActions(context: WorkspacePanelContext, state: ResearchWorkflowState, graph: ResearchCausalGraph): void {
+    for (const button of this.root.querySelectorAll<HTMLButtonElement>("[data-node-id]")) {
+      button.addEventListener("click", (event) => {
+        event.stopPropagation();
+        this.selectedNodeId = button.dataset["nodeId"];
+        this.render();
+        this.focusAfterRender("[data-close-inspector]");
+      });
     }
-    return activeWorkItem(state.state);
+    this.root.querySelector("[data-close-inspector]")?.addEventListener("click", () => {
+      const nodeId = this.selectedNodeId;
+      this.selectedNodeId = undefined;
+      this.render();
+      if (nodeId !== undefined) this.focusAfterRender(`[data-node-id="${cssAttributeValue(nodeId)}"]`);
+    });
+    this.root.querySelector("[data-hide-node]")?.addEventListener("click", () => {
+      if (this.selectedNodeId === undefined) return;
+      this.hiddenNodeIds.add(this.selectedNodeId);
+      this.selectedNodeId = undefined;
+      this.persistHiddenNodes();
+      this.render();
+      this.focusAfterRender("[data-canvas-viewport]");
+    });
+    this.root.querySelector("[data-restore-hidden]")?.addEventListener("click", () => {
+      const restoreFocusId = [...this.hiddenNodeIds][0];
+      this.hiddenNodeIds.clear();
+      this.persistHiddenNodes();
+      this.fittedGraphKey = undefined;
+      this.render();
+      if (restoreFocusId !== undefined) this.focusAfterRender(`[data-node-id="${cssAttributeValue(restoreFocusId)}"]`);
+    });
+    this.root.querySelector("[data-restore-active]")?.addEventListener("click", () => {
+      const activeNodeId = graph.activeNodeId;
+      if (activeNodeId === undefined) return;
+      this.hiddenNodeIds.delete(activeNodeId);
+      this.persistHiddenNodes();
+      this.fittedGraphKey = undefined;
+      this.render();
+      requestAnimationFrame(() => {
+        this.focusNode(activeNodeId);
+        this.root.querySelector<HTMLElement>(`[data-node-id="${cssAttributeValue(activeNodeId)}"]`)?.focus();
+      });
+    });
+    this.root.querySelector("[data-revise-node]")?.addEventListener("click", () => {
+      const node = graph.nodes.find((candidate) => candidate.id === this.selectedNodeId);
+      if (node !== undefined) context.prompt.insertText(researchWorkflowCorrectionPrompt(node));
+    });
+    this.root.querySelector("[data-review-records]")?.addEventListener("click", () => {
+      context.prompt.insertText(`Review the detailed Research Workflow records in ${RESEARCH_WORKFLOW_STATE_PATH}. Call research_workflow get first and summarize only the details I ask for. `);
+    });
+    this.root.querySelector("[data-zoom-in]")?.addEventListener("click", () => { this.zoomAt(1.18); });
+    this.root.querySelector("[data-zoom-out]")?.addEventListener("click", () => { this.zoomAt(1 / 1.18); });
+    this.root.querySelector("[data-fit]")?.addEventListener("click", () => {
+      this.autoFit = true;
+      this.fitCanvas();
+    });
+    this.root.querySelector("[data-focus-active]")?.addEventListener("click", () => {
+      if (graph.activeNodeId !== undefined) this.focusNode(graph.activeNodeId);
+    });
+
+    const viewport = this.viewport();
+    viewport?.addEventListener("pointerdown", (event) => {
+      if (!(event.target instanceof Element) || event.target.closest("[data-node-id], .canvas-controls, .node-inspector") !== null) return;
+      this.autoFit = false;
+      this.dragging = { pointerId: event.pointerId, clientX: event.clientX, clientY: event.clientY };
+      viewport.setPointerCapture(event.pointerId);
+      viewport.classList.add("dragging");
+    });
+    viewport?.addEventListener("pointermove", (event) => {
+      if (this.dragging?.pointerId !== event.pointerId) return;
+      this.panX += event.clientX - this.dragging.clientX;
+      this.panY += event.clientY - this.dragging.clientY;
+      this.dragging = { pointerId: event.pointerId, clientX: event.clientX, clientY: event.clientY };
+      this.applyTransform();
+    });
+    const endDrag = (event: PointerEvent) => {
+      if (this.dragging?.pointerId !== event.pointerId) return;
+      this.dragging = undefined;
+      viewport?.classList.remove("dragging");
+    };
+    viewport?.addEventListener("pointerup", endDrag);
+    viewport?.addEventListener("pointercancel", endDrag);
+    viewport?.addEventListener("wheel", (event) => {
+      event.preventDefault();
+      this.autoFit = false;
+      if (event.ctrlKey || event.metaKey) {
+        const rect = viewport.getBoundingClientRect();
+        this.zoomAt(event.deltaY < 0 ? 1.1 : 1 / 1.1, event.clientX - rect.left, event.clientY - rect.top);
+      } else {
+        this.panX -= event.deltaX;
+        this.panY -= event.deltaY;
+        this.applyTransform();
+      }
+    }, { passive: false });
+    viewport?.addEventListener("dblclick", (event) => {
+      if (event.target === viewport) this.fitCanvas();
+    });
+
+    const selected = graph.nodes.find((node) => node.id === this.selectedNodeId);
+    const branchId = selected?.workItemId;
+    if (branchId !== undefined && state.workItems.some((item) => item.id === branchId)) {
+      this.root.querySelector("[data-branch-id]")?.addEventListener("click", () => {
+        context.prompt.insertText(`Review research branch ${branchId}. Call research_workflow get first and keep its causal nodes synchronized. `);
+      });
+    }
+  }
+
+  private captureFocusTarget(): string | undefined {
+    const active = this.root.activeElement;
+    if (!(active instanceof HTMLElement)) return undefined;
+    const nodeId = active.dataset["nodeId"];
+    if (nodeId !== undefined) return `[data-node-id="${cssAttributeValue(nodeId)}"]`;
+    const stableAttributes = [
+      "data-ask-pi",
+      "data-refresh",
+      "data-close-inspector",
+      "data-hide-node",
+      "data-restore-hidden",
+      "data-restore-active",
+      "data-revise-node",
+      "data-review-records",
+      "data-zoom-in",
+      "data-zoom-out",
+      "data-fit",
+      "data-focus-active",
+      "data-branch-id",
+      "data-canvas-viewport",
+      "data-critical-summary",
+      "data-operational-summary",
+    ];
+    const attribute = stableAttributes.find((candidate) => active.hasAttribute(candidate));
+    return attribute === undefined ? undefined : `[${attribute}]`;
+  }
+
+  private observeViewport(): void {
+    const viewport = this.viewport();
+    if (viewport === null || typeof ResizeObserver === "undefined") return;
+    this.resizeObserver = new ResizeObserver(() => {
+      if (this.autoFit) this.fitCanvas();
+    });
+    this.resizeObserver.observe(viewport);
+  }
+
+  private focusAfterRender(selector: string): void {
+    this.root.querySelector<HTMLElement>(selector)?.focus();
+  }
+
+  private viewport(): HTMLElement | null {
+    return this.root.querySelector<HTMLElement>("[data-canvas-viewport]");
+  }
+
+  private applyTransform(): void {
+    const world = this.root.querySelector<HTMLElement>("[data-canvas-world]");
+    if (world === null) return;
+    world.style.transform = `translate(${String(this.panX)}px, ${String(this.panY)}px) scale(${String(this.scale)})`;
+    const value = this.root.querySelector<HTMLElement>("[data-zoom-value]");
+    if (value !== null) value.textContent = `${String(Math.round(this.scale * 100))}%`;
+  }
+
+  private zoomAt(factor: number, viewportX?: number, viewportY?: number): void {
+    this.autoFit = false;
+    const viewport = this.viewport();
+    if (viewport === null) return;
+    const nextScale = clamp(this.scale * factor, MIN_SCALE, MAX_SCALE);
+    const anchorX = viewportX ?? viewport.clientWidth / 2;
+    const anchorY = viewportY ?? viewport.clientHeight / 2;
+    const worldX = (anchorX - this.panX) / this.scale;
+    const worldY = (anchorY - this.panY) / this.scale;
+    this.scale = nextScale;
+    this.panX = anchorX - worldX * nextScale;
+    this.panY = anchorY - worldY * nextScale;
+    this.applyTransform();
+  }
+
+  private fitCanvas(): void {
+    const viewport = this.viewport();
+    const layout = this.layout;
+    if (viewport === null || layout === undefined || viewport.clientWidth === 0 || viewport.clientHeight === 0) return;
+    const inset = 42;
+    this.scale = clamp(Math.min((viewport.clientWidth - inset * 2) / layout.width, (viewport.clientHeight - inset * 2) / layout.height), MIN_SCALE, 1.12);
+    this.panX = (viewport.clientWidth - layout.width * this.scale) / 2;
+    this.panY = (viewport.clientHeight - layout.height * this.scale) / 2;
+    this.applyTransform();
+  }
+
+  private focusNode(nodeId: string): void {
+    this.autoFit = false;
+    const viewport = this.viewport();
+    const positioned = this.layout?.nodes.find((entry) => entry.node.id === nodeId);
+    if (viewport === null || positioned === undefined) return;
+    this.scale = clamp(Math.max(this.scale, 0.82), MIN_SCALE, MAX_SCALE);
+    this.panX = viewport.clientWidth / 2 - (positioned.x + CAUSAL_NODE_WIDTH / 2) * this.scale;
+    this.panY = viewport.clientHeight / 2 - (positioned.y + CAUSAL_NODE_HEIGHT / 2) * this.scale;
+    this.applyTransform();
+  }
+
+  private persistHiddenNodes(): void {
+    const context = this.contextValue;
+    if (context === undefined) return;
+    saveHiddenNodeIds(cacheKeyForContext(context), this.hiddenNodeIds);
   }
 }
 
@@ -172,228 +396,197 @@ function cacheKeyForContext(context: WorkspacePanelContext): string {
   return `${context.machine.id}:${context.workspace.projectId}:${context.workspace.id}`;
 }
 
-function renderWorkItemPicker(items: ResearchWorkItem[], selectedId: string): string {
-  if (items.length === 1) return "";
-  return `<label class="work-item-picker"><span>Work item</span><select data-work-item>${items.map((item) => `<option value="${escapeAttr(item.id)}" ${item.id === selectedId ? "selected" : ""}>${escapeHtml(item.title)}</option>`).join("")}</select></label>`;
-}
-
-export function renderResearchWorkItem(item: ResearchWorkItem, updatedAt: string): string {
-  const openDecisions = item.decisions.filter((decision) => decision.status === "open");
-  const decisionHistory = item.decisions.filter((decision) => decision.status !== "open");
-  const explanation = `
-    <div class="detail-copy"><span class="section-label">Objective</span><p>${escapeHtml(item.objective)}</p>${chip(item.objectiveStatus, item.objectiveStatus)}</div>
-    ${item.rationale === undefined ? "" : `<div class="detail-copy"><span class="section-label">Rationale</span><p>${escapeHtml(item.rationale)}</p></div>`}
-    <div class="detail-copy"><span class="section-label">Definition of done</span><p>${escapeHtml(item.definitionOfDone)}</p></div>
-    ${item.findings.length === 0 ? emptyRows("No findings recorded.") : `<div class="records">${renderFindings(item.findings)}</div>`}
-  `;
-  const checksAndDecisions = `${renderCriteria(item.acceptanceCriteria)}${decisionHistory.length === 0 ? "" : renderDecisions(decisionHistory)}`;
-  const evidenceAndProvenance = `${renderArtifacts(item.artifacts)}${renderSource(item.source)}${renderAuthoritySource(item.authoritySource)}`;
+export function renderResearchCanvas(
+  graph: ResearchCausalGraph,
+  state: ResearchWorkflowState,
+  layout = layoutResearchCausalGraph(graph),
+  hiddenNodeIds: ReadonlySet<string> = new Set(),
+  selectedNodeId?: string,
+  panX = 28,
+  panY = 28,
+  scale = 1,
+): string {
+  const activePath = activeCausalPath(graph);
+  const selectedNode = graph.nodes.find((node) => node.id === selectedNodeId);
+  const hiddenCount = graph.nodes.filter((node) => hiddenNodeIds.has(node.id)).length;
   return `
-    <article class="work-item">
-      <header class="work-item-header">
-        <div class="eyebrow">${escapeHtml(item.id)}</div>
-        <div class="title-row"><h2>${escapeHtml(item.title)}</h2><span>${chip(item.phase, "phase")}</span></div>
-        <div class="updated">Updated ${escapeHtml(formatTimestamp(updatedAt))}</div>
-      </header>
-
-      ${item.brief === undefined ? renderMissingBrief(item) : renderSemanticBrief(item.brief, item)}
-      ${openDecisions.length === 0 ? "" : detailsSection("Needs your decision", renderDecisions(openDecisions), openDecisions.length, true, "attention-section")}
-      ${detailsSection("Why this is the current answer", explanation, item.findings.length + 1)}
-      ${detailsSection("Checks and decision history", checksAndDecisions, item.acceptanceCriteria.length + decisionHistory.length)}
-      ${detailsSection("Runs", renderRuns(item.runs), item.runs.length)}
-      ${detailsSection("Evidence and provenance", evidenceAndProvenance, item.artifacts.length)}
-      ${renderLinks(item)}
-    </article>
-  `;
-}
-
-function renderSemanticBrief(brief: ResearchBrief, item: ResearchWorkItem): string {
-  return `
-    <section class="executive-brief">
-      <div class="brief-question">
-        <span class="section-label">Research question</span>
-        <p>${escapeHtml(brief.question)}</p>
+    <section class="canvas-shell">
+      <div class="canvas-meta">
+        <div><strong>${String(graph.nodes.filter((node) => node.kind === "hypothesis").length)}</strong><span>hypotheses</span></div>
+        <div><strong>${String(graph.nodes.filter((node) => node.kind === "conclusion" && node.conclusion === "confirmed").length)}</strong><span>confirmed</span></div>
+        <div><strong>${String(graph.nodes.filter((node) => node.kind === "conclusion" && node.conclusion === "denied").length)}</strong><span>denied</span></div>
+        <div><strong>${String(graph.nodes.filter((node) => node.kind === "conclusion" && node.conclusion === "unsure").length)}</strong><span>unsure</span></div>
       </div>
-      <div class="answer-card">
-        <div class="answer-heading"><span class="section-label">Current answer</span>${chip(`${brief.confidence} confidence`, `confidence-${brief.confidence}`)}</div>
-        <p>${escapeHtml(brief.currentAnswer)}</p>
-        <div class="confidence-reason"><strong>Why this confidence</strong><span>${escapeHtml(brief.confidenceReason)}</span></div>
+      <div class="canvas-viewport" data-canvas-viewport tabindex="0" aria-label="Research causal graph canvas">
+        <div class="canvas-controls" aria-label="Canvas controls">
+          <button data-zoom-out title="Zoom out" aria-label="Zoom out">−</button>
+          <span data-zoom-value>${String(Math.round(scale * 100))}%</span>
+          <button data-zoom-in title="Zoom in" aria-label="Zoom in">+</button>
+          <button data-fit>Fit</button>
+          ${graph.activeNodeId === undefined ? "" : hiddenNodeIds.has(graph.activeNodeId) ? `<button data-restore-active>Restore active</button>` : `<button data-focus-active>Active</button>`}
+          ${hiddenCount === 0 ? "" : `<button data-restore-hidden>Restore ${String(hiddenCount)}</button>`}
+        </div>
+        ${renderEdgeDescriptions(graph)}
+        ${layout.nodes.length === 0 ? `<div class="canvas-empty">All nodes are hidden.</div>` : ""}
+        <div class="canvas-world" data-canvas-world style="width:${String(layout.width)}px;height:${String(layout.height)}px;transform:translate(${String(panX)}px, ${String(panY)}px) scale(${String(scale)})">
+          <svg class="edge-layer" viewBox="0 0 ${String(layout.width)} ${String(layout.height)}" aria-hidden="true">
+            <defs><marker id="causal-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z"></path></marker></defs>
+            ${layout.edges.map((entry) => `<path class="causal-edge ${entry.edge.kind} ${activePath.edgeIds.has(entry.edge.id) ? "active-path" : ""}" d="${entry.path}" marker-end="url(#causal-arrow)"></path>`).join("")}
+          </svg>
+          ${layout.edges.map((entry) => renderEdgeLabel(entry.edge, entry.labelX, entry.labelY)).join("")}
+          ${layout.nodes.map((entry) => renderCausalNode(entry.node, entry.x, entry.y, graph, activePath.nodeIds, selectedNodeId)).join("")}
+        </div>
+        ${selectedNode === undefined ? "" : renderNodeInspector(selectedNode, graph, state)}
+        <div class="canvas-hint">Drag to pan · Scroll to pan · Ctrl/⌘ + scroll to zoom</div>
       </div>
-      <div class="brief-grid">
-        ${briefFact("Why work is blocked", brief.blockedBecause ?? "No blocker recorded in the semantic brief.", brief.blockedBecause === undefined ? "neutral" : "blocked")}
-        ${briefFact("Next action", brief.nextAction, `owner-${brief.nextActionOwner}`, chip(brief.nextActionOwner, `owner-${brief.nextActionOwner}`))}
-        ${briefFact("What changed", brief.recentChange ?? "No recent material change recorded.", "recent")}
-      </div>
-      ${renderBriefSources(brief.evidenceRefs, item)}
-      ${renderSource(brief.source)}
     </section>
   `;
 }
 
-function renderMissingBrief(item: ResearchWorkItem): string {
+function renderCausalNode(node: CausalNode, x: number, y: number, graph: ResearchCausalGraph, activePath: ReadonlySet<string>, selectedNodeId: string | undefined): string {
+  const classes = ["causal-node", node.kind, node.status];
+  if (node.id === graph.activeNodeId) classes.push("active-node");
+  if (activePath.has(node.id)) classes.push("active-path");
+  if (node.id === selectedNodeId) classes.push("selected");
+  const describedBy = graph.edges.filter((edge) => edge.from === node.id || edge.to === node.id).map((edge) => edgeDescriptionId(edge.id)).join(" ");
   return `
-    <section class="executive-brief missing-brief">
-      <div class="brief-question"><span class="section-label">Research question</span><p>${escapeHtml(item.objective)}</p></div>
-      <div class="semantic-missing"><strong>Plain-language summary not generated yet.</strong><p>Ask Pi to summarize the current evidence, blocker, and next action.</p></div>
-    </section>
+    <button class="${classes.join(" ")}" data-node-id="${escapeAttr(node.id)}" style="left:${String(x)}px;top:${String(y)}px" aria-label="${escapeAttr(`${causalKindLabel(node.kind)}: ${node.title}`)}"${describedBy === "" ? "" : ` aria-describedby="${escapeAttr(describedBy)}"`}>
+      <span class="node-head"><span class="node-kind">${escapeHtml(causalKindLabel(node.kind))}</span><span class="node-status">${escapeHtml(node.status)}</span></span>
+      <strong>${escapeHtml(node.title)}</strong>
+      <span class="node-summary">${escapeHtml(node.summary)}</span>
+      ${node.conclusion === undefined ? "" : `<span class="conclusion ${node.conclusion}">Pi interpretation · ${escapeHtml(node.conclusion)}</span>`}
+    </button>
   `;
 }
 
-function briefFact(label: string, content: string, className: string, trailing = ""): string {
-  return `<div class="brief-fact ${escapeAttr(className)}"><div><span class="section-label">${escapeHtml(label)}</span>${trailing}</div><p>${escapeHtml(content)}</p></div>`;
+function renderEdgeDescriptions(graph: ResearchCausalGraph): string {
+  const nodeTitles = new Map(graph.nodes.map((node) => [node.id, node.title]));
+  return `<ol class="visually-hidden" aria-label="Causal relationships">${graph.edges.map((edge) => {
+    const relation = edge.kind === "motivates" ? `motivates: ${edge.direction ?? "next hypothesis"}` : causalEdgeLabel(edge.kind) ?? edge.kind;
+    return `<li id="${escapeAttr(edgeDescriptionId(edge.id))}">${escapeHtml(nodeTitles.get(edge.from) ?? edge.from)} ${escapeHtml(relation)} ${escapeHtml(nodeTitles.get(edge.to) ?? edge.to)}</li>`;
+  }).join("")}</ol>`;
 }
 
-function renderBriefSources(refs: string[], item: ResearchWorkItem): string {
-  if (refs.length === 0) return `<p class="brief-source-count">No supporting sources linked.</p>`;
+function edgeDescriptionId(edgeId: string): string {
+  return `causal-edge-description-${edgeId}`;
+}
+
+function renderEdgeLabel(edge: CausalEdge, x: number, y: number): string {
+  const label = edge.kind === "motivates" ? edge.direction : causalEdgeLabel(edge.kind);
+  if (label === undefined) return "";
+  return `<div class="edge-label ${edge.kind}" style="left:${String(x)}px;top:${String(y)}px"><span>${escapeHtml(label)}</span></div>`;
+}
+
+function renderNodeInspector(node: CausalNode, graph: ResearchCausalGraph, state: ResearchWorkflowState): string {
+  const item = node.workItemId === undefined ? undefined : state.workItems.find((candidate) => candidate.id === node.workItemId);
+  const nextDirections = graph.edges.filter((edge) => edge.from === node.id && edge.kind === "motivates").flatMap((edge) => edge.direction === undefined ? [] : [edge.direction]);
   return `
-    <details class="brief-sources">
-      <summary>Based on ${String(refs.length)} ${refs.length === 1 ? "source" : "sources"}</summary>
-      <div class="source-list">${refs.map((ref) => `<span title="${escapeAttr(ref)}">${escapeHtml(sourceLabel(ref, item))}</span>`).join("")}</div>
-    </details>
+    <aside class="node-inspector" aria-label="Selected causal node">
+      <div class="inspector-head"><span>${escapeHtml(causalKindLabel(node.kind))}</span><button data-close-inspector aria-label="Close node details">×</button></div>
+      <h3>${escapeHtml(node.title)}</h3>
+      <p>${escapeHtml(node.summary)}</p>
+      ${node.conclusion === undefined ? "" : `<div class="inspector-fact"><span>Conclusion</span><strong class="${node.conclusion}">Pi interpretation · ${escapeHtml(node.conclusion)}</strong></div>`}
+      ${nextDirections.length === 0 ? "" : `<div class="inspector-fact"><span>Next direction</span>${nextDirections.map((direction) => `<strong>${escapeHtml(direction)}</strong>`).join("")}</div>`}
+      <div class="inspector-fact"><span>Evidence links</span><strong>${String(node.evidenceRefs.length)} typed ${node.evidenceRefs.length === 1 ? "reference" : "references"}</strong></div>
+      ${item === undefined ? "" : `<button class="secondary wide" data-branch-id="${escapeAttr(item.id)}">Review branch with Pi</button>`}
+      <div class="inspector-actions"><button class="primary" data-revise-node>Revise with Pi</button><button class="secondary" data-hide-node>Hide locally</button></div>
+    </aside>
   `;
 }
 
-function sourceLabel(ref: string, item: ResearchWorkItem): string {
-  const artifact = item.artifacts.find((candidate) => candidate.id === ref);
-  if (artifact !== undefined) return artifact.label;
-  const decisionId = ref.startsWith("decision:") ? ref.slice("decision:".length) : ref;
-  const decision = item.decisions.find((candidate) => candidate.id === decisionId);
-  if (decision !== undefined) return decision.status === "resolved" && decision.resolution !== undefined ? `Decision: ${decision.resolution}` : `Decision: ${decision.question}`;
-  const criterion = item.acceptanceCriteria.find((candidate) => candidate.id === ref);
-  if (criterion !== undefined) return criterion.title;
-  const run = item.runs.find((candidate) => candidate.id === ref);
-  if (run !== undefined) return run.jobId === undefined ? run.purpose : `Job ${run.jobId}: ${run.purpose}`;
-  return ref;
-}
-
-function renderCriteria(criteria: AcceptanceCriterion[]): string {
-  if (criteria.length === 0) return emptyRows("No acceptance criteria recorded.");
-  return criteria.map((criterion) => `
-    <article class="record">
-      <div class="record-heading"><strong>${escapeHtml(criterion.title)}</strong><span>${chip(criterion.status, criterion.status)}${chip(criterion.result, criterion.result)}</span></div>
-      <p>${escapeHtml(criterion.predicate)}</p>
-      ${criterion.note === undefined ? "" : `<p class="muted">${escapeHtml(criterion.note)}</p>`}
-      ${renderRefs("Evidence", criterion.evidenceRefs)}
-      ${renderSource(criterion.source)}
-      ${renderAuthoritySource(criterion.authoritySource)}
-    </article>
-  `).join("");
-}
-
-function renderDecisions(decisions: DecisionRecord[]): string {
-  if (decisions.length === 0) return emptyRows("No decision requests recorded.");
-  return decisions.map((decision) => `
-    <article class="record ${decision.status === "open" ? "attention-record" : ""}">
-      <div class="record-heading"><strong>${escapeHtml(decision.question)}</strong><span>${chip(decision.kind, "kind")}${chip(decision.status, decision.status)}</span></div>
-      <p><span class="section-label">Impact</span> ${escapeHtml(decision.impact)}</p>
-      ${decision.resolution === undefined ? "" : `<p><span class="section-label">Resolution</span> ${escapeHtml(decision.resolution)}</p>`}
-      ${renderSource(decision.source)}
-      ${renderAuthoritySource(decision.authoritySource)}
-    </article>
-  `).join("");
-}
-
-function renderRuns(runs: RunRecord[]): string {
-  if (runs.length === 0) return emptyRows("No runs recorded.");
-  return runs.map((run) => `
-    <article class="record">
-      <div class="record-heading"><strong>${escapeHtml(run.purpose)}</strong><span>${chip(run.kind, "kind")}${chip(run.status, run.status)}</span></div>
-      <div class="record-grid">
-        <span><span class="section-label">ID</span> ${escapeHtml(run.id)}</span>
-        ${run.jobId === undefined ? "" : `<span><span class="section-label">Job</span> ${escapeHtml(run.jobId)}</span>`}
-        ${run.startedAt === undefined ? "" : `<span><span class="section-label">Started</span> ${escapeHtml(formatTimestamp(run.startedAt))}</span>`}
-        ${run.finishedAt === undefined ? "" : `<span><span class="section-label">Finished</span> ${escapeHtml(formatTimestamp(run.finishedAt))}</span>`}
-      </div>
-      ${run.acceptanceResults.length === 0 ? "" : `<div class="subrecords">${run.acceptanceResults.map((result) => `<span>${escapeHtml(result.criterionId)} ${chip(result.status, result.status)}</span>`).join("")}</div>`}
-      ${renderRefs("Artifacts", run.artifactRefs)}
-      ${renderSource(run.source)}
-    </article>
-  `).join("");
-}
-
-function renderFindings(findings: FindingRecord[]): string {
-  if (findings.length === 0) return emptyRows("No findings recorded.");
-  return findings.map((finding) => `
-    <article class="record">
-      <div class="record-heading"><strong>${escapeHtml(finding.summary)}</strong>${chip(finding.status, finding.status)}</div>
-      ${renderRefs("Evidence", finding.evidenceRefs)}
-      ${renderSource(finding.source)}
-      ${renderAuthoritySource(finding.authoritySource)}
-    </article>
-  `).join("");
-}
-
-function renderArtifacts(artifacts: ArtifactRecord[]): string {
-  if (artifacts.length === 0) return emptyRows("No artifacts recorded.");
-  return artifacts.map((artifact) => `
-    <article class="record compact-record">
-      <div class="record-heading"><strong>${escapeHtml(artifact.label)}</strong>${chip(artifact.kind, "kind")}</div>
-      ${artifact.path === undefined ? "" : `<code>${escapeHtml(artifact.path)}</code>`}
-      ${artifact.url === undefined ? "" : `<code>${escapeHtml(artifact.url)}</code>`}
-      ${renderSource(artifact.source)}
-    </article>
-  `).join("");
-}
-
-function renderLinks(item: ResearchWorkItem): string {
-  if (item.sessions.length === 0 && item.workspaces.length === 0) return "";
-  const content = `
-    <div class="link-grid">
-      ${item.sessions.map((session) => `<span>${chip("session", "kind")} ${escapeHtml(session.label ?? session.id)}</span>`).join("")}
-      ${item.workspaces.map((workspace) => `<span>${chip("workspace", "kind")} ${escapeHtml(workspace.label ?? workspace.id)}</span>`).join("")}
+function renderMissingGraph(state: ResearchWorkflowState): string {
+  const item = activeWorkItem(state);
+  return `
+    <div class="empty-state graph-missing">
+      <strong>Causal graph not generated yet.</strong>
+      <p>Build a conservative DAG from existing durable records. Unsupported relationships should remain separate roots rather than being inferred.</p>
+      ${item === undefined ? "" : `<div class="legacy-context"><span>Current branch</span><strong>${escapeHtml(item.title)}</strong><p>${escapeHtml(item.objective)}</p></div>`}
+      <p class="muted">Version-1 state remains readable and will upgrade to version 2 on the first validated write.</p>
     </div>
   `;
-  return detailsSection("Linked runtime", content, item.sessions.length + item.workspaces.length);
 }
 
-function detailsSection(title: string, content: string, count: number, open = false, className = ""): string {
+function renderCriticalDecisions(decisions: DecisionRecord[]): string {
   return `
-    <details class="workflow-section ${escapeAttr(className)}"${open ? " open" : ""}>
-      <summary><h3>${escapeHtml(title)}</h3><span>${String(count)}</span></summary>
-      <div class="section-body">${content}</div>
+    <details class="critical-decisions" open>
+      <summary data-critical-summary><strong>${String(decisions.length)} critical ${decisions.length === 1 ? "question" : "questions"} blocking safe progress</strong></summary>
+      <div>${decisions.map((decision) => `<article><strong>${escapeHtml(decision.question)}</strong><p>${escapeHtml(decision.impact)}</p></article>`).join("")}</div>
     </details>
   `;
 }
 
-function chip(text: string, kind: string): string {
-  return `<span class="chip ${escapeAttr(kind)}">${escapeHtml(text)}</span>`;
-}
-
-function renderSource(source: RecordSource): string {
+function renderOperationalIndex(state: ResearchWorkflowState): string {
   return `
-    <details class="provenance">
-      <summary>Recorded by ${escapeHtml(source.kind)} · ${escapeHtml(formatTimestamp(source.at))}</summary>
-      <code>${escapeHtml(source.ref)}</code>
+    <details class="operational-index">
+      <summary data-operational-summary><span>Operational record index</span><small>${String(state.workItems.length)} branches · details kept outside the canvas</small></summary>
+      <div class="branch-index">
+        ${state.workItems.map((item) => `<article><div><strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(item.phase)}</span></div><p>${escapeHtml(item.objective)}</p><small>${String(item.runs.length)} runs · ${String(item.findings.length)} findings · ${String(item.acceptanceCriteria.length)} criteria</small></article>`).join("")}
+        <button class="secondary" data-review-records>Review details with Pi</button>
+      </div>
     </details>
   `;
 }
 
-function renderAuthoritySource(source: RecordSource | undefined): string {
-  if (source === undefined) return "";
-  return `
-    <details class="provenance authority-source">
-      <summary>Confirmed by ${escapeHtml(source.kind)}${source.authorityMode === undefined ? "" : " · direct or recommended-timeout policy"} · ${escapeHtml(formatTimestamp(source.at))}</summary>
-      <code>${escapeHtml(source.ref)}</code>
-    </details>
-  `;
+function graphStatus(graph: ResearchCausalGraph, state: ResearchWorkflowState | undefined): string {
+  const active = graph.nodes.find((node) => node.id === graph.activeNodeId);
+  const update = state === undefined ? "" : `<span>Updated ${escapeHtml(formatTimestamp(state.updatedAt))}</span>`;
+  return `<div class="graph-status"><span class="graph-state ${graph.status}">${escapeHtml(graph.status)}</span>${active === undefined ? "" : `<span>Active: ${escapeHtml(active.title)}</span>`}${update}</div>`;
 }
 
-function renderRefs(label: string, refs: string[]): string {
-  if (refs.length === 0) return "";
-  return `<div class="refs"><span class="section-label">${escapeHtml(label)}</span>${refs.map((ref) => `<code>${escapeHtml(ref)}</code>`).join("")}</div>`;
-}
-
-function emptyRows(message: string): string {
-  return `<p class="muted empty-row">${escapeHtml(message)}</p>`;
+function criticalDecisions(state: ResearchWorkflowState): DecisionRecord[] {
+  return state.workItems.flatMap((item) => item.decisions.filter(decisionRequiresAttention));
 }
 
 export function researchWorkflowInitializePrompt(): string {
-  return "Initialize the Research Workflow for this workspace. First read the canonical project status, current user intent, and relevant runtime evidence. Use research_workflow to create a proposed work item with objective, definition of done, acceptance criteria, open decisions, and runtime references. Then write workItem.brief as a plain-language semantic synthesis: one research question, a direct current answer of at most three short sentences, confidence with both support and limitations, the direct blocker when present, one concrete next action with its owner, one recent material change when present, and supporting evidenceRefs. Do not copy long source passages or put paths and session ids in the prose. Keep inferred content proposed or provisional until I confirm it.";
+  return `Initialize or upgrade the Research Workflow for this workspace. Call research_workflow get first and read the canonical project status, current intent, and durable runtime evidence. Preserve existing work items and detailed records. Create causalGraph version 2 as a conservative DAG spanning the overall research idea: hypothesis -> validation -> analysis -> conclusion, followed by motivates edges to new hypotheses. Support branches and merges; never invent an unsupported causal relationship, and leave unrelated histories as separate roots. Keep graph text concise and semantic: no code, paths, job metadata, or metric tables. Use typed evidence references for completed analysis and conclusion nodes, set an explicit active node and ordered activePathEdgeIds only when one path is supported, and keep the graph status active unless I explicitly confirm completion. Continue automatically for routine reversible maintenance; create a critical blocking decision only when safe progress truly requires my scientific-direction, large-cost, missing-information, or irreversible-action choice.`;
 }
 
-export function researchWorkflowUpdatePrompt(item: ResearchWorkItem | undefined): string {
-  const target = item === undefined ? "the active research work item" : `research work item ${item.id}`;
-  return `Review ${target}. Call research_workflow get first, then read the canonical project state, relevant source files and runtime artifacts, and the latest user decisions. Update only records supported by evidence. Rewrite workItem.brief for a human reader instead of copying source text: use one plain-language research question; lead with the current answer in at most three short sentences; explain confidence using both support and the main limitation; state only the direct blocker; give one concrete next action and owner; record one material recent change or omit it. Brief evidenceRefs must use existing labeled artifact, criterion, decision, or run ids; create an artifact record before citing an external path or URL. Preserve provisional qualifications and request confirmation for authority-bearing transitions.`;
+export function researchWorkflowUpdatePrompt(state: ResearchWorkflowState): string {
+  const graph = state.causalGraph;
+  return `Review and update the Research causal canvas${graph === undefined ? "" : ` ${graph.title}`}. Call research_workflow get first, then read canonical project state and the latest runtime evidence. Maintain the DAG automatically across hypothesis, validation, analysis, conclusion, and motivated next-hypothesis nodes. Keep node summaries short and hide implementation detail, paths, job metadata, and metric tables. Preserve uncertainty and scope; a graph conclusion is a Pi interpretation, not user authority. Use typed evidence refs for completed analysis/conclusion nodes. Preserve branches and merges, update the explicit active path only when supported, and never infer missing causal links. Routine reversible choices should proceed automatically. Ask me only when safe continuation is blocked by an important scientific direction, substantial unapproved compute, required missing information, or an irreversible action.`;
+}
+
+export function researchWorkflowCorrectionPrompt(node: CausalNode): string {
+  return `Correct causal node ${node.id} (${node.kind}) in the Research Workflow. Call research_workflow get first. Apply my correction with upsert_causal_node and update affected edges or the active path only when causally necessary. Preserve durable detailed records and provenance; do not invent evidence. My correction: `;
+}
+
+function causalKindLabel(kind: CausalNode["kind"]): string {
+  switch (kind) {
+    case "hypothesis": return "Hypothesis";
+    case "validation": return "Validation";
+    case "analysis": return "Analysis";
+    case "conclusion": return "Conclusion";
+  }
+}
+
+function causalEdgeLabel(kind: CausalEdge["kind"]): string | undefined {
+  switch (kind) {
+    case "tests": return "tests";
+    case "produces": return "analysis";
+    case "concludes": return "conclusion";
+    case "motivates": return undefined;
+  }
+}
+
+function hiddenStorageKey(contextKey: string): string {
+  return `pi-web:research-canvas:hidden:${contextKey}`;
+}
+
+function loadHiddenNodeIds(contextKey: string): Set<string> {
+  try {
+    const value = localStorage.getItem(hiddenStorageKey(contextKey));
+    return new Set(value === null || value === "" ? [] : value.split("\n").filter((entry) => entry !== ""));
+  } catch {
+    return new Set();
+  }
+}
+
+function saveHiddenNodeIds(contextKey: string, ids: ReadonlySet<string>): void {
+  try {
+    localStorage.setItem(hiddenStorageKey(contextKey), [...ids].sort().join("\n"));
+  } catch {
+    // Local hiding is optional presentation state; storage failures must not affect the graph.
+  }
 }
 
 function formatTimestamp(value: string): string {
@@ -413,84 +606,112 @@ function escapeAttr(value: unknown): string {
   return escapeHtml(value).replaceAll('"', "&quot;");
 }
 
+function cssAttributeValue(value: string): string {
+  return value.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
+}
+
+function clamp(value: number, minimum: number, maximum: number): number {
+  return Math.min(maximum, Math.max(minimum, value));
+}
+
 function styles(): string {
   return `
     <style>
       :host { display: contents; }
       * { box-sizing: border-box; }
+      .visually-hidden { position: absolute !important; width: 1px !important; height: 1px !important; overflow: hidden !important; clip: rect(0 0 0 0) !important; clip-path: inset(50%) !important; white-space: nowrap !important; }
+      button { border: 1px solid var(--pi-border); border-radius: 8px; background: var(--pi-surface); color: var(--pi-text); padding: 6px 10px; font: inherit; cursor: pointer; }
+      button:hover:not(:disabled) { background: var(--pi-surface-hover); }
+      button:disabled { cursor: wait; opacity: .65; }
+      button:focus-visible, .canvas-viewport:focus-visible { outline: 2px solid var(--pi-accent); outline-offset: 2px; }
+      .primary { border-color: var(--pi-accent); background: var(--pi-accent); color: var(--pi-accent-contrast, white); font-weight: 650; }
+      .secondary { background: var(--pi-surface); }
+      .wide { width: 100%; }
       .toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border-bottom: 1px solid var(--pi-border-muted); }
-      .toolbar > div:first-child { display: grid; min-width: 0; gap: 2px; }
-      .path { overflow: hidden; color: var(--pi-muted); font: 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
-      .toolbar-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
-      .viewer { min-height: 0; overflow: auto; padding: 14px; }
-      button, select { border: 1px solid var(--pi-border); border-radius: 7px; background: var(--pi-surface); color: var(--pi-text); font: inherit; }
-      button { cursor: pointer; padding: 6px 10px; }
-      button:disabled { cursor: wait; opacity: 0.65; }
-      select { min-width: min(100%, 280px); padding: 7px 28px 7px 9px; }
-      .work-item-picker { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; color: var(--pi-muted); }
-      .work-item { display: grid; gap: 12px; max-width: 980px; margin: 0 auto; }
-      .work-item-header { display: grid; gap: 5px; padding: 2px 2px 4px; }
-      .eyebrow, .section-label { color: var(--pi-muted); font-size: 11px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; }
-      .title-row, .record-heading, .answer-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
-      .title-row > span, .answer-heading > span { display: flex; flex-wrap: wrap; gap: 5px; }
-      .updated { color: var(--pi-muted); font-size: 11px; }
-      h2, h3, p { margin: 0; }
-      h2 { font-size: 20px; line-height: 1.25; }
-      h3 { font-size: 14px; }
-      .executive-brief { display: grid; gap: 14px; border: 1px solid var(--pi-accent-border); border-radius: 14px; background: var(--pi-bg-overlay-soft); padding: 18px; }
-      .brief-question { display: grid; gap: 6px; }
-      .brief-question p { color: var(--pi-text); font-size: 17px; font-weight: 600; line-height: 1.45; }
-      .answer-card { display: grid; gap: 9px; border-left: 3px solid var(--pi-accent-border); background: var(--pi-surface); padding: 13px 14px; }
-      .answer-card > p { color: var(--pi-text); font-size: 15px; line-height: 1.55; }
-      .confidence-reason { display: grid; gap: 3px; color: var(--pi-text-secondary); font-size: 12px; line-height: 1.45; }
-      .brief-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
-      .brief-fact { display: grid; align-content: start; gap: 7px; border: 1px solid var(--pi-border-muted); border-radius: 10px; background: var(--pi-surface); padding: 12px; }
-      .brief-fact > div { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-      .brief-fact p, .detail-copy p, .record p { color: var(--pi-text-secondary); line-height: 1.5; }
-      .brief-fact.blocked { border-color: var(--pi-danger); }
-      .brief-fact.recent { grid-column: 1 / -1; }
-      .semantic-missing { display: grid; gap: 5px; border: 1px dashed var(--pi-warning); border-radius: 10px; padding: 12px; color: var(--pi-warning); }
-      .brief-source-count { color: var(--pi-muted); font-size: 11px; }
-      .brief-sources, .provenance { color: var(--pi-muted); font-size: 11px; }
-      .brief-sources > summary, .provenance > summary { cursor: pointer; }
-      .source-list { display: flex; flex-wrap: wrap; gap: 6px; padding-top: 8px; }
-      .source-list > span { border: 1px solid var(--pi-border-muted); border-radius: 999px; background: var(--pi-bg); color: var(--pi-text-secondary); padding: 4px 8px; }
-      .workflow-section { border: 1px solid var(--pi-border-muted); border-radius: 10px; background: var(--pi-surface); }
-      .workflow-section > summary { display: flex; align-items: center; justify-content: space-between; gap: 10px; cursor: pointer; padding: 11px 12px; list-style-position: inside; }
-      .workflow-section > summary > span { color: var(--pi-muted); font-size: 12px; }
-      .workflow-section[open] > summary { border-bottom: 1px solid var(--pi-border-muted); }
-      .attention-section { border-color: var(--pi-warning); }
-      .section-body { display: grid; gap: 9px; padding: 10px; }
-      .detail-copy { display: grid; gap: 5px; padding: 4px 2px; }
-      .records { display: grid; gap: 8px; }
-      .record { display: grid; gap: 8px; border: 1px solid var(--pi-border-muted); border-radius: 9px; background: var(--pi-bg-overlay-soft); padding: 11px; }
-      .attention-record { border-color: var(--pi-warning); }
-      .record-heading > span { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 5px; }
-      .record-grid, .link-grid { display: flex; flex-wrap: wrap; gap: 8px 14px; color: var(--pi-text-secondary); font-size: 12px; }
-      .subrecords, .refs { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
-      .chip { display: inline-flex; align-items: center; border: 1px solid var(--pi-border); border-radius: 999px; background: var(--pi-bg); color: var(--pi-text-secondary); padding: 2px 7px; font-size: 10px; font-weight: 600; line-height: 1.4; }
-      .chip.confirmed, .chip.approved, .chip.accepted, .chip.passed, .chip.succeeded, .chip.resolved, .chip.confidence-high { border-color: var(--pi-success-border); color: var(--pi-success); }
-      .chip.proposed, .chip.provisional, .chip.pending, .chip.open, .chip.awaiting-approval, .chip.waiting, .chip.confidence-medium, .chip.owner-user { border-color: var(--pi-warning); color: var(--pi-warning); }
-      .chip.failed, .chip.rejected, .chip.blocked, .chip.cancelled, .chip.confidence-low { border-color: var(--pi-danger); color: var(--pi-danger); }
-      .chip.running, .chip.executing, .chip.reviewing-results, .chip.owner-pi, .chip.owner-runtime { border-color: var(--pi-accent-border); color: var(--pi-accent); }
-      .provenance { overflow: hidden; padding-top: 2px; }
-      .provenance code { display: block; margin-top: 6px; }
-      code, pre { border: 1px solid var(--pi-border-muted); border-radius: 6px; background: var(--pi-bg); color: var(--pi-text-secondary); font: 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-      code { overflow: hidden; padding: 3px 6px; text-overflow: ellipsis; white-space: nowrap; }
-      pre { margin: 8px 0 0; overflow: auto; padding: 8px; white-space: pre-wrap; }
-      .compact-record code { display: block; }
-      .empty-state, .status { border: 1px dashed var(--pi-border-muted); border-radius: 10px; padding: 14px; }
-      .empty-state { display: grid; gap: 7px; color: var(--pi-muted); }
+      .toolbar-title { display: grid; min-width: 0; gap: 4px; }
+      .toolbar-title > strong { overflow: hidden; font-size: 15px; text-overflow: ellipsis; white-space: nowrap; }
+      .graph-status { display: flex; flex-wrap: wrap; align-items: center; gap: 5px 9px; color: var(--pi-muted); font-size: 11px; }
+      .graph-state { border: 1px solid var(--pi-border); border-radius: 999px; padding: 1px 6px; font-weight: 650; text-transform: uppercase; }
+      .graph-state.active { border-color: var(--pi-accent-border); color: var(--pi-accent); }
+      .graph-state.completed { border-color: var(--pi-success-border); color: var(--pi-success); }
+      .toolbar-actions { display: flex; flex: 0 0 auto; gap: 7px; }
+      .icon-button { min-width: 34px; font-size: 17px; }
+      .viewer { min-height: 0; overflow: auto; padding: 10px; }
+      .loading, .empty { padding: 16px; }
+      .canvas-shell { display: grid; gap: 8px; }
+      .canvas-meta { display: flex; flex-wrap: wrap; gap: 6px; }
+      .canvas-meta > div { display: flex; align-items: baseline; gap: 5px; border: 1px solid var(--pi-border-muted); border-radius: 999px; background: var(--pi-surface); padding: 4px 8px; }
+      .canvas-meta strong { font-size: 12px; }
+      .canvas-meta span { color: var(--pi-muted); font-size: 10px; text-transform: uppercase; }
+      .canvas-viewport { position: relative; min-height: 560px; height: min(72vh, 820px); overflow: hidden; border: 1px solid var(--pi-border-muted); border-radius: 13px; background-color: var(--pi-bg); background-image: radial-gradient(circle, color-mix(in srgb, var(--pi-muted) 20%, transparent) 1px, transparent 1px); background-size: 20px 20px; cursor: grab; touch-action: none; }
+      .canvas-viewport.dragging { cursor: grabbing; }
+      .canvas-world { position: absolute; left: 0; top: 0; transform-origin: 0 0; will-change: transform; }
+      .canvas-controls { position: absolute; z-index: 20; top: 9px; left: 9px; display: flex; align-items: center; gap: 4px; border: 1px solid var(--pi-border); border-radius: 10px; background: color-mix(in srgb, var(--pi-surface) 92%, transparent); padding: 4px; box-shadow: 0 5px 18px var(--pi-shadow-soft); }
+      .canvas-controls button { min-width: 30px; padding: 4px 7px; }
+      .canvas-controls span { min-width: 42px; color: var(--pi-muted); font-size: 10px; text-align: center; }
+      .canvas-hint { position: absolute; z-index: 5; left: 10px; bottom: 8px; border-radius: 7px; background: color-mix(in srgb, var(--pi-bg) 84%, transparent); color: var(--pi-muted); padding: 3px 6px; font-size: 10px; pointer-events: none; }
+      .canvas-empty { position: absolute; inset: 0; display: grid; place-items: center; color: var(--pi-muted); }
+      .edge-layer { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+      #causal-arrow path { fill: var(--pi-border); }
+      .causal-edge { fill: none; stroke: var(--pi-border); stroke-width: 2; opacity: .66; }
+      .causal-edge.motivates { stroke: var(--pi-accent); stroke-dasharray: 6 5; opacity: .8; }
+      .causal-edge.active-path { stroke: var(--pi-accent); stroke-width: 3; opacity: 1; }
+      .edge-label { position: absolute; z-index: 2; max-width: 210px; transform: translate(-50%, -50%); pointer-events: none; }
+      .edge-label span { display: -webkit-box; overflow: hidden; border: 1px solid var(--pi-border-muted); border-radius: 999px; background: var(--pi-bg); color: var(--pi-muted); padding: 3px 8px; font-size: 10px; line-height: 1.25; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+      .edge-label.motivates span { border-color: var(--pi-accent-border); color: var(--pi-accent); font-weight: 600; }
+      .causal-node { position: absolute; z-index: 4; display: grid; align-content: start; gap: 7px; width: ${String(CAUSAL_NODE_WIDTH)}px; height: ${String(CAUSAL_NODE_HEIGHT)}px; overflow: hidden; border: 1px solid var(--pi-border); border-left-width: 4px; border-radius: 11px; background: var(--pi-surface); color: var(--pi-text); padding: 10px 11px; text-align: left; box-shadow: 0 6px 17px var(--pi-shadow-soft); }
+      .causal-node.hypothesis { border-left-color: #8b5cf6; }
+      .causal-node.validation { border-left-color: #3b82f6; }
+      .causal-node.analysis { border-left-color: #f59e0b; }
+      .causal-node.conclusion { border-left-color: #10b981; }
+      .causal-node.abandoned { opacity: .52; }
+      .causal-node.active-path { border-color: var(--pi-accent-border); }
+      .causal-node.active-node { box-shadow: 0 0 0 3px color-mix(in srgb, var(--pi-accent) 22%, transparent), 0 7px 22px var(--pi-shadow-soft); }
+      .causal-node.selected { outline: 3px solid color-mix(in srgb, var(--pi-accent) 42%, transparent); outline-offset: 2px; }
+      .node-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+      .node-kind, .node-status { color: var(--pi-muted); font-size: 9px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
+      .causal-node > strong { display: -webkit-box; overflow: hidden; font-size: 13px; line-height: 1.3; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+      .node-summary { display: -webkit-box; overflow: hidden; color: var(--pi-text-secondary); font-size: 10.5px; line-height: 1.35; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
+      .conclusion { align-self: end; width: max-content; max-width: 100%; overflow: hidden; border: 1px solid var(--pi-border); border-radius: 999px; padding: 2px 6px; font-size: 9px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+      .conclusion.confirmed, .confirmed { border-color: var(--pi-success-border); color: var(--pi-success); }
+      .conclusion.denied, .denied { border-color: var(--pi-danger); color: var(--pi-danger); }
+      .conclusion.unsure, .unsure { border-color: var(--pi-warning); color: var(--pi-warning); }
+      .node-inspector { position: absolute; z-index: 30; top: 9px; right: 9px; display: grid; gap: 11px; width: min(330px, calc(100% - 18px)); max-height: calc(100% - 18px); overflow: auto; border: 1px solid var(--pi-border); border-radius: 12px; background: color-mix(in srgb, var(--pi-surface) 96%, transparent); padding: 13px; box-shadow: 0 12px 34px var(--pi-shadow); cursor: default; }
+      .inspector-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--pi-muted); font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
+      .inspector-head button { border: 0; padding: 1px 5px; font-size: 18px; }
+      .node-inspector h3, .node-inspector p { margin: 0; }
+      .node-inspector h3 { font-size: 16px; line-height: 1.35; }
+      .node-inspector p { color: var(--pi-text-secondary); font-size: 12px; line-height: 1.5; }
+      .inspector-fact { display: grid; gap: 4px; border-top: 1px solid var(--pi-border-muted); padding-top: 9px; }
+      .inspector-fact > span { color: var(--pi-muted); font-size: 9px; font-weight: 650; text-transform: uppercase; }
+      .inspector-fact > strong { font-size: 11px; line-height: 1.4; }
+      .inspector-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 7px; }
+      .critical-decisions { margin-bottom: 9px; border: 1px solid var(--pi-warning); border-radius: 10px; background: color-mix(in srgb, var(--pi-warning) 7%, transparent); }
+      .critical-decisions summary { cursor: pointer; padding: 10px 12px; color: var(--pi-warning); }
+      .critical-decisions > div { display: grid; gap: 7px; border-top: 1px solid color-mix(in srgb, var(--pi-warning) 32%, transparent); padding: 9px; }
+      .critical-decisions article { display: grid; gap: 4px; border-radius: 8px; background: var(--pi-surface); padding: 9px; }
+      .critical-decisions p { margin: 0; color: var(--pi-text-secondary); font-size: 11px; }
+      .operational-index { margin-top: 9px; border: 1px solid var(--pi-border-muted); border-radius: 10px; background: var(--pi-surface); }
+      .operational-index > summary { display: flex; align-items: center; justify-content: space-between; gap: 9px; cursor: pointer; padding: 10px 12px; }
+      .operational-index summary small { color: var(--pi-muted); }
+      .branch-index { display: grid; gap: 7px; border-top: 1px solid var(--pi-border-muted); padding: 9px; }
+      .branch-index article { display: grid; gap: 4px; border: 1px solid var(--pi-border-muted); border-radius: 8px; padding: 9px; }
+      .branch-index article > div { display: flex; justify-content: space-between; gap: 8px; }
+      .branch-index article span, .branch-index article small { color: var(--pi-muted); font-size: 10px; }
+      .branch-index article p { margin: 0; color: var(--pi-text-secondary); font-size: 11px; line-height: 1.4; }
+      .empty-state, .status { display: grid; gap: 8px; border: 1px dashed var(--pi-border-muted); border-radius: 12px; padding: 16px; }
+      .empty-state p, .status p { margin: 0; line-height: 1.45; }
+      .legacy-context { display: grid; gap: 4px; border: 1px solid var(--pi-border-muted); border-radius: 9px; background: var(--pi-surface); padding: 11px; }
+      .legacy-context span { color: var(--pi-muted); font-size: 10px; text-transform: uppercase; }
       .status.error { border-style: solid; border-color: var(--pi-danger); color: var(--pi-danger); }
       .muted { color: var(--pi-muted); }
-      .empty-row { padding: 8px 2px; }
-      .empty { padding: 16px; color: var(--pi-muted); }
+      pre { margin: 0; overflow: auto; border-radius: 7px; background: var(--pi-bg); padding: 8px; color: var(--pi-text-secondary); font: 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; }
       @media (max-width: 700px) {
         .toolbar { align-items: flex-start; }
-        .brief-grid { grid-template-columns: 1fr; }
-        .brief-fact.recent { grid-column: auto; }
-        .title-row, .record-heading, .answer-heading { align-items: flex-start; flex-direction: column; }
-        .record-heading > span { justify-content: flex-start; }
+        .toolbar-actions { flex-wrap: wrap; justify-content: flex-end; }
+        .canvas-viewport { min-height: 500px; height: 68vh; }
+        .canvas-hint { display: none; }
+        .operational-index > summary { align-items: flex-start; flex-direction: column; }
       }
     </style>
   `;

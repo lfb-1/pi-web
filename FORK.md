@@ -59,19 +59,32 @@ The implementation uses `SpeechRecognition` with the Chrome-compatible
 audio capture, recognition network failures, and remote HTTP origins receive explicit guidance.
 HTTPS or localhost access is recommended for reliable microphone permission.
 
-### Research Workflow prototype
+### Research causal canvas
 
-The bundled `research-workflow` plugin adds a workspace panel for objective, definition of
-done, acceptance criteria, decisions, runs, findings, artifacts, evidence, and linked runtime
-records. The companion `research_workflow` Pi extension writes validated workspace-local state,
-records provenance, injects the active objective into Pi turns, and requires an authority dialog
-for authority-bearing transitions. Under this fork's user-configured timeout policy, an unanswered
-confirmation applies its visibly marked **Yes** recommendation at the deadline.
+The bundled `research-workflow` plugin makes a zoomable and pannable causal DAG the primary
+Research view. Its stage chain is **Hypothesis → Validation → Analysis → Conclusion**, followed by
+labeled directions to new hypotheses. Branches can split and merge. Nodes keep code, raw metrics,
+paths, and job metadata out of the canvas; detailed criteria, runs, findings, artifacts, evidence,
+and provenance remain durable behind a secondary operational index.
 
-The Stage 1 state contract is documented in
-`docs/research-workflow-content-contract.md`. The prototype uses
-`.pi-web/research-workflow.json`; cross-machine attention and runtime-derived experiment state
-remain later stages.
+The companion `research_workflow` Pi extension maintains graph nodes and edges automatically,
+validates stage transitions, typed evidence, active paths, and acyclicity, and preserves creation
+and update provenance. Users can select, locally hide, restore, focus, or ask Pi to revise a node.
+Version-1 state is read and upgraded to version 2 on the first validated write without inventing
+unsupported causal links.
+
+Attention badges and the critical-question banner include only decisions that are explicitly
+critical or blocking. Routine reversible graph maintenance and result bookkeeping proceed without
+creating a decision. Objective scope, overall completion, approved criteria, formal finding
+promotion, decision resolution, and destructive removal retain their authority gates. Under this
+fork's user-configured timeout policy, an unanswered authority confirmation applies its visibly
+marked **Yes** recommendation at the deadline.
+
+The complete state and authority contract is documented in
+`docs/research-workflow-content-contract.md`. Version-2 state remains workspace-local at
+`.pi-web/research-workflow-v2.json`, with read-only fallback to the legacy
+`.pi-web/research-workflow.json`; independent file watching and structured monitor-to-graph updates
+remain later work.
 
 ### Agent session graph and main-session forks
 

@@ -329,15 +329,17 @@ Updates is enabled by default. It declares `machineSpecific: true` so the gatewa
 ### Research Workflow
 
 **Plugin id:** `research-workflow`
-**State file:** `.pi-web/research-workflow.json`
-**What it does:** adds a **Research** workspace tab for objectives, definition of done,
-acceptance criteria, decisions, runs, findings, artifacts, evidence, and linked runtime records.
+**State file:** `.pi-web/research-workflow-v2.json` (reads legacy `.pi-web/research-workflow.json` when version 2 is absent)
+**What it does:** adds a **Research** workspace tab centered on a zoomable causal DAG from
+hypothesis through validation, analysis, conclusion, and the direction of each next hypothesis.
+Branches can split and merge. Detailed criteria, decisions, runs, findings, artifacts, evidence,
+and runtime records remain durable outside the canvas.
 
-The panel renders validated structured state and labels proposed, confirmed, provisional,
-accepted, reported, and evidence-backed records separately. It does not reconstruct approved
-research state from chat when the panel opens. The companion `research_workflow` Pi extension
-tool writes the same state file, records provenance, and requests user confirmation before an
-authority-bearing transition.
+The panel renders validated version-2 state deterministically and never reconstructs research
+state from chat when it opens. The companion `research_workflow` Pi extension maintains concise
+evidence-backed graph nodes and edges, records provenance, and requests confirmation only for
+authority-bearing transitions. Routine reversible maintenance proceeds automatically; only open
+critical or blocking decisions appear in the Research attention badge.
 
 Research Workflow is enabled by default. Projects without a state file see an initialization
 prompt that can be inserted into the current Pi session. To hide the panel, disable
@@ -352,7 +354,7 @@ prompt that can be inserted into the current Pi session. To hide the panel, disa
 ```
 
 See [`research-workflow-content-contract.md`](research-workflow-content-contract.md) for content
-authority, stable identifiers, storage, and Stage 1 limitations.
+authority, version-1 migration, causal-graph validation, stable identifiers, and storage.
 
 ### Workspace Tasks
 
