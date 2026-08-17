@@ -709,7 +709,7 @@ function styles(): string {
       .node-kind, .node-status { color: var(--pi-muted); font-size: 9px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
       .causal-node > strong { display: -webkit-box; overflow: hidden; font-size: 13px; line-height: 1.3; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
       .node-summary { display: -webkit-box; overflow: hidden; color: var(--pi-text-secondary); font-size: 10.5px; line-height: 1.35; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
-      .conclusion { align-self: end; width: max-content; max-width: 100%; overflow: hidden; border: 1px solid var(--pi-border); border-radius: 999px; padding: 2px 6px; font-size: 9px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+      .conclusion { align-self: end; width: 100%; overflow: hidden; border: 1px solid var(--pi-border); border-radius: 4px; padding: 3px 7px; font-size: 9px; font-weight: 650; text-align: center; text-overflow: ellipsis; white-space: nowrap; }
       .conclusion.confirmed, .confirmed { border-color: var(--pi-success-border); color: var(--pi-success); }
       .conclusion.denied, .denied { border-color: var(--pi-danger); color: var(--pi-danger); }
       .conclusion.unsure, .unsure { border-color: var(--pi-warning); color: var(--pi-warning); }

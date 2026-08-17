@@ -74,11 +74,11 @@ Version-1 state is read and upgraded to version 2 on the first validated write w
 unsupported causal links.
 
 Attention badges and the critical-question banner include only decisions that are explicitly
-critical or blocking. Routine reversible graph maintenance and result bookkeeping proceed without
-creating a decision. Objective scope, overall completion, approved criteria, formal finding
-promotion, decision resolution, and destructive removal retain their authority gates. Under this
-fork's user-configured timeout policy, an unanswered authority confirmation applies its visibly
-marked **Yes** recommendation at the deadline.
+critical or blocking. Objective, criteria, routine decisions, findings, work-item status, graph
+maintenance, and result bookkeeping proceed automatically. Authority dialogs remain only for
+overall research completion/reopening, critical or blocking decision resolution/downgrade, and
+destructive removal. Under this fork's user-configured timeout policy, an unanswered authority
+confirmation applies its visibly marked **Yes** recommendation at the deadline.
 
 The complete state and authority contract is documented in
 `docs/research-workflow-content-contract.md`. Version-2 state remains workspace-local at
@@ -88,9 +88,10 @@ remain later work.
 
 ### Agent session graph and main-session forks
 
-The right workspace panel is split horizontally: its upper area keeps the selected Git,
-Terminal, Research, or other workspace tool, while the lower area shows a zoomable and pannable
-session graph. Root sessions and response-level forks form the persistent main-agent lineage.
+The right workspace panel keeps the selected Git, Terminal, Research, or other workspace tool in
+its main area. The zoomable and pannable Agents session graph is folded into a compact bottom bar
+by default and can be expanded when needed. Root sessions and response-level forks form the
+persistent main-agent lineage.
 Each main session's delegated `pi-subagents` and tracked subsessions are folded into that main by
 default; selecting a main node toggles its own subagents, while selecting any visible node opens
 that session in the middle chat panel.

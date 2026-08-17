@@ -215,8 +215,8 @@ export default function researchWorkflowExtension(pi: ExtensionAPI): void {
       "Keep detailed runs, artifacts, criteria, and findings durable for traceability, but do not copy their detail into the graph. Link a graph node to its branch with workItemId when available.",
       "Continue automatically for reversible implementation choices, evidence-backed graph maintenance, routine record synchronization, and an obvious recommended next step. Do not ask the user about implementation detail or ordinary result bookkeeping.",
       "Create a blocking critical decision only when safe progress genuinely requires a scientific-direction choice that cannot be inferred, substantial unapproved compute, necessary missing information, or an irreversible/destructive action. Mark it importance=critical and blocking=true. Other decisions stay routine or important and must not interrupt progress.",
-      "Rewrite source material into workItem.brief for agent context in plain language. Keep detailed findings provisional unless the user explicitly requests formal promotion; use non-authoritative graph conclusions for automatic scientific interpretation. Graph conclusions do not approve criteria, authorize compute, or mark the overall research idea completed.",
-      "Overall causalGraph completion, confirmed objective scope, approved acceptance criteria, destructive removal, and work-item completion remain user-authority transitions.",
+      "Rewrite source material into workItem.brief for agent context in plain language. Promote findings automatically when evidence and registered criteria support the transition, while preserving scope and uncertainty; use graph conclusions for automatic scientific interpretation. Graph conclusions do not authorize substantial unapproved compute or mark the overall research idea completed.",
+      "Run the research-record pipeline automatically. Only overall causalGraph completion, destructive removal, and resolving, voiding, or downgrading a critical/blocking decision remain user-authority transitions. Objective, criteria, routine decision, finding, and work-item maintenance must not interrupt the user.",
       "After an authorized experiment reaches a terminal state, record its status, artifacts, provisional finding, concise analysis/conclusion nodes, and any motivated next hypothesis. Scheduler submission alone is incomplete.",
     ],
     parameters: ResearchWorkflowParameters,
@@ -344,42 +344,21 @@ export function authorityRequestFor(params: ResearchWorkflowParameters, state: R
     return transitions.length === 0 ? undefined : { message: `${uniqueStrings(transitions).join(" and ")}?` };
   }
 
-  if (params.action === "upsert_work_item" && params.workItem !== undefined) {
-    const existing = state.workItems.find((item) => item.id === params.workItem?.id);
-    const transitions: string[] = [];
-    if (params.workItem.objectiveStatus === "confirmed" && existing?.objectiveStatus !== "confirmed") transitions.push("confirm the research objective");
-    if (params.workItem.phase === "completed" && existing?.phase !== "completed") transitions.push("mark the work item completed");
-    if (existing !== undefined && changesAuthorizedWorkItemScope(params.workItem, existing)) {
-      if (existing.phase === "completed") transitions.push("change the completed work item scope");
-      else if (existing.objectiveStatus === "confirmed") transitions.push("change the confirmed research objective");
-    }
-    if (existing?.phase === "completed" && params.workItem.phase !== undefined && params.workItem.phase !== "completed") transitions.push("reopen the completed work item");
-    return transitions.length === 0 ? undefined : { message: `${uniqueStrings(transitions).join(" and ")} for ${params.workItem.id}?` };
-  }
-
   const item = params.workItemId === undefined ? undefined : state.workItems.find((candidate) => candidate.id === params.workItemId);
-  if (params.action === "upsert_acceptance" && params.criterion !== undefined) {
-    const existing = item?.acceptanceCriteria.find((criterion) => criterion.id === params.criterion?.id);
-    if (params.criterion.status === "approved" && existing?.status !== "approved") return { message: `Approve acceptance criterion ${params.criterion.id}: ${params.criterion.predicate ?? existing?.predicate ?? "(predicate missing)"}?` };
-    if (existing?.status === "approved" && changesApprovedCriterion(params.criterion, existing)) return { message: `Change approved acceptance criterion ${params.criterion.id}?` };
-  }
   if (params.action === "upsert_decision" && params.decision !== undefined) {
     const existing = item?.decisions.find((decision) => decision.id === params.decision?.id);
-    const existingRequiresAttention = existing === undefined ? false : decisionRequiresAttention(existing);
-    const resultingRequiresAttention = (params.decision.importance ?? existing?.importance) === "critical"
+    const existingIsCritical = existing?.importance === "critical" || existing?.blocking === true;
+    const resultingIsCritical = (params.decision.importance ?? existing?.importance) === "critical"
       || (params.decision.blocking ?? existing?.blocking) === true;
-    if (params.decision.status !== undefined && params.decision.status !== "open" && existing?.status !== params.decision.status) {
-      return { message: `${params.decision.status === "resolved" ? "Resolve" : "Void"} decision ${params.decision.id}${params.decision.resolution === undefined ? "" : ` as: ${params.decision.resolution}`}?` };
+    if (params.decision.status !== undefined && params.decision.status !== "open" && existing?.status !== params.decision.status && (existingIsCritical || resultingIsCritical)) {
+      return { message: `${params.decision.status === "resolved" ? "Resolve" : "Void"} critical decision ${params.decision.id}${params.decision.resolution === undefined ? "" : ` as: ${params.decision.resolution}`}?` };
     }
-    if (existing?.status === "open" && existingRequiresAttention && !resultingRequiresAttention) {
+    if (existing !== undefined && existingIsCritical && !resultingIsCritical) {
       return { message: `Lower the attention level of critical decision ${params.decision.id}?` };
     }
-    if (existing !== undefined && existing.status !== "open" && changesAuthorizedDecision(params.decision, existing)) return { message: `Change ${existing.status} decision ${params.decision.id}?` };
-  }
-  if (params.action === "upsert_finding" && params.finding !== undefined) {
-    const existing = item?.findings.find((finding) => finding.id === params.finding?.id);
-    if (params.finding.status !== undefined && params.finding.status !== "provisional" && existing?.status !== params.finding.status) return { message: `${params.finding.status === "accepted" ? "Accept" : "Reject"} finding ${params.finding.id}: ${params.finding.summary ?? existing?.summary ?? "(summary missing)"}?` };
-    if (existing !== undefined && existing.status !== "provisional" && changesAuthorizedFinding(params.finding, existing)) return { message: `Change ${existing.status} finding ${params.finding.id}?` };
+    if (existing !== undefined && (existingIsCritical || resultingIsCritical) && changesAuthorizedDecision(params.decision, existing)) {
+      return { message: `Change ${existing.status} critical decision ${params.decision.id}?` };
+    }
   }
   return undefined;
 }
@@ -578,7 +557,11 @@ function upsertWorkItem(
   const brief = patch.brief === undefined ? existing?.brief : semanticBriefFromPatch(patch.brief, source);
   const objectiveStatus = patch.objectiveStatus ?? existing?.objectiveStatus ?? "proposed";
   const phase = patch.phase ?? existing?.phase ?? "research";
-  const authority = objectiveStatus === "confirmed" || phase === "completed" ? authoritySource ?? existing?.authoritySource : undefined;
+  const authorityContentChanged = existing !== undefined && (changesAuthorizedWorkItemScope(patch, existing)
+    || (patch.phase !== undefined && patch.phase !== existing.phase));
+  const authority = objectiveStatus === "confirmed" || phase === "completed"
+    ? authoritySource ?? (authorityContentChanged ? undefined : existing?.authoritySource)
+    : undefined;
   const record: ResearchWorkItem = {
     id: patch.id,
     title: required(patch.title ?? existing?.title, "workItem.title"),
@@ -634,7 +617,10 @@ function upsertCriterion(
   const existing = index === -1 ? undefined : item.acceptanceCriteria[index];
   const note = patch.note ?? existing?.note;
   const status = patch.status ?? existing?.status ?? "proposed";
-  const authority = status === "approved" ? authoritySource ?? existing?.authoritySource : undefined;
+  const authorityContentChanged = existing !== undefined && changesApprovedCriterion(patch, existing);
+  const authority = status === "approved"
+    ? authoritySource ?? (authorityContentChanged ? undefined : existing?.authoritySource)
+    : undefined;
   const record: AcceptanceCriterion = {
     id: patch.id,
     title: required(patch.title ?? existing?.title, "criterion.title"),
@@ -662,7 +648,10 @@ function upsertDecision(
   const status = patch.status ?? existing?.status ?? "open";
   const importance = patch.importance ?? existing?.importance;
   const blocking = patch.blocking ?? existing?.blocking;
-  const authority = status === "open" ? undefined : authoritySource ?? existing?.authoritySource;
+  const authorityContentChanged = existing !== undefined && changesAuthorizedDecision(patch, existing);
+  const authority = status === "open"
+    ? undefined
+    : authoritySource ?? (authorityContentChanged ? undefined : existing?.authoritySource);
   const record: DecisionRecord = {
     id: patch.id,
     kind: patch.kind ?? existing?.kind ?? "other",
@@ -739,7 +728,10 @@ function upsertFinding(
   const index = item.findings.findIndex((record) => record.id === patch.id);
   const existing = index === -1 ? undefined : item.findings[index];
   const status = patch.status ?? existing?.status ?? "provisional";
-  const authority = status === "provisional" ? undefined : authoritySource ?? existing?.authoritySource;
+  const authorityContentChanged = existing !== undefined && changesAuthorizedFinding(patch, existing);
+  const authority = status === "provisional"
+    ? undefined
+    : authoritySource ?? (authorityContentChanged ? undefined : existing?.authoritySource);
   const record: FindingRecord = {
     id: patch.id,
     summary: required(patch.summary ?? existing?.summary, "finding.summary"),

@@ -65,24 +65,24 @@ requires one of these inputs:
 - necessary missing information;
 - an irreversible or destructive action.
 
-Routine reversible implementation choices, ordinary result bookkeeping, and evidence-backed graph
-maintenance proceed automatically. They should not become `DecisionRecord` entries. Detailed
-findings stay provisional unless the user explicitly requests formal promotion.
+Routine implementation choices, objective and criterion maintenance, result bookkeeping,
+evidence-backed finding promotion, and graph maintenance proceed automatically. They should not
+become `DecisionRecord` entries merely to request bookkeeping approval.
 
-Authority-bearing transitions remain protected:
+The pipeline asks for authority only at a small set of boundaries:
 
 | Content | Pi may create or update automatically | User-authority transition |
 | --- | --- | --- |
 | Causal node or edge | Evidence-backed concise interpretation | None |
 | Overall causal graph | Active graph, active node, supported active path | Complete or reopen the overall idea |
-| Objective and definition of done | Proposed text | Confirm or change confirmed scope |
-| Acceptance criterion | Proposed predicate and observed result | Approve or change approved criterion |
-| Decision request | Open request with explicit importance/blocking | Resolve, void, or change resolved decision |
-| Run and artifact | Reported runtime record | Compute authorization remains external to the record |
-| Finding | Provisional interpretation | Accept, reject, or change an accepted/rejected finding |
+| Objective and definition of done | Create, confirm, revise, complete, or reopen work automatically | None |
+| Acceptance criterion | Create, approve, revise, and record results automatically | None |
+| Decision request | Create and resolve routine/important decisions automatically | Resolve, void, downgrade, or revise a critical/blocking decision |
+| Run and artifact | Reported runtime record | Substantial unapproved compute must be represented by a critical/blocking decision |
+| Finding | Create, promote, reject, and revise evidence-backed findings automatically | None |
 | Removal | No automatic deletion | Remove any durable record |
 
-The extension uses a host authority dialog for these transitions. A direct answer or the configured
+The extension uses a host authority dialog only for these rare transitions. A direct answer or the configured
 recommended-timeout policy can resolve that dialog. Durable authority provenance remains labeled
 `dialog-or-recommended-timeout-policy`; the browser-local dialog outcome provides the more specific
 answered or timed-out event while available.

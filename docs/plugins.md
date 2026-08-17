@@ -337,9 +337,10 @@ and runtime records remain durable outside the canvas.
 
 The panel renders validated version-2 state deterministically and never reconstructs research
 state from chat when it opens. The companion `research_workflow` Pi extension maintains concise
-evidence-backed graph nodes and edges, records provenance, and requests confirmation only for
-authority-bearing transitions. Routine reversible maintenance proceeds automatically; only open
-critical or blocking decisions appear in the Research attention badge.
+evidence-backed graph nodes and edges and records provenance. Objective, criteria, routine
+decisions, findings, work-item state, and result maintenance proceed automatically. Confirmation
+is limited to overall research completion/reopening, critical or blocking decision authority, and
+destructive removal; only open critical or blocking decisions appear in the Research attention badge.
 
 Research Workflow is enabled by default. Projects without a state file see an initialization
 prompt that can be inserted into the current Pi session. To hide the panel, disable
