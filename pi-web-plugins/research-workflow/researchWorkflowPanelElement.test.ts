@@ -2,9 +2,10 @@
 
 import type { WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CAUSAL_CONCLUSION_NODE_HEIGHT, CAUSAL_NODE_HEIGHT, layoutResearchCausalGraph } from "./researchCausalGraph.js";
+import { CAUSAL_CONCLUSION_NODE_HEIGHT, CAUSAL_NODE_HEIGHT, CAUSAL_NODE_WIDTH, layoutResearchCausalGraph } from "./researchCausalGraph.js";
 import {
   defineResearchWorkflowPanelElement,
+  focusedCanvasTransform,
   refreshResearchWorkflowPanel,
   renderResearchCanvas,
   researchWorkflowCorrectionPrompt,
@@ -85,8 +86,25 @@ describe("Research causal canvas", () => {
     expect(rendered).toContain("Narrow the mechanism instead of repeating the failed setup.");
     expect(rendered).not.toContain("results/private/RESULT.json");
     expect(rendered).not.toContain("raw.report");
+    expect(container.querySelectorAll(".iteration-row")).toHaveLength(3);
+    expect(container.querySelector(".stage-legend")?.textContent).toContain("Hypothesis");
+    expect(container.querySelector("[data-fit]")?.textContent).toBe("Overview");
     expect(container.querySelector<HTMLElement>("[data-node-id='conclusion.one']")?.style.height).toBe(`${String(CAUSAL_CONCLUSION_NODE_HEIGHT)}px`);
     expect(container.querySelector<HTMLElement>("[data-node-id='hypothesis.one']")?.style.height).toBe(`${String(CAUSAL_NODE_HEIGHT)}px`);
+  });
+
+  it("keeps the focused node fully visible in a narrow viewport", () => {
+    const causalGraph = graph();
+    const layout = layoutResearchCausalGraph(causalGraph);
+    for (const nodeId of ["hypothesis.next", "conclusion.one"]) {
+      const positioned = layout.nodes.find((entry) => entry.node.id === nodeId);
+      if (positioned === undefined) throw new Error(`missing ${nodeId}`);
+      const transform = focusedCanvasTransform(layout, positioned, 400, 600);
+      const left = positioned.x * transform.scale + transform.panX;
+      const right = (positioned.x + CAUSAL_NODE_WIDTH) * transform.scale + transform.panX;
+      expect(left).toBeGreaterThanOrEqual(12);
+      expect(right).toBeLessThanOrEqual(388);
+    }
   });
 
   it("marks only the explicit active path when a merge has another parent", () => {

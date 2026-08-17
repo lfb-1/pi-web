@@ -10,6 +10,7 @@ import {
   CAUSAL_NODE_HEIGHT,
   CAUSAL_NODE_WIDTH,
   layoutResearchCausalGraph,
+  type PositionedCausalNode,
   type ResearchCausalGraphLayout,
 } from "./researchCausalGraph.js";
 import {
@@ -30,6 +31,7 @@ const MIN_SCALE = 0.28;
 const MAX_SCALE = 1.8;
 
 type PanelState = { kind: "loading" } | ResearchWorkflowLoadResult;
+export interface CanvasTransform { scale: number; panX: number; panY: number }
 const stateCache = new Map<string, PanelState>();
 const refreshGenerations = new Map<string, number>();
 
@@ -43,6 +45,25 @@ export function researchWorkflowPanelBadge(context: WorkspacePanelContext): stri
   if (state?.kind !== "loaded") return undefined;
   const attentionCount = criticalDecisions(state.state).length;
   return attentionCount > 0 ? attentionCount : undefined;
+}
+
+export function focusedCanvasTransform(
+  layout: ResearchCausalGraphLayout,
+  positioned: PositionedCausalNode,
+  viewportWidth: number,
+  viewportHeight: number,
+): CanvasTransform {
+  const readableRowScale = (viewportWidth - 72) / layout.width;
+  const scale = clamp(readableRowScale, 0.56, 0.9);
+  const scaledWidth = layout.width * scale;
+  const panX = scaledWidth <= viewportWidth - 24
+    ? (viewportWidth - scaledWidth) / 2
+    : viewportWidth / 2 - (positioned.x + CAUSAL_NODE_WIDTH / 2) * scale;
+  return {
+    scale,
+    panX,
+    panY: viewportHeight / 2 - (positioned.y + positioned.height / 2) * scale,
+  };
 }
 
 export async function refreshResearchWorkflowPanel(context: WorkspacePanelContext): Promise<void> {
@@ -142,7 +163,10 @@ class PiWebResearchWorkflowPanel extends HTMLElement {
       if (graphKey !== undefined && this.fittedGraphKey !== graphKey) {
         this.fittedGraphKey = graphKey;
         this.autoFit = true;
-        requestAnimationFrame(() => { this.fitCanvas(); });
+        requestAnimationFrame(() => {
+          if (graph.activeNodeId !== undefined && !this.hiddenNodeIds.has(graph.activeNodeId)) this.focusNode(graph.activeNodeId);
+          else this.fitCanvas();
+        });
       }
     }
     if (focusTarget !== undefined) this.focusAfterRender(focusTarget);
@@ -364,11 +388,13 @@ class PiWebResearchWorkflowPanel extends HTMLElement {
   private focusNode(nodeId: string): void {
     this.autoFit = false;
     const viewport = this.viewport();
-    const positioned = this.layout?.nodes.find((entry) => entry.node.id === nodeId);
-    if (viewport === null || positioned === undefined) return;
-    this.scale = clamp(Math.max(this.scale, 0.82), MIN_SCALE, MAX_SCALE);
-    this.panX = viewport.clientWidth / 2 - (positioned.x + CAUSAL_NODE_WIDTH / 2) * this.scale;
-    this.panY = viewport.clientHeight / 2 - (positioned.y + CAUSAL_NODE_HEIGHT / 2) * this.scale;
+    const layout = this.layout;
+    const positioned = layout?.nodes.find((entry) => entry.node.id === nodeId);
+    if (viewport === null || layout === undefined || positioned === undefined) return;
+    const transform = focusedCanvasTransform(layout, positioned, viewport.clientWidth, viewport.clientHeight);
+    this.scale = transform.scale;
+    this.panX = transform.panX;
+    this.panY = transform.panY;
     this.applyTransform();
   }
 
@@ -422,13 +448,15 @@ export function renderResearchCanvas(
           <button data-zoom-out title="Zoom out" aria-label="Zoom out">−</button>
           <span data-zoom-value>${String(Math.round(scale * 100))}%</span>
           <button data-zoom-in title="Zoom in" aria-label="Zoom in">+</button>
-          <button data-fit>Fit</button>
+          <button data-fit>Overview</button>
           ${graph.activeNodeId === undefined ? "" : hiddenNodeIds.has(graph.activeNodeId) ? `<button data-restore-active>Restore active</button>` : `<button data-focus-active>Active</button>`}
           ${hiddenCount === 0 ? "" : `<button data-restore-hidden>Restore ${String(hiddenCount)}</button>`}
         </div>
+        <div class="stage-legend" aria-label="Causal stage columns"><span class="hypothesis">Hypothesis</span><span class="validation">Validation</span><span class="analysis">Analysis</span><span class="conclusion">Conclusion</span></div>
         ${renderEdgeDescriptions(graph)}
         ${layout.nodes.length === 0 ? `<div class="canvas-empty">All nodes are hidden.</div>` : ""}
         <div class="canvas-world" data-canvas-world style="width:${String(layout.width)}px;height:${String(layout.height)}px;transform:translate(${String(panX)}px, ${String(panY)}px) scale(${String(scale)})">
+          ${layout.rows.map((row) => `<div class="iteration-row ${row.index % 2 === 0 ? "even" : "odd"}" style="left:20px;top:${String(row.y - 16)}px;width:${String(layout.width - 40)}px;height:${String(row.height + 32)}px"></div>`).join("")}
           <svg class="edge-layer" viewBox="0 0 ${String(layout.width)} ${String(layout.height)}" aria-hidden="true">
             <defs><marker id="causal-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z"></path></marker></defs>
             ${layout.edges.map((entry) => `<path class="causal-edge ${entry.edge.kind} ${activePath.edgeIds.has(entry.edge.id) ? "active-path" : ""}" d="${entry.path}" marker-end="url(#causal-arrow)"></path>`).join("")}
@@ -437,7 +465,7 @@ export function renderResearchCanvas(
           ${layout.nodes.map((entry) => renderCausalNode(entry.node, entry.x, entry.y, entry.height, graph, activePath.nodeIds, selectedNodeId)).join("")}
         </div>
         ${selectedNode === undefined ? "" : renderNodeInspector(selectedNode, graph, state)}
-        <div class="canvas-hint">Drag to pan · Scroll to pan · Ctrl/⌘ + scroll to zoom</div>
+        <div class="canvas-hint">Each row is one research iteration · Drag to pan · Ctrl/⌘ + scroll to zoom</div>
       </div>
     </section>
   `;
@@ -645,15 +673,24 @@ function styles(): string {
       .canvas-meta span { color: var(--pi-muted); font-size: 10px; text-transform: uppercase; }
       .canvas-viewport { position: relative; min-height: 560px; height: min(72vh, 820px); overflow: hidden; border: 1px solid var(--pi-border-muted); border-radius: 13px; background-color: var(--pi-bg); background-image: radial-gradient(circle, color-mix(in srgb, var(--pi-muted) 20%, transparent) 1px, transparent 1px); background-size: 20px 20px; cursor: grab; touch-action: none; }
       .canvas-viewport.dragging { cursor: grabbing; }
-      .canvas-world { position: absolute; left: 0; top: 0; transform-origin: 0 0; will-change: transform; }
+      .canvas-world { position: absolute; left: 0; top: 0; isolation: isolate; transform-origin: 0 0; will-change: transform; }
       .canvas-controls { position: absolute; z-index: 20; top: 9px; left: 9px; display: flex; align-items: center; gap: 4px; border: 1px solid var(--pi-border); border-radius: 10px; background: color-mix(in srgb, var(--pi-surface) 92%, transparent); padding: 4px; box-shadow: 0 5px 18px var(--pi-shadow-soft); }
       .canvas-controls button { min-width: 30px; padding: 4px 7px; }
       .canvas-controls span { min-width: 42px; color: var(--pi-muted); font-size: 10px; text-align: center; }
+      .stage-legend { position: absolute; z-index: 19; top: 9px; right: 9px; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 5px 10px; max-width: calc(100% - 330px); border: 1px solid var(--pi-border); border-radius: 10px; background: color-mix(in srgb, var(--pi-surface) 92%, transparent); padding: 7px 9px; box-shadow: 0 5px 18px var(--pi-shadow-soft); color: var(--pi-muted); font-size: 9px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+      .stage-legend span::before { display: inline-block; width: 7px; height: 7px; margin-right: 4px; border-radius: 2px; content: ""; }
+      .stage-legend .hypothesis::before { background: #8b5cf6; }
+      .stage-legend .validation::before { background: #3b82f6; }
+      .stage-legend .analysis::before { background: #f59e0b; }
+      .stage-legend .conclusion::before { background: #10b981; }
       .canvas-hint { position: absolute; z-index: 5; left: 10px; bottom: 8px; border-radius: 7px; background: color-mix(in srgb, var(--pi-bg) 84%, transparent); color: var(--pi-muted); padding: 3px 6px; font-size: 10px; pointer-events: none; }
       .canvas-empty { position: absolute; inset: 0; display: grid; place-items: center; color: var(--pi-muted); }
-      .edge-layer { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+      .iteration-row { position: absolute; z-index: 0; border: 1px solid color-mix(in srgb, var(--pi-border-muted) 72%, transparent); border-radius: 18px; pointer-events: none; }
+      .iteration-row.even { background: color-mix(in srgb, var(--pi-surface) 34%, transparent); }
+      .iteration-row.odd { background: color-mix(in srgb, var(--pi-accent) 2.5%, transparent); }
+      .edge-layer { position: absolute; z-index: 1; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
       #causal-arrow path { fill: var(--pi-border); }
-      .causal-edge { fill: none; stroke: var(--pi-border); stroke-width: 2; opacity: .66; }
+      .causal-edge { fill: none; stroke: var(--pi-border); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; opacity: .66; }
       .causal-edge.motivates { stroke: var(--pi-accent); stroke-dasharray: 6 5; opacity: .8; }
       .causal-edge.active-path { stroke: var(--pi-accent); stroke-width: 3; opacity: 1; }
       .edge-label { position: absolute; z-index: 2; max-width: 210px; transform: translate(-50%, -50%); pointer-events: none; }
@@ -710,7 +747,7 @@ function styles(): string {
         .toolbar { align-items: flex-start; }
         .toolbar-actions { flex-wrap: wrap; justify-content: flex-end; }
         .canvas-viewport { min-height: 500px; height: 68vh; }
-        .canvas-hint { display: none; }
+        .stage-legend, .canvas-hint { display: none; }
         .operational-index > summary { align-items: flex-start; flex-direction: column; }
       }
     </style>
