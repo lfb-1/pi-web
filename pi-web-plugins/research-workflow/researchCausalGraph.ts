@@ -2,6 +2,7 @@ import type { CausalEdge, CausalNode, ResearchCausalGraph } from "./researchWork
 
 export const CAUSAL_NODE_WIDTH = 238;
 export const CAUSAL_NODE_HEIGHT = 126;
+export const CAUSAL_CONCLUSION_NODE_HEIGHT = 158;
 const LAYER_GAP = 116;
 const ROW_GAP = 56;
 const CANVAS_PADDING = 72;
@@ -11,6 +12,7 @@ export interface PositionedCausalNode {
   x: number;
   y: number;
   depth: number;
+  height: number;
 }
 
 export interface PositionedCausalEdge {
@@ -69,8 +71,11 @@ export function layoutResearchCausalGraph(
     layers.set(nodeDepth, layer);
   }
   const layerEntries = [...layers.entries()].sort(([left], [right]) => left - right);
-  const maxRows = Math.max(...layerEntries.map(([, nodes]) => nodes.length));
-  const contentHeight = maxRows * CAUSAL_NODE_HEIGHT + Math.max(0, maxRows - 1) * ROW_GAP;
+  const layerHeights = new Map(layerEntries.map(([nodeDepth, nodes]) => [
+    nodeDepth,
+    nodes.reduce((total, node) => total + causalNodeHeight(node), 0) + Math.max(0, nodes.length - 1) * ROW_GAP,
+  ]));
+  const contentHeight = Math.max(...layerHeights.values());
   const positioned: PositionedCausalNode[] = [];
   for (const [nodeDepth, nodes] of layerEntries) {
     nodes.sort((left, right) => {
@@ -80,16 +85,19 @@ export function layoutResearchCausalGraph(
       const rightRank = rightParents.length === 0 ? (order.get(right.id) ?? 0) : average(rightParents.map((id) => order.get(id) ?? 0));
       return leftRank - rightRank || (order.get(left.id) ?? 0) - (order.get(right.id) ?? 0);
     });
-    const layerHeight = nodes.length * CAUSAL_NODE_HEIGHT + Math.max(0, nodes.length - 1) * ROW_GAP;
-    const startY = CANVAS_PADDING + (contentHeight - layerHeight) / 2;
-    nodes.forEach((node, index) => {
+    const layerHeight = layerHeights.get(nodeDepth) ?? 0;
+    let nextY = CANVAS_PADDING + (contentHeight - layerHeight) / 2;
+    for (const node of nodes) {
+      const height = causalNodeHeight(node);
       positioned.push({
         node,
         x: CANVAS_PADDING + nodeDepth * (CAUSAL_NODE_WIDTH + LAYER_GAP),
-        y: startY + index * (CAUSAL_NODE_HEIGHT + ROW_GAP),
+        y: nextY,
         depth: nodeDepth,
+        height,
       });
-    });
+      nextY += height + ROW_GAP;
+    }
   }
 
   const byId = new Map(positioned.map((entry) => [entry.node.id, entry]));
@@ -98,9 +106,9 @@ export function layoutResearchCausalGraph(
     const to = byId.get(edge.to);
     if (from === undefined || to === undefined) return [];
     const fromX = from.x + CAUSAL_NODE_WIDTH;
-    const fromY = from.y + CAUSAL_NODE_HEIGHT / 2;
+    const fromY = from.y + from.height / 2;
     const toX = to.x;
-    const toY = to.y + CAUSAL_NODE_HEIGHT / 2;
+    const toY = to.y + to.height / 2;
     const controlOffset = Math.max(52, (toX - fromX) * 0.42);
     return [{
       edge,
@@ -129,6 +137,10 @@ export function activeCausalPath(graph: ResearchCausalGraph): { nodeIds: Set<str
     nodeIds.add(edge.to);
   }
   return { nodeIds, edgeIds };
+}
+
+export function causalNodeHeight(node: CausalNode): number {
+  return node.kind === "conclusion" ? CAUSAL_CONCLUSION_NODE_HEIGHT : CAUSAL_NODE_HEIGHT;
 }
 
 function average(values: number[]): number {

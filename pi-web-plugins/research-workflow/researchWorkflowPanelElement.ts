@@ -434,7 +434,7 @@ export function renderResearchCanvas(
             ${layout.edges.map((entry) => `<path class="causal-edge ${entry.edge.kind} ${activePath.edgeIds.has(entry.edge.id) ? "active-path" : ""}" d="${entry.path}" marker-end="url(#causal-arrow)"></path>`).join("")}
           </svg>
           ${layout.edges.map((entry) => renderEdgeLabel(entry.edge, entry.labelX, entry.labelY)).join("")}
-          ${layout.nodes.map((entry) => renderCausalNode(entry.node, entry.x, entry.y, graph, activePath.nodeIds, selectedNodeId)).join("")}
+          ${layout.nodes.map((entry) => renderCausalNode(entry.node, entry.x, entry.y, entry.height, graph, activePath.nodeIds, selectedNodeId)).join("")}
         </div>
         ${selectedNode === undefined ? "" : renderNodeInspector(selectedNode, graph, state)}
         <div class="canvas-hint">Drag to pan · Scroll to pan · Ctrl/⌘ + scroll to zoom</div>
@@ -443,14 +443,14 @@ export function renderResearchCanvas(
   `;
 }
 
-function renderCausalNode(node: CausalNode, x: number, y: number, graph: ResearchCausalGraph, activePath: ReadonlySet<string>, selectedNodeId: string | undefined): string {
+function renderCausalNode(node: CausalNode, x: number, y: number, height: number, graph: ResearchCausalGraph, activePath: ReadonlySet<string>, selectedNodeId: string | undefined): string {
   const classes = ["causal-node", node.kind, node.status];
   if (node.id === graph.activeNodeId) classes.push("active-node");
   if (activePath.has(node.id)) classes.push("active-path");
   if (node.id === selectedNodeId) classes.push("selected");
   const describedBy = graph.edges.filter((edge) => edge.from === node.id || edge.to === node.id).map((edge) => edgeDescriptionId(edge.id)).join(" ");
   return `
-    <button class="${classes.join(" ")}" data-node-id="${escapeAttr(node.id)}" style="left:${String(x)}px;top:${String(y)}px" aria-label="${escapeAttr(`${causalKindLabel(node.kind)}: ${node.title}`)}"${describedBy === "" ? "" : ` aria-describedby="${escapeAttr(describedBy)}"`}>
+    <button class="${classes.join(" ")}" data-node-id="${escapeAttr(node.id)}" style="left:${String(x)}px;top:${String(y)}px;height:${String(height)}px" aria-label="${escapeAttr(`${causalKindLabel(node.kind)}: ${node.title}`)}"${describedBy === "" ? "" : ` aria-describedby="${escapeAttr(describedBy)}"`}>
       <span class="node-head"><span class="node-kind">${escapeHtml(causalKindLabel(node.kind))}</span><span class="node-status">${escapeHtml(node.status)}</span></span>
       <strong>${escapeHtml(node.title)}</strong>
       <span class="node-summary">${escapeHtml(node.summary)}</span>

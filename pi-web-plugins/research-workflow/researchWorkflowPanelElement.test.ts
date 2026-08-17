@@ -2,7 +2,7 @@
 
 import type { WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { layoutResearchCausalGraph } from "./researchCausalGraph.js";
+import { CAUSAL_CONCLUSION_NODE_HEIGHT, CAUSAL_NODE_HEIGHT, layoutResearchCausalGraph } from "./researchCausalGraph.js";
 import {
   defineResearchWorkflowPanelElement,
   refreshResearchWorkflowPanel,
@@ -76,6 +76,8 @@ describe("Research causal canvas", () => {
     const causalGraph = workflow.causalGraph;
     if (causalGraph === undefined) throw new Error("expected graph");
     const rendered = renderResearchCanvas(causalGraph, workflow, layoutResearchCausalGraph(causalGraph));
+    const container = document.createElement("div");
+    container.innerHTML = rendered;
 
     expect(rendered).toContain("The method improves accuracy");
     expect(rendered).toContain("No improvement");
@@ -83,6 +85,8 @@ describe("Research causal canvas", () => {
     expect(rendered).toContain("Narrow the mechanism instead of repeating the failed setup.");
     expect(rendered).not.toContain("results/private/RESULT.json");
     expect(rendered).not.toContain("raw.report");
+    expect(container.querySelector<HTMLElement>("[data-node-id='conclusion.one']")?.style.height).toBe(`${String(CAUSAL_CONCLUSION_NODE_HEIGHT)}px`);
+    expect(container.querySelector<HTMLElement>("[data-node-id='hypothesis.one']")?.style.height).toBe(`${String(CAUSAL_NODE_HEIGHT)}px`);
   });
 
   it("marks only the explicit active path when a merge has another parent", () => {

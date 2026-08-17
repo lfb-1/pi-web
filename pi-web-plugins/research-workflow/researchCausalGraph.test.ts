@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { activeCausalPath, layoutResearchCausalGraph } from "./researchCausalGraph.js";
+import {
+  activeCausalPath,
+  CAUSAL_CONCLUSION_NODE_HEIGHT,
+  CAUSAL_NODE_HEIGHT,
+  layoutResearchCausalGraph,
+} from "./researchCausalGraph.js";
 import type { RecordSource, ResearchCausalGraph } from "./researchWorkflowState.js";
 
 const source: RecordSource = { kind: "pi", ref: "session:test#entry", at: "2026-08-17T00:00:00.000Z" };
@@ -39,6 +44,23 @@ describe("research causal graph layout", () => {
     }
     expect(layout.edges.filter((entry) => entry.edge.to === "hypothesis.next")).toHaveLength(2);
     expect(layout.width).toBeGreaterThan(1000);
+  });
+
+  it("allocates extra height to conclusion nodes without overlapping rows", () => {
+    const layout = layoutResearchCausalGraph(graph());
+    const conclusion = layout.nodes.find((entry) => entry.node.id === "conclusion.one");
+    const hypothesis = layout.nodes.find((entry) => entry.node.id === "hypothesis.one");
+
+    expect(conclusion?.height).toBe(CAUSAL_CONCLUSION_NODE_HEIGHT);
+    expect(hypothesis?.height).toBe(CAUSAL_NODE_HEIGHT);
+    for (const depth of new Set(layout.nodes.map((entry) => entry.depth))) {
+      const layer = layout.nodes.filter((entry) => entry.depth === depth).sort((left, right) => left.y - right.y);
+      for (let index = 1; index < layer.length; index += 1) {
+        const previous = layer[index - 1];
+        const current = layer[index];
+        expect((current?.y ?? 0) - ((previous?.y ?? 0) + (previous?.height ?? 0))).toBeGreaterThan(0);
+      }
+    }
   });
 
   it("does not synthesize links across locally hidden nodes", () => {
