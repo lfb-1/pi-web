@@ -1,7 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  authorityRequestFor,
-  authoritySourceForSessionManager,
   mutateState,
   type ResearchWorkflowParameters,
 } from "./research-workflow.js";
@@ -41,22 +39,6 @@ function createWorkItem(state: ResearchWorkflowState): ResearchWorkflowState {
   return mutateState(state, params, piSource, undefined);
 }
 
-describe("research_workflow authority provenance", () => {
-  it("labels authority as direct dialog or delegated recommended-timeout policy", () => {
-    const sessionManager = {
-      getBranch: () => [],
-      getLeafId: () => "entry-1",
-      getSessionId: () => "session-1",
-    };
-
-    expect(authoritySourceForSessionManager(sessionManager)).toMatchObject({
-      kind: "user",
-      ref: "session:session-1#entry-1",
-      authorityMode: "dialog-or-recommended-timeout-policy",
-    });
-  });
-});
-
 describe("research_workflow extension state transitions", () => {
   it("creates proposed work with Pi provenance", () => {
     const state = createWorkItem(emptyState());
@@ -67,10 +49,9 @@ describe("research_workflow extension state transitions", () => {
       objectiveStatus: "proposed",
       source: piSource,
     });
-    expect(authorityRequestFor({ action: "get" }, state)).toBeUndefined();
   });
 
-  it("rewrites the semantic brief with current Pi provenance without changing authority", () => {
+  it("rewrites the semantic brief with current Pi provenance and drops legacy authority", () => {
     const state = createWorkItem(emptyState());
     const existing = state.workItems[0];
     if (existing === undefined) throw new Error("expected work item");
@@ -93,14 +74,13 @@ describe("research_workflow extension state transitions", () => {
       },
     };
 
-    expect(authorityRequestFor(params, state)).toBeUndefined();
     const updated = mutateState(state, params, laterPiSource, undefined);
 
     expect(updated.workItems[0]?.brief).toMatchObject({
       currentAnswer: "No improvement is established yet.",
       source: laterPiSource,
     });
-    expect(updated.workItems[0]?.authoritySource).toEqual(userSource);
+    expect(updated.workItems[0]?.authoritySource).toBeUndefined();
   });
 
   it("updates confirmed objectives automatically without retaining stale user provenance", () => {
@@ -114,7 +94,6 @@ describe("research_workflow extension state transitions", () => {
       action: "upsert_work_item",
       workItem: { id: item.id, objective: "Use a different scientific objective." },
     };
-    expect(authorityRequestFor(changeObjective, state)).toBeUndefined();
     const changed = mutateState(state, changeObjective, piSource, undefined);
     expect(changed.workItems[0]?.objective).toBe("Use a different scientific objective.");
     expect(changed.workItems[0]?.authoritySource).toBeUndefined();
@@ -123,7 +102,6 @@ describe("research_workflow extension state transitions", () => {
       action: "upsert_work_item",
       workItem: { id: item.id, objectiveStatus: "proposed" },
     };
-    expect(authorityRequestFor(downgrade, state)).toBeUndefined();
     const downgraded = mutateState(state, downgrade, piSource, undefined);
     expect(downgraded.workItems[0]?.objectiveStatus).toBe("proposed");
     expect(downgraded.workItems[0]?.authoritySource).toBeUndefined();
@@ -140,7 +118,6 @@ describe("research_workflow extension state transitions", () => {
       workItem: { id: item.id, definitionOfDone: "Use a different completion contract." },
     };
 
-    expect(authorityRequestFor(params, state)).toBeUndefined();
     const updated = mutateState(state, params, piSource, undefined);
     expect(updated.workItems[0]?.definitionOfDone).toBe("Use a different completion contract.");
     expect(updated.workItems[0]?.authoritySource).toBeUndefined();
@@ -159,7 +136,6 @@ describe("research_workflow extension state transitions", () => {
       },
     };
 
-    expect(authorityRequestFor(params, state)).toBeUndefined();
     const updated = mutateState(state, params, piSource, undefined);
     expect(updated.workItems[0]?.acceptanceCriteria[0]).toMatchObject({ status: "approved" });
     expect(updated.workItems[0]?.acceptanceCriteria[0]?.authoritySource).toBeUndefined();
@@ -169,7 +145,6 @@ describe("research_workflow extension state transitions", () => {
       workItemId: "parafm.current",
       criterion: { id: "accuracy.gate", predicate: "Use a different threshold." },
     };
-    expect(authorityRequestFor(changeApproved, updated)).toBeUndefined();
     const changed = mutateState(updated, changeApproved, piSource, undefined);
     expect(changed.workItems[0]?.acceptanceCriteria[0]?.predicate).toBe("Use a different threshold.");
 
@@ -188,7 +163,6 @@ describe("research_workflow extension state transitions", () => {
       action: "upsert_causal_graph",
       causalGraph: { title: "ParaFM causal graph", status: "active" },
     };
-    expect(authorityRequestFor(graphParams, state)).toBeUndefined();
     state = mutateState(state, graphParams, piSource, undefined);
     state = mutateState(state, {
       action: "upsert_causal_node",
@@ -216,19 +190,46 @@ describe("research_workflow extension state transitions", () => {
     expect(parseResearchWorkflowStateText(JSON.stringify(state))).toMatchObject({ ok: true });
   });
 
-  it("requires authority to complete the overall research idea", () => {
+  it("completes the overall research idea automatically", () => {
     const state = mutateState(createWorkItem(emptyState()), {
       action: "upsert_causal_graph",
       causalGraph: { title: "ParaFM causal graph", status: "active" },
     }, piSource, undefined);
-    const complete: ResearchWorkflowParameters = { action: "upsert_causal_graph", causalGraph: { status: "completed" } };
+    const completed = mutateState(state, {
+      action: "upsert_causal_graph",
+      causalGraph: { status: "completed" },
+    }, piSource, undefined);
 
-    expect(authorityRequestFor(complete, state)?.message).toContain("overall research idea completed");
-    const completed = mutateState(state, complete, piSource, userSource);
-    expect(completed.causalGraph).toMatchObject({ status: "completed", authoritySource: userSource });
+    expect(completed.causalGraph).toMatchObject({ status: "completed" });
+    expect(completed.causalGraph?.authoritySource).toBeUndefined();
+    expect(parseResearchWorkflowStateText(JSON.stringify(completed))).toMatchObject({ ok: true });
+
+    if (completed.causalGraph === undefined) throw new Error("expected graph");
+    completed.causalGraph.authoritySource = userSource;
+    const retitled = mutateState(completed, {
+      action: "upsert_causal_graph",
+      causalGraph: { title: "Automatically revised graph" },
+    }, piSource, undefined);
+    expect(retitled.causalGraph?.authoritySource).toBeUndefined();
+
+    if (retitled.causalGraph === undefined) throw new Error("expected graph");
+    retitled.causalGraph.authoritySource = userSource;
+    const extended = mutateState(retitled, {
+      action: "upsert_causal_node",
+      causalNode: {
+        id: "hypothesis.terminal",
+        kind: "hypothesis",
+        title: "Terminal hypothesis",
+        summary: "Retained for completed-history context.",
+        status: "completed",
+        evidenceRefs: [],
+      },
+    }, piSource, undefined);
+    expect(extended.causalGraph?.authoritySource).toBeUndefined();
+    expect(parseResearchWorkflowStateText(JSON.stringify(extended))).toMatchObject({ ok: true });
   });
 
-  it("prompts only for critical decision authority and resolves routine decisions automatically", () => {
+  it("updates and resolves critical decisions automatically", () => {
     let state = createWorkItem(emptyState());
     state = mutateState(state, {
       action: "upsert_decision",
@@ -243,62 +244,27 @@ describe("research_workflow extension state transitions", () => {
         blocking: true,
       },
     }, piSource, undefined);
-
-    expect(authorityRequestFor({
+    state = mutateState(state, {
       action: "upsert_decision",
       workItemId: "parafm.current",
-      decision: { id: "direction.choice", importance: "routine", blocking: false },
-    }, state)?.message).toContain("Lower the attention level");
-
-    expect(authorityRequestFor({
-      action: "upsert_decision",
-      workItemId: "parafm.current",
-      decision: { id: "direction.choice", question: "Choose the corrected scientific direction?" },
-    }, state)?.message).toContain("Change open critical decision");
-
-    expect(authorityRequestFor({
-      action: "upsert_decision",
-      workItemId: "parafm.current",
-      decision: { id: "direction.choice", importance: "routine" },
-    }, state)?.message).toContain("Change open critical decision");
-
-    expect(authorityRequestFor({
-      action: "upsert_decision",
-      workItemId: "parafm.current",
-      decision: { id: "direction.choice", importance: "routine", blocking: false, status: "resolved", resolution: "Continue with the repair." },
-    }, state)?.message).toContain("Resolve critical decision");
-
-    expect(authorityRequestFor({
-      action: "upsert_decision",
-      workItemId: "parafm.current",
-      decision: { id: "direction.choice", status: "resolved", resolution: "Continue with the repair." },
-    }, state)?.message).toContain("Resolve critical decision");
-
-    const resolvedCritical = mutateState(state, {
-      action: "upsert_decision",
-      workItemId: "parafm.current",
-      decision: { id: "direction.choice", status: "resolved", resolution: "Continue with the repair." },
-    }, piSource, userSource);
-    expect(authorityRequestFor({
-      action: "upsert_decision",
-      workItemId: "parafm.current",
-      decision: { id: "direction.choice", impact: "Use a revised critical impact." },
-    }, resolvedCritical)?.message).toContain("Change resolved critical decision");
-
-    const routineState = mutateState(createWorkItem(emptyState()), {
-      action: "upsert_decision",
-      workItemId: "parafm.current",
-      decision: { id: "routine.choice", question: "Record a choice?", impact: "Routine", status: "open", importance: "routine" },
+      decision: {
+        id: "direction.choice",
+        question: "Choose the corrected scientific direction?",
+        importance: "routine",
+        blocking: false,
+        status: "resolved",
+        resolution: "Continue with the repair.",
+      },
     }, piSource, undefined);
-    const resolveRoutine: ResearchWorkflowParameters = {
-      action: "upsert_decision",
-      workItemId: "parafm.current",
-      decision: { id: "routine.choice", status: "resolved", resolution: "Recorded" },
-    };
-    expect(authorityRequestFor(resolveRoutine, routineState)).toBeUndefined();
-    const resolved = mutateState(routineState, resolveRoutine, piSource, undefined);
-    expect(resolved.workItems[0]?.decisions[0]).toMatchObject({ status: "resolved", resolution: "Recorded" });
-    expect(resolved.workItems[0]?.decisions[0]?.authoritySource).toBeUndefined();
+
+    expect(state.workItems[0]?.decisions[0]).toMatchObject({
+      question: "Choose the corrected scientific direction?",
+      importance: "routine",
+      blocking: false,
+      status: "resolved",
+      resolution: "Continue with the repair.",
+    });
+    expect(state.workItems[0]?.decisions[0]?.authoritySource).toBeUndefined();
   });
 
   it("promotes and revises findings automatically", () => {
@@ -314,15 +280,20 @@ describe("research_workflow extension state transitions", () => {
       finding: { id: "result.one", status: "accepted", summary: "Evidence supports the scoped conclusion." },
     };
 
-    expect(authorityRequestFor(accept, state)).toBeUndefined();
     state = mutateState(state, accept, piSource, undefined);
     expect(state.workItems[0]?.findings[0]).toMatchObject({ status: "accepted", summary: "Evidence supports the scoped conclusion." });
     expect(state.workItems[0]?.findings[0]?.authoritySource).toBeUndefined();
   });
 
-  it("keeps destructive removal behind authority", () => {
-    const request = authorityRequestFor({ action: "remove", recordType: "work-item", recordId: "parafm.current" }, createWorkItem(emptyState()));
-    expect(request?.message).toContain("Remove work-item parafm.current");
+  it("removes durable records automatically", () => {
+    const removed = mutateState(createWorkItem(emptyState()), {
+      action: "remove",
+      recordType: "work-item",
+      recordId: "parafm.current",
+    }, piSource, undefined);
+
+    expect(removed.workItems).toHaveLength(0);
+    expect(removed.activeWorkItemId).toBeUndefined();
   });
 
   it("produces state accepted by the panel parser", () => {

@@ -274,7 +274,7 @@ describe("research workflow state", () => {
     if (!parsed.ok) expect(parsed.error).toContain("unfinished node");
   });
 
-  it("requires user provenance for overall graph completion", () => {
+  it("accepts automated overall graph completion without authority provenance", () => {
     const state = stateWithGraph();
     const graph = state.causalGraph;
     if (graph === undefined) throw new Error("expected graph");
@@ -282,12 +282,11 @@ describe("research workflow state", () => {
     delete graph.activeNodeId;
     graph.activePathEdgeIds = [];
     for (const node of graph.nodes) node.status = "completed";
-    graph.authoritySource = source;
+    delete graph.authoritySource;
 
     const parsed = parseResearchWorkflowStateText(JSON.stringify(state));
 
-    expect(parsed).toMatchObject({ ok: false });
-    if (!parsed.ok) expect(parsed.error).toContain("must be a user source");
+    expect(parsed).toMatchObject({ ok: true, state: { causalGraph: { status: "completed" } } });
   });
 
   it("only marks open blocking or critical decisions for attention", () => {

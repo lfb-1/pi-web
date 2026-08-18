@@ -285,12 +285,6 @@ function optionalCausalGraph(value: unknown, path: string, workItems: ResearchWo
   validateActivePath(activeNodeId, activePathEdgeIds, edges, path);
   const status = enumValue(record["status"], causalGraphStatuses, `${path}.status`);
   const authoritySource = optionalSource(record["authoritySource"], `${path}.authoritySource`);
-  if (status === "completed" && authoritySource === undefined) {
-    throw new Error(`${path}.authoritySource is required when status is completed`);
-  }
-  if (status === "completed" && authoritySource?.kind !== "user") {
-    throw new Error(`${path}.authoritySource must be a user source when status is completed`);
-  }
   const hasUnfinishedNode = nodes.some((node) => node.status === "active" || node.status === "proposed" || node.status === "blocked");
   if (status === "completed" && (activeNodeId !== undefined || activePathEdgeIds.length > 0 || hasUnfinishedNode)) {
     throw new Error(`${path} cannot retain an active path or unfinished node when status is completed`);

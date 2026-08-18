@@ -199,13 +199,12 @@ const ResearchWorkflowParameters = Type.Object({
 }, { additionalProperties: false });
 
 export type ResearchWorkflowParameters = Static<typeof ResearchWorkflowParameters>;
-type AuthorityRequest = { message: string } | undefined;
 
 export default function researchWorkflowExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "research_workflow",
     label: "Research Workflow",
-    description: `Read or update ${RESEARCH_WORKFLOW_STATE_PATH}. Maintains an evidence-backed research causal graph plus durable objectives, decisions, runs, artifacts, findings, and provenance. Routine reversible graph updates proceed without a dialog; only critical authority transitions interrupt the user.`,
+    description: `Read or update ${RESEARCH_WORKFLOW_STATE_PATH}. Maintains an evidence-backed research causal graph plus durable objectives, decisions, runs, artifacts, findings, and provenance. Every validated mutation is automatic; critical decisions remain visible as attention state but do not open authority dialogs.`,
     promptSnippet: "Maintain the research causal graph from hypothesis through validation, analysis, conclusion, and next direction",
     promptGuidelines: [
       "Use research_workflow whenever a hypothesis, validation, analysis, conclusion, or resulting research direction changes. Call action=get first when state may have changed; update one entity at a time and preserve stable ids.",
@@ -216,7 +215,7 @@ export default function researchWorkflowExtension(pi: ExtensionAPI): void {
       "Continue automatically for reversible implementation choices, evidence-backed graph maintenance, routine record synchronization, and an obvious recommended next step. Do not ask the user about implementation detail or ordinary result bookkeeping.",
       "Create a blocking critical decision only when safe progress genuinely requires a scientific-direction choice that cannot be inferred, substantial unapproved compute, necessary missing information, or an irreversible/destructive action. Mark it importance=critical and blocking=true. Other decisions stay routine or important and must not interrupt progress.",
       "Rewrite source material into workItem.brief for agent context in plain language. Promote findings automatically when evidence and registered criteria support the transition, while preserving scope and uncertainty; use graph conclusions for automatic scientific interpretation. Graph conclusions do not authorize substantial unapproved compute or mark the overall research idea completed.",
-      "Run the research-record pipeline automatically. Only overall causalGraph completion, destructive removal, and resolving, voiding, or downgrading a critical/blocking decision remain user-authority transitions. Objective, criteria, routine decision, finding, and work-item maintenance must not interrupt the user.",
+      "Run the complete research-record pipeline automatically. Never open a Workflow authority dialog: objective, criteria, decision, finding, completion, reopening, removal, and graph maintenance mutations all proceed after validation. Critical/blocking decisions remain visible for attention and may be resolved automatically once the needed answer is available.",
       "After an authorized experiment reaches a terminal state, record its status, artifacts, provisional finding, concise analysis/conclusion nodes, and any motivated next hypothesis. Scheduler submission alone is incomplete.",
     ],
     parameters: ResearchWorkflowParameters,
@@ -225,46 +224,26 @@ export default function researchWorkflowExtension(pi: ExtensionAPI): void {
       if (!ctx.isProjectTrusted()) throw new Error("Research Workflow updates require a trusted project");
 
       const statePath = resolve(ctx.cwd, RESEARCH_WORKFLOW_STATE_PATH);
-      return withFileMutationQueue(statePath, async () => {
-        for (let attempt = 0; attempt < 5; attempt += 1) {
-          const observed = await readWorkflowState(ctx.cwd);
-          const observedRequest = authorityRequestFor(params, observed.state);
-          let authoritySource: RecordSource | undefined;
-          if (observedRequest !== undefined) {
-            if (!ctx.hasUI) throw new Error(`User confirmation is required: ${observedRequest.message}`);
-            const confirmed = await ctx.ui.confirm("Research Workflow authority", observedRequest.message);
-            if (!confirmed) throw new Error("Research Workflow update was not authorized by the user");
-            authoritySource = authoritySourceFor(ctx);
-          }
-          const outcome = await withWorkflowStateLock(statePath, async () => {
-            const latest = await readWorkflowState(ctx.cwd);
-            const latestRequest = authorityRequestFor(params, latest.state);
-            if (latestRequest?.message !== observedRequest?.message) return { kind: "retry" } as const;
-            const next = mutateState(latest.state, params, sourceFor(ctx, "pi"), observedRequest === undefined ? undefined : authoritySource);
-            next.updatedAt = new Date().toISOString();
-            const validated = validateState(next);
-            await writeStateAtomically(statePath, validated);
-            const active = activeWorkItem(validated);
-            return {
-              kind: "completed" as const,
-              value: {
-                content: [{
-                  type: "text" as const,
-                  text: `Updated ${RESEARCH_WORKFLOW_STATE_PATH}: ${params.action}${active === undefined ? "" : `; active work item ${active.id} (${active.phase})`}`,
-                }],
-                details: {
-                  action: params.action,
-                  path: RESEARCH_WORKFLOW_STATE_PATH,
-                  updatedAt: validated.updatedAt,
-                  activeWorkItemId: validated.activeWorkItemId,
-                },
-              },
-            };
-          });
-          if (outcome.kind === "completed") return outcome.value;
-        }
-        throw new Error("Research Workflow state changed repeatedly while awaiting authority; retry the update");
-      });
+      return withFileMutationQueue(statePath, () => withWorkflowStateLock(statePath, async () => {
+        const latest = await readWorkflowState(ctx.cwd);
+        const next = mutateState(latest.state, params, sourceFor(ctx), undefined);
+        next.updatedAt = new Date().toISOString();
+        const validated = validateState(next);
+        await writeStateAtomically(statePath, validated);
+        const active = activeWorkItem(validated);
+        return {
+          content: [{
+            type: "text" as const,
+            text: `Updated ${RESEARCH_WORKFLOW_STATE_PATH}: ${params.action}${active === undefined ? "" : `; active work item ${active.id} (${active.phase})`}`,
+          }],
+          details: {
+            action: params.action,
+            path: RESEARCH_WORKFLOW_STATE_PATH,
+            updatedAt: validated.updatedAt,
+            activeWorkItemId: validated.activeWorkItemId,
+          },
+        };
+      }));
     },
   });
 
@@ -296,7 +275,7 @@ export default function researchWorkflowExtension(pi: ExtensionAPI): void {
         ...(activeNode === undefined ? [] : [`- Active causal node: ${activeNode.id} [${activeNode.kind}] ${activeNode.title}`]),
         `- Critical blocking decisions: ${criticalDecisions.length === 0 ? "none" : criticalDecisions.map((decision) => `${decision.id}: ${decision.question}`).join("; ")}`,
         `- Active runs: ${activeRuns.length === 0 ? "none" : activeRuns.map((run) => `${run.id}: ${run.status}`).join("; ")}`,
-        `Use research_workflow exclusively to keep ${RESEARCH_WORKFLOW_STATE_PATH} synchronized; never write that file with file, shell, or text-edit tools. Maintain the causal graph automatically after material hypothesis, validation, analysis, conclusion, or direction changes. Ask the user only for a critical blocker or an authority transition.`,
+        `Use research_workflow exclusively to keep ${RESEARCH_WORKFLOW_STATE_PATH} synchronized; never write that file with file, shell, or text-edit tools. Maintain the causal graph automatically after material hypothesis, validation, analysis, conclusion, or direction changes. Ask the user only when the underlying research genuinely cannot continue without new information; never ask for record bookkeeping or a Workflow authority transition.`,
       ].join("\n");
       return { systemPrompt: `${event.systemPrompt}\n\n${summary}` };
     } catch {
@@ -330,87 +309,17 @@ async function readToolResult(ctx: ExtensionContext) {
   };
 }
 
-export function authorityRequestFor(params: ResearchWorkflowParameters, state: ResearchWorkflowState): AuthorityRequest {
-  if (params.action === "remove") {
-    return { message: `Remove ${required(params.recordType, "recordType")} ${required(params.recordId, "recordId")} from Research Workflow state?` };
-  }
-
-  if (params.action === "upsert_causal_graph" && params.causalGraph !== undefined) {
-    const existing = state.causalGraph;
-    const transitions: string[] = [];
-    if (params.causalGraph.status === "completed" && existing?.status !== "completed") transitions.push("mark the overall research idea completed");
-    if (existing?.status === "completed" && params.causalGraph.status === "active") transitions.push("reopen the completed research idea");
-    if (existing?.status === "completed" && params.causalGraph.title !== undefined && params.causalGraph.title !== existing.title) transitions.push("change the completed research idea scope");
-    return transitions.length === 0 ? undefined : { message: `${uniqueStrings(transitions).join(" and ")}?` };
-  }
-
-  const item = params.workItemId === undefined ? undefined : state.workItems.find((candidate) => candidate.id === params.workItemId);
-  if (params.action === "upsert_decision" && params.decision !== undefined) {
-    const existing = item?.decisions.find((decision) => decision.id === params.decision?.id);
-    const existingIsCritical = existing?.importance === "critical" || existing?.blocking === true;
-    const resultingIsCritical = (params.decision.importance ?? existing?.importance) === "critical"
-      || (params.decision.blocking ?? existing?.blocking) === true;
-    if (params.decision.status !== undefined && params.decision.status !== "open" && existing?.status !== params.decision.status && (existingIsCritical || resultingIsCritical)) {
-      return { message: `${params.decision.status === "resolved" ? "Resolve" : "Void"} critical decision ${params.decision.id}${params.decision.resolution === undefined ? "" : ` as: ${params.decision.resolution}`}?` };
-    }
-    if (existing !== undefined && existingIsCritical && !resultingIsCritical) {
-      return { message: `Lower the attention level of critical decision ${params.decision.id}?` };
-    }
-    if (existing !== undefined && (existingIsCritical || resultingIsCritical) && changesAuthorizedDecision(params.decision, existing)) {
-      return { message: `Change ${existing.status} critical decision ${params.decision.id}?` };
-    }
-  }
-  return undefined;
-}
-
-function changesAuthorizedWorkItemScope(patch: NonNullable<ResearchWorkflowParameters["workItem"]>, existing: ResearchWorkItem): boolean {
-  return (patch.title !== undefined && patch.title !== existing.title)
-    || (patch.objective !== undefined && patch.objective !== existing.objective)
-    || (patch.rationale !== undefined && patch.rationale !== existing.rationale)
-    || (patch.definitionOfDone !== undefined && patch.definitionOfDone !== existing.definitionOfDone)
-    || (patch.objectiveStatus !== undefined && patch.objectiveStatus !== "confirmed");
-}
-
-function changesApprovedCriterion(patch: NonNullable<ResearchWorkflowParameters["criterion"]>, existing: AcceptanceCriterion): boolean {
-  return (patch.title !== undefined && patch.title !== existing.title)
-    || (patch.predicate !== undefined && patch.predicate !== existing.predicate)
-    || (patch.status !== undefined && patch.status !== "approved");
-}
-
-function changesAuthorizedDecision(patch: NonNullable<ResearchWorkflowParameters["decision"]>, existing: DecisionRecord): boolean {
-  return (patch.kind !== undefined && patch.kind !== existing.kind)
-    || (patch.question !== undefined && patch.question !== existing.question)
-    || (patch.impact !== undefined && patch.impact !== existing.impact)
-    || (patch.importance !== undefined && patch.importance !== existing.importance)
-    || (patch.blocking !== undefined && patch.blocking !== existing.blocking)
-    || (patch.status !== undefined && patch.status !== existing.status)
-    || (patch.resolution !== undefined && patch.resolution !== existing.resolution);
-}
-
-function changesAuthorizedFinding(patch: NonNullable<ResearchWorkflowParameters["finding"]>, existing: FindingRecord): boolean {
-  return (patch.summary !== undefined && patch.summary !== existing.summary)
-    || (patch.status !== undefined && patch.status !== existing.status)
-    || (patch.evidenceRefs !== undefined && !stringArraysEqual(patch.evidenceRefs, existing.evidenceRefs));
-}
-
-function stringArraysEqual(left: string[], right: string[]): boolean {
-  return left.length === right.length && left.every((value, index) => value === right[index]);
-}
-
-function uniqueStrings(values: string[]): string[] {
-  return [...new Set(values)];
-}
-
 export function mutateState(
   state: ResearchWorkflowState,
   params: ResearchWorkflowParameters,
   source: RecordSource,
   authoritySource: RecordSource | undefined,
 ): ResearchWorkflowState {
+  void authoritySource;
   const next = structuredClone(state);
   switch (params.action) {
     case "upsert_work_item":
-      upsertWorkItem(next, required(params.workItem, "workItem"), source, authoritySource);
+      upsertWorkItem(next, required(params.workItem, "workItem"), source);
       break;
     case "set_active": {
       const workItemId = required(params.workItemId, "workItemId");
@@ -419,22 +328,28 @@ export function mutateState(
       break;
     }
     case "upsert_causal_graph":
-      upsertCausalGraph(next, required(params.causalGraph, "causalGraph"), source, authoritySource);
+      upsertCausalGraph(next, required(params.causalGraph, "causalGraph"), source);
       break;
-    case "upsert_causal_node":
-      upsertCausalNode(requireCausalGraph(next), required(params.causalNode, "causalNode"), source);
+    case "upsert_causal_node": {
+      const graph = requireCausalGraph(next);
+      upsertCausalNode(graph, required(params.causalNode, "causalNode"), source);
+      delete graph.authoritySource;
       break;
-    case "upsert_causal_edge":
-      upsertCausalEdge(requireCausalGraph(next), required(params.causalEdge, "causalEdge"), source);
+    }
+    case "upsert_causal_edge": {
+      const graph = requireCausalGraph(next);
+      upsertCausalEdge(graph, required(params.causalEdge, "causalEdge"), source);
+      delete graph.authoritySource;
       break;
+    }
     case "upsert_acceptance": {
       const item = requireWorkItem(next, required(params.workItemId, "workItemId"));
-      upsertCriterion(item, required(params.criterion, "criterion"), source, authoritySource);
+      upsertCriterion(item, required(params.criterion, "criterion"), source);
       break;
     }
     case "upsert_decision": {
       const item = requireWorkItem(next, required(params.workItemId, "workItemId"));
-      upsertDecision(item, required(params.decision, "decision"), source, authoritySource);
+      upsertDecision(item, required(params.decision, "decision"), source);
       break;
     }
     case "upsert_run": {
@@ -449,7 +364,7 @@ export function mutateState(
     }
     case "upsert_finding": {
       const item = requireWorkItem(next, required(params.workItemId, "workItemId"));
-      upsertFinding(item, required(params.finding, "finding"), source, authoritySource);
+      upsertFinding(item, required(params.finding, "finding"), source);
       break;
     }
     case "link_session": {
@@ -464,6 +379,7 @@ export function mutateState(
     }
     case "remove":
       removeRecord(next, required(params.recordType, "recordType"), required(params.recordId, "recordId"), params.workItemId);
+      if (next.causalGraph !== undefined) delete next.causalGraph.authoritySource;
       break;
     case "get":
       throw new Error("get does not mutate state");
@@ -475,7 +391,6 @@ function upsertCausalGraph(
   state: ResearchWorkflowState,
   patch: NonNullable<ResearchWorkflowParameters["causalGraph"]>,
   source: RecordSource,
-  authoritySource: RecordSource | undefined,
 ): void {
   const existing = state.causalGraph;
   const status = patch.status ?? existing?.status ?? "active";
@@ -484,7 +399,6 @@ function upsertCausalGraph(
   const activePathEdgeIds = patch.clearActiveNode === true || (activeNodeChanged && patch.activePathEdgeIds === undefined)
     ? []
     : patch.activePathEdgeIds ?? existing?.activePathEdgeIds ?? [];
-  const authority = status === "completed" ? authoritySource ?? existing?.authoritySource : undefined;
   state.causalGraph = {
     title: required(patch.title ?? existing?.title, "causalGraph.title"),
     status,
@@ -493,7 +407,6 @@ function upsertCausalGraph(
     nodes: existing?.nodes ?? [],
     edges: existing?.edges ?? [],
     source: existing?.source ?? source,
-    ...(authority === undefined ? {} : { authoritySource: authority }),
   };
 }
 
@@ -549,7 +462,6 @@ function upsertWorkItem(
   state: ResearchWorkflowState,
   patch: NonNullable<ResearchWorkflowParameters["workItem"]>,
   source: RecordSource,
-  authoritySource: RecordSource | undefined,
 ): void {
   const index = state.workItems.findIndex((item) => item.id === patch.id);
   const existing = index === -1 ? undefined : state.workItems[index];
@@ -557,11 +469,6 @@ function upsertWorkItem(
   const brief = patch.brief === undefined ? existing?.brief : semanticBriefFromPatch(patch.brief, source);
   const objectiveStatus = patch.objectiveStatus ?? existing?.objectiveStatus ?? "proposed";
   const phase = patch.phase ?? existing?.phase ?? "research";
-  const authorityContentChanged = existing !== undefined && (changesAuthorizedWorkItemScope(patch, existing)
-    || (patch.phase !== undefined && patch.phase !== existing.phase));
-  const authority = objectiveStatus === "confirmed" || phase === "completed"
-    ? authoritySource ?? (authorityContentChanged ? undefined : existing?.authoritySource)
-    : undefined;
   const record: ResearchWorkItem = {
     id: patch.id,
     title: required(patch.title ?? existing?.title, "workItem.title"),
@@ -579,7 +486,6 @@ function upsertWorkItem(
     sessions: existing?.sessions ?? [],
     workspaces: existing?.workspaces ?? [],
     source: existing?.source ?? source,
-    ...(authority === undefined ? {} : { authoritySource: authority }),
   };
   if (existing === undefined) {
     state.workItems.push(record);
@@ -611,16 +517,11 @@ function upsertCriterion(
   item: ResearchWorkItem,
   patch: NonNullable<ResearchWorkflowParameters["criterion"]>,
   source: RecordSource,
-  authoritySource: RecordSource | undefined,
 ): void {
   const index = item.acceptanceCriteria.findIndex((record) => record.id === patch.id);
   const existing = index === -1 ? undefined : item.acceptanceCriteria[index];
   const note = patch.note ?? existing?.note;
   const status = patch.status ?? existing?.status ?? "proposed";
-  const authorityContentChanged = existing !== undefined && changesApprovedCriterion(patch, existing);
-  const authority = status === "approved"
-    ? authoritySource ?? (authorityContentChanged ? undefined : existing?.authoritySource)
-    : undefined;
   const record: AcceptanceCriterion = {
     id: patch.id,
     title: required(patch.title ?? existing?.title, "criterion.title"),
@@ -630,7 +531,6 @@ function upsertCriterion(
     ...(note === undefined ? {} : { note }),
     evidenceRefs: patch.evidenceRefs ?? existing?.evidenceRefs ?? [],
     source: existing?.source ?? source,
-    ...(authority === undefined ? {} : { authoritySource: authority }),
   };
   if (existing === undefined) item.acceptanceCriteria.push(record);
   else item.acceptanceCriteria[index] = record;
@@ -640,7 +540,6 @@ function upsertDecision(
   item: ResearchWorkItem,
   patch: NonNullable<ResearchWorkflowParameters["decision"]>,
   source: RecordSource,
-  authoritySource: RecordSource | undefined,
 ): void {
   const index = item.decisions.findIndex((record) => record.id === patch.id);
   const existing = index === -1 ? undefined : item.decisions[index];
@@ -648,10 +547,6 @@ function upsertDecision(
   const status = patch.status ?? existing?.status ?? "open";
   const importance = patch.importance ?? existing?.importance;
   const blocking = patch.blocking ?? existing?.blocking;
-  const authorityContentChanged = existing !== undefined && changesAuthorizedDecision(patch, existing);
-  const authority = status === "open"
-    ? undefined
-    : authoritySource ?? (authorityContentChanged ? undefined : existing?.authoritySource);
   const record: DecisionRecord = {
     id: patch.id,
     kind: patch.kind ?? existing?.kind ?? "other",
@@ -662,7 +557,6 @@ function upsertDecision(
     ...(blocking === undefined ? {} : { blocking }),
     ...(resolution === undefined ? {} : { resolution }),
     source: existing?.source ?? source,
-    ...(authority === undefined ? {} : { authoritySource: authority }),
   };
   if (existing === undefined) item.decisions.push(record);
   else item.decisions[index] = record;
@@ -723,22 +617,16 @@ function upsertFinding(
   item: ResearchWorkItem,
   patch: NonNullable<ResearchWorkflowParameters["finding"]>,
   source: RecordSource,
-  authoritySource: RecordSource | undefined,
 ): void {
   const index = item.findings.findIndex((record) => record.id === patch.id);
   const existing = index === -1 ? undefined : item.findings[index];
   const status = patch.status ?? existing?.status ?? "provisional";
-  const authorityContentChanged = existing !== undefined && changesAuthorizedFinding(patch, existing);
-  const authority = status === "provisional"
-    ? undefined
-    : authoritySource ?? (authorityContentChanged ? undefined : existing?.authoritySource);
   const record: FindingRecord = {
     id: patch.id,
     summary: required(patch.summary ?? existing?.summary, "finding.summary"),
     status,
     evidenceRefs: patch.evidenceRefs ?? existing?.evidenceRefs ?? [],
     source: existing?.source ?? source,
-    ...(authority === undefined ? {} : { authoritySource: authority }),
   };
   if (existing === undefined) item.findings.push(record);
   else item.findings[index] = record;
@@ -919,25 +807,17 @@ function waitForLockProcess(child: ChildProcessWithoutNullStreams): Promise<void
 async function writeStateAtomically(path: string, state: ResearchWorkflowState): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   const temporaryPath = `${path}.tmp-${String(process.pid)}-${String(Date.now())}`;
-  await writeFile(temporaryPath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+  await writeFile(temporaryPath, `${JSON.stringify(state)}\n`, "utf8");
   await rename(temporaryPath, path);
 }
 
 type SourceSessionManager = Pick<ExtensionContext["sessionManager"], "getBranch" | "getLeafId" | "getSessionId">;
 
-export function authoritySourceFor(ctx: ExtensionContext): RecordSource {
-  return sourceForSessionManager(ctx.sessionManager, "user");
+function sourceFor(ctx: ExtensionContext): RecordSource {
+  return sourceForSessionManager(ctx.sessionManager);
 }
 
-export function authoritySourceForSessionManager(sessionManager: SourceSessionManager): RecordSource {
-  return sourceForSessionManager(sessionManager, "user");
-}
-
-function sourceFor(ctx: ExtensionContext, kind: "pi" | "user"): RecordSource {
-  return sourceForSessionManager(ctx.sessionManager, kind);
-}
-
-function sourceForSessionManager(sessionManager: SourceSessionManager, kind: "pi" | "user"): RecordSource {
+function sourceForSessionManager(sessionManager: SourceSessionManager): RecordSource {
   const branch = sessionManager.getBranch();
   let entryId = sessionManager.getLeafId() ?? "no-entry";
   for (let index = branch.length - 1; index >= 0; index -= 1) {
@@ -948,10 +828,9 @@ function sourceForSessionManager(sessionManager: SourceSessionManager, kind: "pi
     }
   }
   return {
-    kind,
+    kind: "pi",
     ref: `session:${sessionManager.getSessionId()}#${entryId}`,
     at: new Date().toISOString(),
-    ...(kind === "user" ? { authorityMode: "dialog-or-recommended-timeout-policy" } : {}),
   };
 }
 

@@ -109,6 +109,18 @@ describe("readWorkspaceFile", () => {
     expect(file).toMatchObject({ content: "", binary: true });
   });
 
+  it("returns growing workspace state files beyond the former 512 KiB limit", async () => {
+    const root = await createTempWorkspace();
+    const content = JSON.stringify({ state: "x".repeat(600 * 1024) });
+    await writeFile(join(root, "research-workflow-v2.json"), content);
+
+    const file = await readWorkspaceFile(root, "research-workflow-v2.json");
+
+    expect(file.content).toBe(content);
+    expect(file.truncated).toBe(false);
+    expect(file.binary).toBe(false);
+  });
+
   it.each(["large.md", "large.html"])("caps literal source for %s", async (path) => {
     const root = await createTempWorkspace();
     await writeFile(join(root, path), "a".repeat(MAX_WORKSPACE_FILE_CONTENT_BYTES + 7));

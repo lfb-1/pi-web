@@ -74,15 +74,13 @@ Version-1 state is read and upgraded to version 2 on the first validated write w
 unsupported causal links.
 
 Attention badges and the critical-question banner include only decisions that are explicitly
-critical or blocking. Objective, criteria, routine decisions, findings, work-item status, graph
-maintenance, and result bookkeeping proceed automatically. Authority dialogs remain only for
-overall research completion/reopening, critical or blocking decision resolution/downgrade, and
-destructive removal. Under this fork's user-configured timeout policy, an unanswered authority
-confirmation applies its visibly marked **Yes** recommendation at the deadline.
+critical or blocking. They are attention state rather than execution gates. The extension opens no
+Workflow authority dialogs: objective, criteria, decisions, findings, work-item status, graph
+completion/reopening, removal, and result bookkeeping all proceed automatically after validation.
 
-The complete state and authority contract is documented in
+The complete state and automation contract is documented in
 `docs/research-workflow-content-contract.md`. Version-2 state remains workspace-local at
-`.pi-web/research-workflow-v2.json`, with read-only fallback to the legacy
+`.pi-web/research-workflow-v2.json`, with compact JSON writes and read-only fallback to the legacy
 `.pi-web/research-workflow.json`; independent file watching and structured monitor-to-graph updates
 remain later work.
 

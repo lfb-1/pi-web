@@ -52,40 +52,24 @@ Graph conclusions are evidence-backed Pi interpretations. They do not confirm th
 objective, approve evaluation criteria, authorize compute, accept a durable finding, or mark the
 overall idea completed.
 
-## Attention and authority
+## Attention and automatic execution
 
-Attention policy and authority policy are separate.
+The Research Workflow extension does not open authority dialogs. Every schema-valid mutation runs
+automatically, including objective and criterion maintenance, decision resolution, finding
+promotion, graph completion or reopening, and durable-record removal.
 
 Only an open decision with `importance: "critical"` or `blocking: true` appears in the Research
-badge and critical-question banner. Pi creates such a decision only when safe progress genuinely
-requires one of these inputs:
+badge and critical-question banner. This is attention state rather than an execution gate. Pi uses
+it when the research record should make one of these conditions visible:
 
 - a scientific-direction choice that cannot be inferred;
-- substantial unapproved compute;
+- substantial compute that still needs an answer in the surrounding agent workflow;
 - necessary missing information;
 - an irreversible or destructive action.
 
-Routine implementation choices, objective and criterion maintenance, result bookkeeping,
-evidence-backed finding promotion, and graph maintenance proceed automatically. They should not
-become `DecisionRecord` entries merely to request bookkeeping approval.
-
-The pipeline asks for authority only at a small set of boundaries:
-
-| Content | Pi may create or update automatically | User-authority transition |
-| --- | --- | --- |
-| Causal node or edge | Evidence-backed concise interpretation | None |
-| Overall causal graph | Active graph, active node, supported active path | Complete or reopen the overall idea |
-| Objective and definition of done | Create, confirm, revise, complete, or reopen work automatically | None |
-| Acceptance criterion | Create, approve, revise, and record results automatically | None |
-| Decision request | Create and resolve routine/important decisions automatically | Resolve, void, downgrade, or revise a critical/blocking decision |
-| Run and artifact | Reported runtime record | Substantial unapproved compute must be represented by a critical/blocking decision |
-| Finding | Create, promote, reject, and revise evidence-backed findings automatically | None |
-| Removal | No automatic deletion | Remove any durable record |
-
-The extension uses a host authority dialog only for these rare transitions. A direct answer or the configured
-recommended-timeout policy can resolve that dialog. Durable authority provenance remains labeled
-`dialog-or-recommended-timeout-policy`; the browser-local dialog outcome provides the more specific
-answered or timed-out event while available.
+The record pipeline continues automatically once the needed answer is available. It does not
+create a second Workflow authority confirmation. Legacy `authoritySource` fields remain readable
+for provenance compatibility, but version 2 does not require them for any state transition.
 
 ## State versions and migration
 
@@ -196,8 +180,8 @@ The companion extension:
 4. keeps graph text concise and detailed evidence in work-item records;
 5. records typed evidence and provenance;
 6. rejects invalid stage transitions, cycles, missing references, and invalid active paths;
-7. proceeds automatically for reversible routine work;
-8. asks only for critical blockers or authority-bearing transitions;
+7. proceeds automatically for every schema-valid record mutation;
+8. opens no Workflow authority dialog and keeps critical blockers as visible attention state;
 9. records terminal experiments through analysis and conclusion rather than stopping at submission.
 
 ## Browser responsibilities
@@ -206,7 +190,7 @@ The browser plugin:
 
 - deterministically reads and validates the state through the workspace file helper;
 - renders the causal canvas as the first screen;
-- distinguishes Pi interpretations from user-authority states;
+- distinguishes concise Pi interpretations from detailed durable workflow records;
 - avoids displaying code, raw paths, job metadata, or long results on graph nodes;
 - keeps traceability available through the node inspector and operational index;
 - never repairs or overwrites invalid state.

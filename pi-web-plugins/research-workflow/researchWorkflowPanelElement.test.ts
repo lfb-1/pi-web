@@ -142,7 +142,8 @@ describe("Research causal canvas", () => {
     expect(initialize).toContain("conservative DAG");
     expect(initialize).toContain("never invent an unsupported causal relationship");
     expect(update).toContain("Maintain the DAG automatically");
-    expect(update).toContain("Ask me only when safe continuation is blocked");
+    expect(update).toContain("Every schema-valid workflow record change proceeds automatically");
+    expect(initialize).not.toContain("explicitly confirm completion");
   });
 
   it("keeps the newest state when concurrent refreshes finish out of order", async () => {

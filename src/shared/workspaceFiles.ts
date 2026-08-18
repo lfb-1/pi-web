@@ -2,7 +2,7 @@ import type { FileContentMediaType } from "./pluginApiTypes.js";
 
 export const MAX_INLINE_PREVIEW_BYTES = 10 * 1024 * 1024;
 export const MAX_INLINE_PREVIEW_LABEL = "10 MB";
-export const MAX_WORKSPACE_FILE_CONTENT_BYTES = 512 * 1024;
+export const MAX_WORKSPACE_FILE_CONTENT_BYTES = 4 * 1024 * 1024;
 
 type WorkspaceFileClassificationDetails =
   | { readonly mediaType: "image"; readonly source: "stream" | "text"; readonly previewMimeType: string }

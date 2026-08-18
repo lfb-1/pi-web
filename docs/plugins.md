@@ -337,10 +337,10 @@ and runtime records remain durable outside the canvas.
 
 The panel renders validated version-2 state deterministically and never reconstructs research
 state from chat when it opens. The companion `research_workflow` Pi extension maintains concise
-evidence-backed graph nodes and edges and records provenance. Objective, criteria, routine
-decisions, findings, work-item state, and result maintenance proceed automatically. Confirmation
-is limited to overall research completion/reopening, critical or blocking decision authority, and
-destructive removal; only open critical or blocking decisions appear in the Research attention badge.
+evidence-backed graph nodes and edges and records provenance. Every validated mutation proceeds
+automatically, including graph completion/reopening, critical-decision resolution, and removal.
+The extension opens no Workflow authority dialogs; open critical or blocking decisions remain
+visible in the Research attention badge without becoming a second execution gate.
 
 Research Workflow is enabled by default. Projects without a state file see an initialization
 prompt that can be inserted into the current Pi session. To hide the panel, disable
@@ -354,8 +354,8 @@ prompt that can be inserted into the current Pi session. To hide the panel, disa
 }
 ```
 
-See [`research-workflow-content-contract.md`](research-workflow-content-contract.md) for content
-authority, version-1 migration, causal-graph validation, stable identifiers, and storage.
+See [`research-workflow-content-contract.md`](research-workflow-content-contract.md) for automatic
+execution, version-1 migration, causal-graph validation, stable identifiers, and storage.
 
 ### Workspace Tasks
 
@@ -1133,7 +1133,7 @@ workspaceLabels: [
 ]
 ```
 
-The file response includes fields such as `path`, `content`, `truncated`, and `binary`. Be careful with sensitive files such as `.env`: browser entries are trusted code, and file contents are exposed to the plugin.
+The file response includes fields such as `path`, `content`, `truncated`, and `binary`. Literal text reads are capped at 4 MiB; larger files set `truncated: true`. Be careful with sensitive files such as `.env`: browser entries are trusted code, and file contents are exposed to the plugin.
 
 ## Listing workspace files
 
