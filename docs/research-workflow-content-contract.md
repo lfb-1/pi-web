@@ -146,6 +146,12 @@ The graph is bounded to 256 nodes and 512 edges. IDs remain stable and match
 `^[a-z][a-z0-9.-]*$`. The parser rejects duplicate IDs, missing endpoints, invalid stage transitions,
 self-links, cycles, unresolved evidence references, and malformed active paths.
 
+`replace_causal_graph` supports an intentional wholesale projection reset or compaction. The caller
+provides the complete replacement graph in one tool mutation; the extension injects provenance,
+validates the full DAG and evidence references, and atomically replaces only the graph while
+preserving detailed work-item records. This avoids hundreds of incremental removals and prevents an
+intermediate partial graph from becoming durable.
+
 `activePathEdgeIds` is an optional ordered emphasis path represented as an array that may be empty.
 When present, its edges must form one continuous path ending at `activeNodeId`. In a merged DAG the
 browser does not select an ancestor path itself. Without a persisted path it highlights only the
@@ -176,7 +182,8 @@ The companion extension:
 
 1. reads version 2 first, then validates the legacy state only when version 2 is absent;
 2. upgrades version 1 into the separate version-2 file on the first write;
-3. maintains causal graph nodes and edges automatically as the scientific cycle advances;
+3. maintains causal graph nodes and edges automatically as the scientific cycle advances, and uses
+   `replace_causal_graph` only for an intentional complete projection reset or compaction;
 4. keeps graph text concise and detailed evidence in work-item records;
 5. records typed evidence and provenance;
 6. rejects invalid stage transitions, cycles, missing references, and invalid active paths;

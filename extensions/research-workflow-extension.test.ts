@@ -190,6 +190,55 @@ describe("research_workflow extension state transitions", () => {
     expect(parseResearchWorkflowStateText(JSON.stringify(state))).toMatchObject({ ok: true });
   });
 
+  it("replaces an accumulated causal graph in one validated mutation", () => {
+    let state = createWorkItem(emptyState());
+    state = mutateState(state, {
+      action: "upsert_causal_graph",
+      causalGraph: { title: "Legacy graph", status: "active" },
+    }, piSource, undefined);
+    state = mutateState(state, {
+      action: "upsert_causal_node",
+      causalNode: {
+        id: "legacy.hypothesis",
+        kind: "hypothesis",
+        title: "Legacy hypothesis",
+        summary: "Retired projection state.",
+        status: "completed",
+        evidenceRefs: [],
+      },
+    }, piSource, undefined);
+
+    const replaced = mutateState(state, {
+      action: "replace_causal_graph",
+      causalGraphReplacement: {
+        title: "Current decision path",
+        status: "completed",
+        activePathEdgeIds: [],
+        nodes: [{
+          id: "current.hypothesis",
+          kind: "hypothesis",
+          title: "Current hypothesis",
+          summary: "Keep only the current causal projection.",
+          status: "completed",
+          evidenceRefs: [],
+        }],
+        edges: [],
+      },
+    }, piSource, undefined);
+
+    expect(replaced.causalGraph).toMatchObject({
+      title: "Current decision path",
+      status: "completed",
+      activePathEdgeIds: [],
+      nodes: [{ id: "current.hypothesis", source: piSource }],
+      edges: [],
+      source: piSource,
+    });
+    expect(replaced.causalGraph?.nodes.find((node) => node.id === "legacy.hypothesis")).toBeUndefined();
+    expect(replaced.causalGraph?.authoritySource).toBeUndefined();
+    expect(parseResearchWorkflowStateText(JSON.stringify(replaced))).toMatchObject({ ok: true });
+  });
+
   it("completes the overall research idea automatically", () => {
     const state = mutateState(createWorkItem(emptyState()), {
       action: "upsert_causal_graph",

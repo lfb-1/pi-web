@@ -55,6 +55,7 @@ const actions = [
   "upsert_work_item",
   "set_active",
   "upsert_causal_graph",
+  "replace_causal_graph",
   "upsert_causal_node",
   "upsert_causal_edge",
   "upsert_acceptance",
@@ -119,6 +120,34 @@ const CausalEdgePatchSchema = Type.Object({
   to: Type.Optional(Type.String({ description: sourceDescription })),
   kind: Type.Optional(StringEnum(causalEdgeKinds)),
   direction: Type.Optional(Type.String({ maxLength: 360, description: "Required only for motivates edges; summarize why the conclusion led to the next hypothesis." })),
+}, { additionalProperties: false });
+
+const CausalGraphReplacementNodeSchema = Type.Object({
+  id: Type.String({ description: sourceDescription }),
+  kind: StringEnum(causalNodeKinds),
+  title: Type.String({ maxLength: 240 }),
+  summary: Type.String({ maxLength: 700 }),
+  status: StringEnum(causalNodeStatuses),
+  conclusion: Type.Optional(StringEnum(causalConclusions)),
+  workItemId: Type.Optional(Type.String({ description: "Optional branch work-item id represented by this node." })),
+  evidenceRefs: Type.Array(Type.String({ description: "Typed ref: <workItemId>/(run|artifact|finding|criterion|decision):<recordId>." })),
+}, { additionalProperties: false });
+
+const CausalGraphReplacementEdgeSchema = Type.Object({
+  id: Type.String({ description: sourceDescription }),
+  from: Type.String({ description: sourceDescription }),
+  to: Type.String({ description: sourceDescription }),
+  kind: StringEnum(causalEdgeKinds),
+  direction: Type.Optional(Type.String({ maxLength: 360, description: "Required only for motivates edges." })),
+}, { additionalProperties: false });
+
+const CausalGraphReplacementSchema = Type.Object({
+  title: Type.String({ maxLength: 160 }),
+  status: StringEnum(causalGraphStatuses),
+  activeNodeId: Type.Optional(Type.String({ description: sourceDescription })),
+  activePathEdgeIds: Type.Array(Type.String({ description: sourceDescription })),
+  nodes: Type.Array(CausalGraphReplacementNodeSchema),
+  edges: Type.Array(CausalGraphReplacementEdgeSchema),
 }, { additionalProperties: false });
 
 const CriterionPatchSchema = Type.Object({
@@ -186,6 +215,7 @@ const ResearchWorkflowParameters = Type.Object({
   workItemId: Type.Optional(Type.String({ description: "Parent work-item id for child records." })),
   workItem: Type.Optional(WorkItemPatchSchema),
   causalGraph: Type.Optional(CausalGraphPatchSchema),
+  causalGraphReplacement: Type.Optional(CausalGraphReplacementSchema),
   causalNode: Type.Optional(CausalNodePatchSchema),
   causalEdge: Type.Optional(CausalEdgePatchSchema),
   criterion: Type.Optional(CriterionPatchSchema),
@@ -209,7 +239,7 @@ export default function researchWorkflowExtension(pi: ExtensionAPI): void {
     promptGuidelines: [
       "Use research_workflow whenever a hypothesis, validation, analysis, conclusion, or resulting research direction changes. Call action=get first when state may have changed; update one entity at a time and preserve stable ids.",
       `Never create, edit, copy, or overwrite ${RESEARCH_WORKFLOW_STATE_PATH} with file, shell, or text-edit tools. Only research_workflow may write it because the tool injects nested provenance, validates evidence references, checks the explicit active path, and writes atomically. If action=get reports invalid state, stop and report the exact validation error instead of replacing the file.`,
-      "The causal graph is the primary human view. Keep it current automatically: hypothesis -> validation -> analysis -> conclusion, then connect a conclusion to each new hypothesis with a motivates edge whose direction explains the causal reason. Branches and merges are allowed; cycles are not.",
+      "The causal graph is the primary human view. Keep it current automatically: hypothesis -> validation -> analysis -> conclusion, then connect a conclusion to each new hypothesis with a motivates edge whose direction explains the causal reason. Branches and merges are allowed; cycles are not. Use replace_causal_graph only for an intentional wholesale projection reset or compaction; provide the complete replacement graph in one validated mutation.",
       "Graph nodes are concise semantic summaries. Never put code, paths, job metadata, long metric tables, or implementation detail in them. A validation node states only what was tested and its status; an analysis node states the short interpretation; a conclusion node uses confirmed, denied, or unsure while preserving scope and uncertainty.",
       "Keep detailed runs, artifacts, criteria, and findings durable for traceability, but do not copy their detail into the graph. Link a graph node to its branch with workItemId when available.",
       "Continue automatically for reversible implementation choices, evidence-backed graph maintenance, routine record synchronization, and an obvious recommended next step. Do not ask the user about implementation detail or ordinary result bookkeeping.",
@@ -330,6 +360,9 @@ export function mutateState(
     case "upsert_causal_graph":
       upsertCausalGraph(next, required(params.causalGraph, "causalGraph"), source);
       break;
+    case "replace_causal_graph":
+      replaceCausalGraph(next, required(params.causalGraphReplacement, "causalGraphReplacement"), source);
+      break;
     case "upsert_causal_node": {
       const graph = requireCausalGraph(next);
       upsertCausalNode(graph, required(params.causalNode, "causalNode"), source);
@@ -407,6 +440,22 @@ function upsertCausalGraph(
     nodes: existing?.nodes ?? [],
     edges: existing?.edges ?? [],
     source: existing?.source ?? source,
+  };
+}
+
+function replaceCausalGraph(
+  state: ResearchWorkflowState,
+  replacement: NonNullable<ResearchWorkflowParameters["causalGraphReplacement"]>,
+  source: RecordSource,
+): void {
+  state.causalGraph = {
+    title: replacement.title,
+    status: replacement.status,
+    ...(replacement.activeNodeId === undefined ? {} : { activeNodeId: replacement.activeNodeId }),
+    activePathEdgeIds: replacement.activePathEdgeIds,
+    nodes: replacement.nodes.map((node) => ({ ...node, source })),
+    edges: replacement.edges.map((edge) => ({ ...edge, source })),
+    source,
   };
 }
 
