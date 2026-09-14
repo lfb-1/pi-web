@@ -339,6 +339,8 @@ Updates is enabled by default. It declares `machineSpecific: true` so the gatewa
 
 Git worktrees are local directories; the clickable GitHub link identifies the code branch or commit used for that experiment. The table never substitutes the currently selected worktree for a historical code reference. Links open in a new tab. On narrow screens the four-column table scrolls horizontally.
 
+Current work appears in **Active experiments**. Rows marked `archived: true` are grouped under **Archived experiments (N)**, collapsed by default. Click or keyboard-activate its summary to expand/collapse the history; both groups retain the same four columns. Refresh preserves the current expansion choice; opening another workspace/machine or remounting the panel starts collapsed. An all-archived index explicitly shows that there are no active experiments.
+
 The panel reads only its display index through the selected machine/workspace's file helper. It does not read, migrate, or change retired Research Workflow files, call W&B/GitHub APIs, upload data, or run a model when opened. The legacy `research_workflow` extension remains separate and does not populate this table. Existing scientific records remain authoritative.
 
 Create or update the index with normal file tools, or click **Update with Pi** to insert a prompt into the current session. The button does not submit the prompt automatically. Pi should verify purposes, links and conclusions against canonical registrations, results and Git evidence, preserve existing entries, and use `null` for unknown fields. Click **Refresh** after edits; there is no background polling.
@@ -353,13 +355,16 @@ Create or update the index with normal file tools, or click **Update with Pi** t
       "wandbUrl": null,
       "githubUrl": null,
       "worktree": "task/capacity-control",
-      "conclusion": null
+      "conclusion": null,
+      "archived": false
     }
   ]
 }
 ```
 
-Only `id` and `purpose` are required per row, and ids must be unique. `wandbUrl`, `githubUrl`, `worktree` and `conclusion` are optional strings; omitted, `null` or blank values display as unknown. URLs must be absolute HTTP(S) links without embedded credentials; self-hosted W&B and GitHub Enterprise are supported. Keep newer experiments first: the table preserves file order. Each row may represent a distinct experiment, arm or attempt when separate links/results are needed. The index is a display summary, not execution authorization or a replacement for raw evidence.
+Only `id` and `purpose` are required per row, and ids must be unique. `wandbUrl`, `githubUrl`, `worktree` and `conclusion` are optional strings; omitted, `null` or blank values display as unknown. URLs must be absolute HTTP(S) links without embedded credentials; self-hosted W&B and GitHub Enterprise are supported. Keep newer experiments first: each group preserves file order. Each row may represent a distinct experiment, arm or attempt when separate links/results are needed. The index is a display summary, not execution authorization or a replacement for raw evidence.
+
+`archived` is an optional boolean, defaulting to `false` for existing indexes. Set it explicitly to `false` for current active work and `true` for inactive history, including stopped or incomplete experiments. Archiving is display-only: it neither marks an experiment scientifically complete nor changes its conclusion. A missing conclusion does not imply active work, and a recorded conclusion does not automatically archive an ongoing experiment. **Update with Pi** requests explicit archival choices based on project evidence while preserving existing choices unless the user or current evidence supports a change.
 
 A missing file or empty array displays an empty table. Invalid JSON, duplicate ids, unsafe links, unreadable files, binary content and truncated reads produce an explicit error instead of displaying partial history or repairing the file.
 

@@ -84,6 +84,60 @@ describe("experiment Visualization table", () => {
     expect(ctx.terminal.runCommand).not.toHaveBeenCalled();
   });
 
+  it("shows active work separately and collapses the complete archive by default", async () => {
+    const archived = { ...example, id: "past", purpose: "An older experiment", archived: true };
+    const ctx = context(() => Promise.resolve(file([archived, example])));
+    const panel = mount(ctx);
+    await refreshExperimentHistoryPanel(ctx);
+    const root = shadow(panel);
+    const activeTable = requiredElement(root, "[data-active]");
+    expect(activeTable.querySelectorAll("thead th")).toHaveLength(4);
+    expect(activeTable.querySelectorAll("tbody tr")).toHaveLength(1);
+    expect(activeTable.textContent).toContain(example.purpose);
+    expect(activeTable.textContent).not.toContain(archived.purpose);
+    const archive = requiredElement(root, "details[data-archive]");
+    expect(archive.hasAttribute("open")).toBe(false);
+    expect(archive.querySelector("summary")?.textContent).toBe("Archived experiments (1)");
+    expect(archive.querySelectorAll("thead th")).toHaveLength(4);
+    expect(archive.querySelector("tbody")?.textContent).toContain(archived.purpose);
+    expect(archive.querySelector("a")?.getAttribute("href")).toBe(example.wandbUrl);
+    requiredElement(archive, "summary").click();
+    expect(archive.hasAttribute("open")).toBe(true);
+    requiredElement(archive, "summary").click();
+    expect(archive.hasAttribute("open")).toBe(false);
+    expect(ctx.files.writeFile).not.toHaveBeenCalled();
+  });
+
+  it("preserves the archive expansion on refresh but resets it for another workspace or remount", async () => {
+    const readFile: ReadFile = () => Promise.resolve(file([{ ...example, archived: true }]));
+    const first = context(readFile);
+    const panel = mount(first);
+    await refreshExperimentHistoryPanel(first);
+    requiredElement(shadow(panel), "details > summary").click();
+    // Refresh immediately, before the native async toggle event is delivered.
+    await refreshExperimentHistoryPanel(first);
+    expect(requiredElement(shadow(panel), "details").hasAttribute("open")).toBe(true);
+    const other = context(readFile, "remote");
+    panel.context = other;
+    await refreshExperimentHistoryPanel(other);
+    expect(requiredElement(shadow(panel), "details").hasAttribute("open")).toBe(false);
+    requiredElement(shadow(panel), "details > summary").click();
+    panel.remove();
+    document.body.append(panel);
+    await refreshExperimentHistoryPanel(other);
+    expect(requiredElement(shadow(panel), "details").hasAttribute("open")).toBe(false);
+  });
+
+  it("shows no active experiments when every row is archived, including incomplete history", async () => {
+    const ctx = context(() => Promise.resolve(file([{ id: "incomplete", purpose: "Stopped historical trial", archived: true }])));
+    const panel = mount(ctx);
+    await refreshExperimentHistoryPanel(ctx);
+    expect(requiredElement(shadow(panel), "[data-active]").textContent).toContain("No active experiments");
+    const archive = requiredElement(shadow(panel), "details");
+    expect(archive.hasAttribute("open")).toBe(false);
+    expect(archive.textContent).toContain("No conclusion recorded");
+  });
+
   it("renders missing fields without inferring outcomes", async () => {
     const ctx = context(() => Promise.resolve(file([{ id: "no-links", purpose: "Historical run" }])));
     const panel = mount(ctx);
@@ -134,6 +188,8 @@ describe("experiment Visualization table", () => {
     expect(ctx.prompt.insertText).toHaveBeenCalledWith(expect.stringContaining(EXPERIMENT_HISTORY_PATH));
     expect(ctx.prompt.insertText).toHaveBeenCalledWith(expect.stringContaining("never invent a URL"));
     expect(ctx.prompt.insertText).toHaveBeenCalledWith(expect.stringContaining("do not read or migrate retired"));
+    expect(ctx.prompt.insertText).toHaveBeenCalledWith(expect.stringContaining("archived:true for inactive historical experiments"));
+    expect(ctx.prompt.insertText).toHaveBeenCalledWith(expect.stringContaining("never infer active status solely from a missing conclusion"));
     expect(ctx.terminal.runCommand).not.toHaveBeenCalled();
   });
 

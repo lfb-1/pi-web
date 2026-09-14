@@ -7,6 +7,7 @@ export interface ExperimentHistoryEntry {
   githubUrl?: string;
   worktree?: string;
   conclusion?: string;
+  archived?: boolean;
 }
 
 export interface ExperimentHistory {
@@ -40,6 +41,10 @@ export function parseExperimentHistory(text: string): ParseExperimentHistoryResu
     if (ids.has(id)) return { ok: false, error: `${at} duplicates experiment id: ${id}` };
     ids.add(id);
     const entry: ExperimentHistoryEntry = { id, purpose: row["purpose"].trim() };
+    if (row["archived"] !== undefined) {
+      if (typeof row["archived"] !== "boolean") return { ok: false, error: `${at}.archived must be a boolean.` };
+      entry.archived = row["archived"];
+    }
     for (const field of ["wandbUrl", "githubUrl", "worktree", "conclusion"] as const) {
       const content = row[field];
       if (content === undefined || content === null) continue;

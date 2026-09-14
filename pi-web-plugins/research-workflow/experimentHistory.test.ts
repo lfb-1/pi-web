@@ -40,6 +40,20 @@ describe("experiment history format", () => {
     }
   });
 
+  it("preserves explicit archival state without inferring it from a conclusion", () => {
+    const rows = [entry, { ...entry, id: "archived", archived: true, conclusion: null }, { ...entry, id: "active", archived: false }];
+    const parsed = parseExperimentHistory(history(rows));
+    if (!parsed.ok) throw new Error(parsed.error);
+    expect(parsed.history.experiments.map((row) => row.archived)).toEqual([undefined, true, false]);
+    expect(parsed.history.experiments[1]?.conclusion).toBeUndefined();
+  });
+
+  it.each(["false", 0, null, {}])("rejects non-boolean archival state: %s", (archived) => {
+    const parsed = parseExperimentHistory(history([{ ...entry, archived }]));
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.error).toContain("archived must be a boolean");
+  });
+
   it("supports self-hosted W&B and GitHub Enterprise URLs", () => {
     expect(parseExperimentHistory(history([{ ...entry, wandbUrl: "http://wandb.internal/team/project/runs/a", githubUrl: "https://git.internal/owner/repo/commit/abc" }])).ok).toBe(true);
   });
