@@ -417,6 +417,11 @@ import type { PiWebServerPlugin, WorkspaceProvider } from "@jmfederico/pi-web/se
 }</code></pre>
               </div>
 
+              <h3>Experiment Visualization</h3>
+              <p><strong>Visualization</strong> replaces the former Research canvas with a four-column experiment-history table: experiment purpose, W&amp;B link, GitHub worktree, and brief conclusion. GitHub links identify each experiment's branch or fixed commit; an optional local worktree label appears in the same cell. The table scrolls horizontally on narrow screens.</p>
+              <p>The plugin keeps the id <code>research-workflow</code> for saved routes and enablement, and reads only <code>.pi-web/experiment-history.json</code> in the selected machine/workspace. It never reads or migrates retired Research Workflow files. Missing links and conclusions remain explicitly unknown; canonical experiment records remain authoritative.</p>
+              <p>Use <strong>Update with Pi</strong> to insert an evidence-backed index-update prompt, or edit the index with normal file tools, then click <strong>Refresh</strong>. Opening the panel does not call a model, contact W&amp;B/GitHub, or upload artifacts. Browser-only updates need a page reload, not a session-daemon restart. See the <a href="plugins.md#experiment-visualization">index schema and full behavior</a>.</p>
+
               <h3>Workspace Tasks</h3>
               <p>
                 <strong>Workspace Tasks</strong> adds a <strong>Tasks</strong> workspace tab for running configured shell

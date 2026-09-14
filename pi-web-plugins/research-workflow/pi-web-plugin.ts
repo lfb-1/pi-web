@@ -1,24 +1,23 @@
 import type { PiWebPlugin } from "@jmfederico/pi-web/plugin-api";
 import {
-  defineResearchWorkflowPanelElement,
-  refreshResearchWorkflowPanel,
-  researchWorkflowPanelBadge,
-} from "./researchWorkflowPanelElement.js";
+  defineExperimentHistoryPanelElement,
+  refreshExperimentHistoryPanel,
+} from "./experimentHistoryPanelElement.js";
 
 const plugin: PiWebPlugin = {
   apiVersion: 2,
-  name: "Research Workflow",
+  name: "Experiment Visualization",
   activate: ({ runtimePluginId, html, svg }) => {
-    defineResearchWorkflowPanelElement();
+    defineExperimentHistoryPanelElement();
 
     return {
       contributions: {
         actions: [
           {
             id: "workspace.open-research-workflow",
-            title: "Open Research Workflow",
-            description: "Open the research hypothesis, validation, analysis, conclusion, and direction canvas.",
-            group: "Research",
+            title: "Open Experiment Visualization",
+            description: "View experiment purposes, W&B runs, GitHub worktrees, and brief conclusions.",
+            group: "Visualization",
             enabled: (context) => context.state.selectedWorkspace !== undefined,
             run: (context) => {
               if (context.state.selectedWorkspace === undefined) return;
@@ -29,18 +28,16 @@ const plugin: PiWebPlugin = {
         workspacePanels: [
           {
             id: "workspace.research-workflow",
-            title: "Research",
+            title: "Visualization",
             icon: svg`
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M9 3h6"></path>
-                <path d="M10 9 6 20h12L14 9"></path>
-                <path d="M8.5 14h7"></path>
+                <path d="M3 3v18h18"></path>
+                <path d="m7 14 4-5 4 3 5-7"></path>
               </svg>
             `,
             order: 30,
-            badge: (context) => researchWorkflowPanelBadge(context),
-            onInvalidate: (context) => refreshResearchWorkflowPanel(context),
-            render: (context) => html`<pi-web-research-workflow-panel .context=${context}></pi-web-research-workflow-panel>`,
+            onInvalidate: (context) => refreshExperimentHistoryPanel(context),
+            render: (context) => html`<pi-web-experiment-history-panel .context=${context}></pi-web-experiment-history-panel>`,
           },
         ],
       },

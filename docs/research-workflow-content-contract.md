@@ -1,6 +1,6 @@
-# Research Workflow content contract
+# Research Workflow content contract (historical)
 
-Status: Stage 2 causal-canvas contract.
+Status: Superseded browser design. The current [Visualization tab](plugins.md#experiment-visualization) reads `.pi-web/experiment-history.json` and does not read or migrate this legacy state. The document below preserves the former causal-canvas behavior and the separate `research_workflow` extension's data contract; it does not describe the current browser UI.
 
 ## Decision
 

@@ -326,25 +326,44 @@ Updates is enabled by default. It declares `machineSpecific: true` so the gatewa
 }
 ```
 
-### Research Workflow
+### Experiment Visualization
 
-**Plugin id:** `research-workflow`
-**State file:** `.pi-web/research-workflow-v2.json` (reads legacy `.pi-web/research-workflow.json` when version 2 is absent)
-**What it does:** adds a **Research** workspace tab centered on a zoomable causal DAG from
-hypothesis through validation, analysis, conclusion, and the direction of each next hypothesis.
-Branches can split and merge. Detailed criteria, decisions, runs, findings, artifacts, evidence,
-and runtime records remain durable outside the canvas.
+**Plugin id:** `research-workflow` (retained so saved panel routes and enablement keep working)
+**Display index:** `.pi-web/experiment-history.json`
+**What it does:** replaces the former **Research** canvas with a **Visualization** tab showing exactly four columns:
 
-The panel renders validated version-2 state deterministically and never reconstructs research
-state from chat when it opens. The companion `research_workflow` Pi extension maintains concise
-evidence-backed graph nodes and edges and records provenance. Every validated mutation proceeds
-automatically, including graph completion/reopening, critical-decision resolution, and removal.
-The extension opens no Workflow authority dialogs; open critical or blocking decisions remain
-visible in the Research attention badge without becoming a second execution gate.
+1. **Experiment purpose** — what the experiment tested.
+2. **W&B link** — its recorded training run or dashboard URL.
+3. **GitHub worktree** — the experiment's GitHub branch or fixed commit, with an optional worktree label/path below it.
+4. **Brief conclusion** — a short, evidence-backed result, or an explicit missing-conclusion label.
 
-Research Workflow is enabled by default. Projects without a state file see an initialization
-prompt that can be inserted into the current Pi session. To hide the panel, disable
-`research-workflow` in **Settings → PI WEB plugins** or set:
+Git worktrees are local directories; the clickable GitHub link identifies the code branch or commit used for that experiment. The table never substitutes the currently selected worktree for a historical code reference. Links open in a new tab. On narrow screens the four-column table scrolls horizontally.
+
+The panel reads only its display index through the selected machine/workspace's file helper. It does not read, migrate, or change retired Research Workflow files, call W&B/GitHub APIs, upload data, or run a model when opened. The legacy `research_workflow` extension remains separate and does not populate this table. Existing scientific records remain authoritative.
+
+Create or update the index with normal file tools, or click **Update with Pi** to insert a prompt into the current session. The button does not submit the prompt automatically. Pi should verify purposes, links and conclusions against canonical registrations, results and Git evidence, preserve existing entries, and use `null` for unknown fields. Click **Refresh** after edits; there is no background polling.
+
+```json
+{
+  "version": 1,
+  "experiments": [
+    {
+      "id": "capacity-control",
+      "purpose": "Test whether increased model capacity improves held-out accuracy.",
+      "wandbUrl": null,
+      "githubUrl": null,
+      "worktree": "task/capacity-control",
+      "conclusion": null
+    }
+  ]
+}
+```
+
+Only `id` and `purpose` are required per row, and ids must be unique. `wandbUrl`, `githubUrl`, `worktree` and `conclusion` are optional strings; omitted, `null` or blank values display as unknown. URLs must be absolute HTTP(S) links without embedded credentials; self-hosted W&B and GitHub Enterprise are supported. Keep newer experiments first: the table preserves file order. Each row may represent a distinct experiment, arm or attempt when separate links/results are needed. The index is a display summary, not execution authorization or a replacement for raw evidence.
+
+A missing file or empty array displays an empty table. Invalid JSON, duplicate ids, unsafe links, unreadable files, binary content and truncated reads produce an explicit error instead of displaying partial history or repairing the file.
+
+Visualization is enabled by default. To hide the panel, disable `research-workflow` in **Settings → PI WEB plugins** or set:
 
 ```json
 {
@@ -354,8 +373,7 @@ prompt that can be inserted into the current Pi session. To hide the panel, disa
 }
 ```
 
-See [`research-workflow-content-contract.md`](research-workflow-content-contract.md) for automatic
-execution, version-1 migration, causal-graph validation, stable identifiers, and storage.
+The former canvas contract is retained as [historical documentation](research-workflow-content-contract.md) for the separate legacy extension. Browser-only Visualization updates require a page reload, not a session-daemon restart.
 
 ### Workspace Tasks
 

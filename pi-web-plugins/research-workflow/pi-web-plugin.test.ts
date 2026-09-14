@@ -15,16 +15,17 @@ function contributions() {
   }).contributions;
 }
 
-describe("Research Workflow plugin", () => {
-  it("contributes one Research panel with refresh support", () => {
+describe("Experiment Visualization plugin", () => {
+  it("replaces Research with one Visualization panel while preserving its route", () => {
     const panel = contributions().workspacePanels?.find((candidate) => candidate.id === "workspace.research-workflow");
 
-    expect(panel?.title).toBe("Research");
+    expect(contributions().workspacePanels).toHaveLength(1);
+    expect(panel?.title).toBe("Visualization");
     expect(panel?.order).toBe(30);
     expect(panel?.onInvalidate).toBeTypeOf("function");
   });
 
-  it("opens the Research panel from the action palette", async () => {
+  it("opens Visualization from the action palette", async () => {
     const action = contributions().actions?.find((candidate) => candidate.id === "workspace.open-research-workflow");
     const selectWorkspaceTool = vi.fn();
     const context = runtimeContext({
@@ -40,6 +41,7 @@ describe("Research Workflow plugin", () => {
       selectWorkspaceTool,
     });
 
+    expect(action?.title).toBe("Open Experiment Visualization");
     await action?.run(context);
 
     expect(selectWorkspaceTool).toHaveBeenCalledWith("research-workflow:workspace.research-workflow");
