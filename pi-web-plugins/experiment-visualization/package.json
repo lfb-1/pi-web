@@ -1,0 +1,9 @@
+{
+  "name": "@pi-web/experiment-visualization-plugin",
+  "private": true,
+  "piWeb": {
+    "plugins": [
+      { "id": "experiment-visualization", "browserRoot": ".", "module": "pi-web-plugin.js" }
+    ]
+  }
+}

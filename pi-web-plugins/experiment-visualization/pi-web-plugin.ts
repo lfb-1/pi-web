@@ -14,20 +14,20 @@ const plugin: PiWebPlugin = {
       contributions: {
         actions: [
           {
-            id: "workspace.open-research-workflow",
+            id: "workspace.open-experiment-visualization",
             title: "Open Experiment Visualization",
             description: "View experiment purposes, W&B runs, GitHub worktrees, and brief conclusions.",
             group: "Visualization",
             enabled: (context) => context.state.selectedWorkspace !== undefined,
             run: (context) => {
               if (context.state.selectedWorkspace === undefined) return;
-              context.selectWorkspaceTool(`${runtimePluginId}:workspace.research-workflow`);
+              context.selectWorkspaceTool(`${runtimePluginId}:workspace.experiment-visualization`);
             },
           },
         ],
         workspacePanels: [
           {
-            id: "workspace.research-workflow",
+            id: "workspace.experiment-visualization",
             title: "Visualization",
             icon: svg`
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">

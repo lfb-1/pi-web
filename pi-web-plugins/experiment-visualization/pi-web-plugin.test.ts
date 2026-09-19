@@ -8,16 +8,16 @@ import plugin from "./pi-web-plugin.js";
 function contributions() {
   return plugin.activate({
     apiVersion: 2,
-    pluginId: "research-workflow",
-    runtimePluginId: "research-workflow",
+    pluginId: "experiment-visualization",
+    runtimePluginId: "experiment-visualization",
     html,
     svg,
   }).contributions;
 }
 
 describe("Experiment Visualization plugin", () => {
-  it("replaces Research with one Visualization panel while preserving its route", () => {
-    const panel = contributions().workspacePanels?.find((candidate) => candidate.id === "workspace.research-workflow");
+  it("contributes one independent Visualization panel", () => {
+    const panel = contributions().workspacePanels?.find((candidate) => candidate.id === "workspace.experiment-visualization");
 
     expect(contributions().workspacePanels).toHaveLength(1);
     expect(panel?.title).toBe("Visualization");
@@ -26,7 +26,7 @@ describe("Experiment Visualization plugin", () => {
   });
 
   it("opens Visualization from the action palette", async () => {
-    const action = contributions().actions?.find((candidate) => candidate.id === "workspace.open-research-workflow");
+    const action = contributions().actions?.find((candidate) => candidate.id === "workspace.open-experiment-visualization");
     const selectWorkspaceTool = vi.fn();
     const context = runtimeContext({
       state: {
@@ -44,7 +44,7 @@ describe("Experiment Visualization plugin", () => {
     expect(action?.title).toBe("Open Experiment Visualization");
     await action?.run(context);
 
-    expect(selectWorkspaceTool).toHaveBeenCalledWith("research-workflow:workspace.research-workflow");
+    expect(selectWorkspaceTool).toHaveBeenCalledWith("experiment-visualization:workspace.experiment-visualization");
   });
 });
 

@@ -187,7 +187,7 @@ describe("experiment Visualization table", () => {
     requiredElement(shadow(panel), '[data-action="update"]').click();
     expect(ctx.prompt.insertText).toHaveBeenCalledWith(expect.stringContaining(EXPERIMENT_HISTORY_PATH));
     expect(ctx.prompt.insertText).toHaveBeenCalledWith(expect.stringContaining("never invent a URL"));
-    expect(ctx.prompt.insertText).toHaveBeenCalledWith(expect.stringContaining("do not read or migrate retired"));
+    expect(ctx.prompt.insertText).toHaveBeenCalledWith(expect.stringContaining("Use normal file tools to edit only this display index"));
     expect(ctx.prompt.insertText).toHaveBeenCalledWith(expect.stringContaining("archived:true for inactive historical experiments"));
     expect(ctx.prompt.insertText).toHaveBeenCalledWith(expect.stringContaining("never infer active status solely from a missing conclusion"));
     expect(ctx.terminal.runCommand).not.toHaveBeenCalled();

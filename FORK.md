@@ -59,34 +59,16 @@ The implementation uses `SpeechRecognition` with the Chrome-compatible
 audio capture, recognition network failures, and remote HTTP origins receive explicit guidance.
 HTTPS or localhost access is recommended for reliable microphone permission.
 
-### Research causal canvas
+### Experiment visualization
 
-The bundled `research-workflow` plugin makes a zoomable and pannable causal DAG the primary
-Research view. Its stage chain is **Hypothesis → Validation → Analysis → Conclusion**, followed by
-labeled directions to new hypotheses. Branches can split and merge. Nodes keep code, raw metrics,
-paths, and job metadata out of the canvas; detailed criteria, runs, findings, artifacts, evidence,
-and provenance remain durable behind a secondary operational index.
-
-The companion `research_workflow` Pi extension maintains graph nodes and edges automatically,
-validates stage transitions, typed evidence, active paths, and acyclicity, and preserves creation
-and update provenance. Users can select, locally hide, restore, focus, or ask Pi to revise a node.
-Version-1 state is read and upgraded to version 2 on the first validated write without inventing
-unsupported causal links.
-
-Attention badges and the critical-question banner include only decisions that are explicitly
-critical or blocking. They are attention state rather than execution gates. The extension opens no
-Workflow authority dialogs: objective, criteria, decisions, findings, work-item status, graph
-completion/reopening, removal, and result bookkeeping all proceed automatically after validation.
-
-The complete state and automation contract is documented in
-`docs/research-workflow-content-contract.md`. Version-2 state remains workspace-local at
-`.pi-web/research-workflow-v2.json`, with compact JSON writes and read-only fallback to the legacy
-`.pi-web/research-workflow.json`; independent file watching and structured monitor-to-graph updates
-remain later work.
+The bundled `experiment-visualization` browser plugin displays a simple experiment index with
+purpose, W&B link, GitHub worktree and brief conclusion. Inactive entries are collapsed under
+Archived experiments. It has no companion record-management extension, mandatory bookkeeping,
+causal graph, or automatic agent hooks. See `docs/plugins.md` for the optional display-index format.
 
 ### Agent session graph and main-session forks
 
-The right workspace panel keeps the selected Git, Terminal, Research, or other workspace tool in
+The right workspace panel keeps the selected Git, Terminal, Visualization, or other workspace tool in
 its main area. The zoomable and pannable Agents session graph is folded into a compact bottom bar
 by default and can be expanded when needed. Root sessions and response-level forks form the
 persistent main-agent lineage.
@@ -171,6 +153,5 @@ The LaTeX contract tests are in
 `src/client/src/formatting/markdown.test.ts`. File-language detection tests are in
 `src/server/workspaces/fileContentService.read.test.ts`. Voice-input behavior is covered by
 `src/client/src/voiceInput.test.ts` and
-`src/client/src/components/PromptEditor.voice.test.ts`. Research Workflow parser, panel, and
-extension tests are under `pi-web-plugins/research-workflow/` and
-`extensions/research-workflow-extension.test.ts`.
+`src/client/src/components/PromptEditor.voice.test.ts`. Experiment visualization tests are under
+`pi-web-plugins/experiment-visualization/`.

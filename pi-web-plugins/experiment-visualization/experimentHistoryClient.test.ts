@@ -5,7 +5,7 @@ import { loadExperimentHistory, type ExperimentHistoryFileReader } from "./exper
 const emptyFile = { content: '{"version":1,"experiments":[]}', truncated: false, binary: false };
 
 describe("experiment history loading", () => {
-  it("reads only the visualization index, never retired research workflow files", async () => {
+  it("reads only the visualization index", async () => {
     const readFile = vi.fn<ExperimentHistoryFileReader["readFile"]>().mockResolvedValue(emptyFile);
     await expect(loadExperimentHistory({ readFile })).resolves.toEqual({ kind: "loaded", history: { version: 1, experiments: [] } });
     expect(readFile.mock.calls).toEqual([[EXPERIMENT_HISTORY_PATH]]);

@@ -112,9 +112,9 @@ describe("readWorkspaceFile", () => {
   it("returns growing workspace state files beyond the former 512 KiB limit", async () => {
     const root = await createTempWorkspace();
     const content = JSON.stringify({ state: "x".repeat(600 * 1024) });
-    await writeFile(join(root, "research-workflow-v2.json"), content);
+    await writeFile(join(root, "large-state.json"), content);
 
-    const file = await readWorkspaceFile(root, "research-workflow-v2.json");
+    const file = await readWorkspaceFile(root, "large-state.json");
 
     expect(file.content).toBe(content);
     expect(file.truncated).toBe(false);
