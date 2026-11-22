@@ -11,8 +11,9 @@
   --pi-syntax-deletion: var(--pi-danger);
   --pi-chat-conversation-bg: var(--pi-bg);
   --pi-chat-conversation-border: var(--pi-border-muted);
-  --pi-chat-user-bg: var(--pi-surface);
-  --pi-chat-user-border: var(--pi-muted);
+  /* Fork: retain the earlier violet user-message cue in neutral themes. */
+  --pi-chat-user-bg: #302452;
+  --pi-chat-user-border: #5a47b0;
   --pi-chat-system-bg: var(--pi-surface);
   --pi-chat-activity-bg: var(--pi-surface);
   --pi-chat-compacting-bg: var(--pi-surface);

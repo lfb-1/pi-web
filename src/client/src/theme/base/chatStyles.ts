@@ -29,7 +29,7 @@ export const chatStyles = css`
      distinguishable in every theme: user turns use the selection colour with an
      accent border; assistant turns use the surface colour with a neutral border. */
   .msg.conversation-message { --ui-transcript-bg: var(--pi-surface); border: 1px solid var(--pi-border); border-radius: 10px; margin: 0 12px 12px; }
-  .msg.conversation-message.user { --ui-transcript-bg: var(--pi-selection-bg); border-color: var(--pi-accent-border); }
+  .msg.conversation-message.user { --ui-transcript-bg: var(--pi-chat-user-bg, var(--pi-selection-bg)); border-color: var(--pi-chat-user-border, var(--pi-accent-border)); }
   .msg.tool { color: var(--pi-text); }
   .msg.tool-execution-shell, .msg.ask-user-record-shell { padding: 0; border: 0; background: transparent; color: var(--pi-text); }
   .msg.ask-user-record-shell ask-user-card { margin: 0 auto; }
