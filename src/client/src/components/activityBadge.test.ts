@@ -2,7 +2,7 @@
 
 import { render, type TemplateResult } from "lit";
 import { afterEach, describe, expect, it } from "vitest";
-import { hasStatusUnread, renderActionActivityIndicator, renderActivityIndicator, statusActivityKind } from "./activityBadge";
+import { hasStatusUnread, renderActionActivityIndicator, renderActivityIndicator, statusActivityKind, statusWorkKind } from "./activityBadge";
 
 afterEach(() => {
   document.body.replaceChildren();
@@ -44,6 +44,37 @@ describe("renderActivityIndicator", () => {
   });
 });
 
+describe("intervention indicator", () => {
+  it.each(["session", "terminal"] as const)("preserves %s work inside intervention, with or without unread", (workKind) => {
+    const container = renderInto(renderActivityIndicator("intervention-required", "Work active", undefined, workKind));
+    const assertWork = () => {
+      expect(container.querySelector(`.intervention-required .activity-indicator.${workKind}`)?.getAttribute("aria-hidden")).toBe("true");
+      expect(container.querySelectorAll('[role="img"]')).toHaveLength(1);
+    };
+    assertWork();
+    expect(container.querySelector('[role="img"]')?.getAttribute("aria-label")).toBe("Needs input · Work active");
+
+    render(renderActivityIndicator("intervention-required", "Work active", "Unread", workKind), container);
+    assertWork();
+    expect(container.querySelector('[role="img"]')?.getAttribute("aria-label")).toBe("Unread · Needs input · Work active");
+
+    render(renderActivityIndicator("intervention-required", "Work active", "Unread"), container);
+    expect(container.querySelector(`.activity-indicator.${workKind}`)).toBeNull();
+    expect(container.querySelector('[role="img"]')?.getAttribute("aria-label")).toBe("Unread · Needs input");
+  });
+
+  it("labels intervention consistently and keeps unread separate", () => {
+    const container = renderInto(renderActivityIndicator("intervention-required", "Session active", "Unread activity"));
+    const ring = container.querySelector(".unread-ring");
+    expect(ring?.getAttribute("aria-label")).toBe("Unread activity · Needs input");
+    expect(ring?.querySelector(".activity-indicator.intervention-required")).not.toBeNull();
+
+    render(renderActivityIndicator("intervention-required", "Machine active"), container);
+    expect(container.querySelector(".unread-ring")).toBeNull();
+    expect(container.querySelector(".intervention-required")?.getAttribute("title")).toBe("Needs input");
+  });
+});
+
 describe("renderActionActivityIndicator", () => {
   it("slots the composite mark into the row corner", () => {
     const container = renderInto(renderActionActivityIndicator("session", "Session active", "Unread session activity"));
@@ -60,6 +91,16 @@ describe("renderActionActivityIndicator", () => {
 });
 
 describe("statusActivityKind", () => {
+  it("prioritizes intervention over working and terminals without consuming unread", () => {
+    const flags = { "core:intervention-required": true, "core:working": true, "core:terminal": true, "core:unread": true };
+    expect(statusActivityKind(flags)).toBe("intervention-required");
+    expect(hasStatusUnread(flags)).toBe(true);
+    expect(statusWorkKind(flags)).toBe("session");
+    expect(statusWorkKind({ "core:intervention-required": true, "core:terminal": true })).toBe("terminal");
+    expect(statusWorkKind({ "core:intervention-required": true, "core:unread": true })).toBeUndefined();
+    expect(statusActivityKind({ ...flags, "core:intervention-required": false })).toBe("session");
+  });
+
   it("prefers work in progress over a live terminal", () => {
     expect(statusActivityKind({ "core:working": true, "core:terminal": true })).toBe("session");
     expect(statusActivityKind({ "core:terminal": true })).toBe("terminal");

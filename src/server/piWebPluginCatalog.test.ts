@@ -2,7 +2,8 @@ import { mkdir, mkdtemp, readdir, realpath, rm, stat, symlink, truncate, utimes,
 import { tmpdir } from "node:os";
 import { join, win32 } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { isWithin, PI_WEB_PLUGIN_ARTIFACT_MAX_BYTES, PiWebPluginCatalog, type PiPackageProvider } from "./piWebPluginCatalog.js";
+import { piWebDataDir } from "../config.js";
+import { defaultPluginRoots, isWithin, PI_WEB_PLUGIN_ARTIFACT_MAX_BYTES, PiWebPluginCatalog, type PiPackageProvider } from "./piWebPluginCatalog.js";
 
 let tempDir: string;
 
@@ -11,10 +12,25 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  vi.unstubAllEnvs();
   await rm(tempDir, { recursive: true, force: true });
 });
 
 describe("PiWebPluginCatalog", () => {
+  it("uses deployment defaults and environment enforcement in its default config provider", async () => {
+    await writePlugin(join(tempDir, "plugins", "browser-only"), {
+      packageJson: { piWeb: { plugins: [{ id: "browser-only", browserRoot: "dist", module: "dist/plugin.js" }] } },
+      files: { "dist/plugin.js": "export default {};" },
+    });
+    const defaults = join(tempDir, "defaults.json");
+    await writeFile(defaults, JSON.stringify({ plugins: { "browser-only": { enabled: false, settings: { color: "blue" } } } }));
+    vi.stubEnv("PI_WEB_CONFIG", join(tempDir, "config.json"));
+    vi.stubEnv("PI_WEB_DEFAULTS_CONFIG", defaults);
+    vi.stubEnv("PI_WEB_PLUGINS", JSON.stringify({ "browser-only": { enabled: true } }));
+    const catalog = new PiWebPluginCatalog({ roots: [{ path: join(tempDir, "plugins"), source: "fixture", scope: "project" }], packageProvider: false });
+    expect((await catalog.snapshot()).plugins[0]).toMatchObject({ enabled: true, settings: { color: "blue" } });
+  });
+
   it("describes browser-only metadata and desired config without changing source or scope", async () => {
     const pluginRoot = join(tempDir, "plugins", "browser-only");
     await writePlugin(pluginRoot, {
@@ -50,6 +66,66 @@ describe("PiWebPluginCatalog", () => {
     });
     expect(plugin?.browserModule?.revision).toMatch(/^sha256:[a-f\d]{64}$/u);
     expect(plugin?.settingsRevision).toMatch(/^sha256:[0-9a-f]{64}$/u);
+  });
+
+  it.each([
+    { defaultEnabled: undefined, configuredEnabled: undefined, enabled: true },
+    { defaultEnabled: true, configuredEnabled: undefined, enabled: true },
+    { defaultEnabled: false, configuredEnabled: undefined, enabled: false },
+    { defaultEnabled: false, configuredEnabled: true, enabled: true },
+    { defaultEnabled: false, configuredEnabled: false, enabled: false },
+    { defaultEnabled: true, configuredEnabled: false, enabled: false },
+  ])("applies installed package defaults with explicit config precedence: %j", async ({ defaultEnabled, configuredEnabled, enabled }) => {
+    const installedPath = join(tempDir, "installed-package");
+    await writePlugin(installedPath, {
+      packageJson: { piWeb: { plugins: [{
+        id: "optional-plugin", browserRoot: "dist", module: "dist/browser.js", serverModule: "server.js",
+        ...(defaultEnabled === undefined ? {} : { defaultEnabled }),
+      }] } },
+      files: { "dist/browser.js": "export default {};", "server.js": "export default {};" },
+    });
+    const catalog = new PiWebPluginCatalog({
+      roots: [],
+      packageProvider: {
+        listPackages: () => [{ source: "npm:@acme/optional", scope: "user", installedPath }],
+        getInstalledPath: () => installedPath,
+      },
+      configProvider: () => ({ plugins: { "optional-plugin": {
+        settings: { color: "blue" },
+        ...(configuredEnabled === undefined ? {} : { enabled: configuredEnabled }),
+      } } }),
+    });
+
+    const snapshot = await catalog.snapshot();
+
+    expect(snapshot.diagnostics).toEqual([]);
+    expect(snapshot.plugins).toMatchObject([{
+      id: "optional-plugin", enabled, source: "npm:@acme/optional", scope: "user", settings: { color: "blue" },
+    }]);
+    expect(snapshot.plugins[0]?.defaultEnabled).toBe(defaultEnabled);
+    // Disabled packages remain discovered and their browser assets resolvable.
+    await expect(catalog.browserPlugin("optional-plugin")).resolves.toMatchObject({ id: "optional-plugin" });
+  });
+
+  it.each([null, "false", 0, 1, {}, []])("rejects malformed defaultEnabled metadata: %j", async (defaultEnabled) => {
+    const pluginsRoot = join(tempDir, "plugins");
+    await writePlugin(join(pluginsRoot, "invalid-default"), {
+      packageJson: { piWeb: { plugins: [{ id: "invalid-default", serverModule: "server.js", defaultEnabled }] } },
+      files: { "server.js": "export default {};" },
+    });
+    const catalog = new PiWebPluginCatalog({
+      roots: [{ path: pluginsRoot, source: "fixture", scope: "local" }],
+      packageProvider: false,
+      configProvider: () => ({ plugins: { "invalid-default": { enabled: true } } }),
+      warningSink: () => undefined,
+    });
+
+    const snapshot = await catalog.snapshot();
+
+    expect(snapshot.plugins).toEqual([]);
+    expect(snapshot.diagnostics).toHaveLength(1);
+    expect(snapshot.diagnostics[0]?.code).toBe("invalid-package");
+    expect(snapshot.diagnostics[0]?.message).toContain("Invalid PI WEB plugin defaultEnabled value for invalid-default");
   });
 
   it("requires a safe browser root and keeps browser modules inside its logical and canonical boundary", async () => {
@@ -108,7 +184,7 @@ describe("PiWebPluginCatalog", () => {
     expect(snapshot.plugins.map((plugin) => plugin.id)).toEqual(["valid-root"]);
     expect(snapshot.diagnostics).toHaveLength(7);
     expect(snapshot.diagnostics.map(({ message }) => message)).toEqual(expect.arrayContaining([
-      expect.stringContaining("with a browser module must declare browserRoot"),
+      expect.stringContaining("with a browser module or themes must declare browserRoot"),
       expect.stringContaining("Invalid PI WEB plugin browserRoot"),
       expect.stringContaining("Unsafe PI WEB plugin browser root"),
       expect.stringContaining("browser root not found for absent-root"),
@@ -435,6 +511,7 @@ describe("PiWebPluginCatalog", () => {
   });
 
   it("ignores excluded package metadata while bounding the serveable artifact", async () => {
+    const warnings: string[] = [];
     const pluginRoot = join(tempDir, "plugins", "bounded");
     await writePlugin(pluginRoot, {
       packageJson: { piWeb: { plugins: [{ id: "bounded", browserRoot: ".", module: "browser.js" }] } },
@@ -443,6 +520,7 @@ describe("PiWebPluginCatalog", () => {
     const catalog = new PiWebPluginCatalog({
       roots: [{ path: join(tempDir, "plugins"), source: "fixture", scope: "local" }],
       packageProvider: false,
+      warningSink: (message) => { warnings.push(message); },
     });
     const firstRevision = (await catalog.snapshot()).plugins[0]?.browserModule?.revision;
 
@@ -457,6 +535,9 @@ describe("PiWebPluginCatalog", () => {
     expect(oversized.diagnostics).toHaveLength(1);
     expect(oversized.diagnostics[0]?.code).toBe("invalid-package");
     expect(oversized.diagnostics[0]?.message).toContain("byte artifact limit");
+    expect(warnings).toEqual([
+      `Skipping PI WEB plugin from ${pluginRoot}: PI WEB plugin package exceeds the 16777216 byte artifact limit`,
+    ]);
   });
 
   it("fingerprints server settings canonically without exposing their values", async () => {
@@ -554,7 +635,7 @@ describe("PiWebPluginCatalog", () => {
     expect(snapshot.plugins.map((plugin) => plugin.id)).toEqual(["valid"]);
     expect(snapshot.diagnostics).toHaveLength(4);
     expect(snapshot.diagnostics.map((diagnostic) => diagnostic.message)).toEqual(expect.arrayContaining([
-      expect.stringContaining("must declare module or serverModule"),
+      expect.stringContaining("must declare module, serverModule, or themes"),
       expect.stringContaining("server module not found for missing"),
       expect.stringContaining("Unsafe PI WEB plugin server module path for unsafe"),
       expect.stringContaining("must be machine-specific"),
@@ -569,6 +650,8 @@ describe("PiWebPluginCatalog", () => {
       { directory: "reserved-core", id: "core" },
       { directory: "reserved-themes", id: "themes" },
       { directory: "reserved-machine", id: "machine.remote.tools" },
+      { directory: "reserved-pi-web", id: "pi-web" },
+      { directory: "reserved-pi-web-prefix", id: "pi-web.tools" },
     ];
     for (const { directory, id } of reservedPlugins) {
       await writePlugin(join(pluginsRoot, directory), {
@@ -577,25 +660,54 @@ describe("PiWebPluginCatalog", () => {
       });
     }
     await writePlugin(join(pluginsRoot, "valid"), {
-      packageJson: { piWeb: { plugins: [{ id: "valid", browserRoot: ".", module: "browser.js" }] } },
+      packageJson: { piWeb: { plugins: [{ id: "terminal", browserRoot: ".", module: "browser.js" }] } },
       files: { "browser.js": "export default {};" },
     });
     const catalog = new PiWebPluginCatalog({
       roots: [{ path: pluginsRoot, source: "fixture", scope: "local" }],
       packageProvider: false,
+      configProvider: () => ({ plugins: { terminal: { enabled: false } } }),
       warningSink: () => undefined,
     });
 
     const snapshot = await catalog.snapshot();
 
-    expect(snapshot.plugins.map((plugin) => plugin.id)).toEqual(["valid"]);
-    expect(snapshot.diagnostics).toHaveLength(3);
+    expect(snapshot.plugins).toMatchObject([{ id: "terminal", enabled: false, source: "fixture", scope: "local" }]);
+    await expect(catalog.browserPlugin("terminal")).resolves.toMatchObject({ id: "terminal", source: "fixture", scope: "local" });
+    expect(snapshot.diagnostics).toHaveLength(5);
     for (const { directory, id } of reservedPlugins) {
       const source = join(pluginsRoot, directory);
       const diagnostic = snapshot.diagnostics.find((candidate) => candidate.source === source);
-      expect(diagnostic?.code).toBe("invalid-package");
+      expect(diagnostic).toMatchObject({ code: "reserved-id", pluginId: id });
       expect(diagnostic?.message).toContain(`Reserved PI WEB plugin id in ${join(source, "package.json")}: ${id}`);
+      expect(diagnostic?.message).toContain("Choose a different id");
     }
+  });
+
+  it("rejects the bundled-only namespace from Pi packages with source-attributed diagnostics", async () => {
+    const packageRoot = join(tempDir, "package");
+    await writePlugin(packageRoot, {
+      packageJson: { piWeb: { plugins: [{ id: "pi-web.package-tools", serverModule: "server.js" }] } },
+      files: { "server.js": "export default {};" },
+    });
+    const catalog = new PiWebPluginCatalog({
+      roots: [],
+      packageProvider: {
+        listPackages: () => [{ source: "npm:@acme/package-tools", scope: "user", installedPath: packageRoot }],
+        getInstalledPath: () => undefined,
+      },
+      warningSink: () => undefined,
+    });
+
+    const snapshot = await catalog.snapshot();
+
+    expect(snapshot.plugins).toEqual([]);
+    expect(snapshot.diagnostics).toMatchObject([{
+      code: "reserved-id",
+      source: "npm:@acme/package-tools",
+      pluginId: "pi-web.package-tools",
+    }]);
+    expect(snapshot.diagnostics[0]?.message).toContain("Choose a different id");
   });
 
   it("uses one duplicate-id winner across browser and server capabilities", async () => {
@@ -631,6 +743,36 @@ describe("PiWebPluginCatalog", () => {
       pluginId: "duplicate",
     }]);
     await expect(catalog.browserPlugin("duplicate")).resolves.toBeUndefined();
+  });
+
+  it.each([undefined, false])("keeps bundled Terminal enabled regardless of metadata default %j and reports ignored disable config", async (defaultEnabled) => {
+    const bundledRoot = join(tempDir, "bundled");
+    await writePlugin(join(bundledRoot, "terminal"), {
+      packageJson: { piWeb: { plugins: [{ id: "pi-web.terminal", browserRoot: ".", module: "browser.js", serverModule: "server.js", machineSpecific: true, defaultEnabled }] } },
+      files: {
+        "browser.js": "export default {};",
+        "server.js": "export default {};",
+      },
+    });
+    const warningSink = vi.fn();
+    const catalog = new PiWebPluginCatalog({
+      roots: [{ path: bundledRoot, source: "bundled", scope: "bundled" }],
+      packageProvider: false,
+      configProvider: () => ({ plugins: { "pi-web.terminal": { enabled: false } } }),
+      warningSink,
+    });
+
+    const snapshot = await catalog.snapshot();
+
+    expect(snapshot.plugins).toMatchObject([{ id: "pi-web.terminal", enabled: true, source: "bundled", scope: "bundled" }]);
+    await expect(catalog.browserPlugin("pi-web.terminal")).resolves.toMatchObject({ id: "pi-web.terminal", source: "bundled", scope: "bundled" });
+    expect(snapshot.diagnostics).toHaveLength(1);
+    expect(snapshot.diagnostics[0]).toMatchObject({
+      code: "required-plugin-config",
+      pluginId: "pi-web.terminal",
+    });
+    expect(snapshot.diagnostics[0]?.message).toContain("ignored");
+    expect(warningSink).toHaveBeenCalledWith(expect.stringContaining("serverPlugins.safeStart=none"));
   });
 
   it("limits bundled-only discovery before consulting external package providers", async () => {
@@ -744,6 +886,31 @@ describe("PiWebPluginCatalog", () => {
     expect(snapshot.plugins).toEqual([]);
     expect(snapshot.diagnostics).toHaveLength(1);
     expect(snapshot.diagnostics[0]?.message).toContain("escapes its package");
+  });
+});
+
+describe("defaultPluginRoots", () => {
+  it("never scans pi-packages/, so Pi packages shipped there are never bundled/local discovery roots", () => {
+    const roots = defaultPluginRoots(tempDir);
+
+    expect(roots.some((root) => root.path.includes("pi-packages"))).toBe(false);
+  });
+
+  it("keeps a single bundled root at dist/pi-web-plugins, unaffected by Pi packages shipped alongside it", () => {
+    const roots = defaultPluginRoots(tempDir);
+
+    const bundled = roots.filter((root) => root.scope === "bundled");
+    expect(bundled).toHaveLength(1);
+    expect(bundled[0]?.source).toBe("bundled");
+    expect(bundled[0]?.path.endsWith(join("dist", "pi-web-plugins"))).toBe(true);
+  });
+
+  it("keeps a single data-directory local root, distinct from any Pi package install location", () => {
+    const roots = defaultPluginRoots(tempDir);
+
+    const local = roots.filter((root) => root.scope === "local" && root.source === "local");
+    expect(local).toHaveLength(1);
+    expect(local[0]?.path).toBe(join(piWebDataDir(), "plugins"));
   });
 });
 

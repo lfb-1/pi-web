@@ -1,15 +1,27 @@
+import { localization, LocalizationController } from "../localization/browser";
+import { machineMessages as messages } from "../machineMessages";
+import { stylesheetIntegrationCapability } from "../plugins/styles";
 import { LitElement, css, html, type PropertyValues } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import type { Machine, MachineHealth } from "../api";
 import type { MachineStatusSnapshot } from "../../../shared/machineStatus";
-import { actionMenuPanelStyle } from "./actionMenu";
-import { hasStatusUnread, renderActionActivityIndicator, statusActivityKind } from "./activityBadge";
+import { renderCopyIdAction } from "./copyIdAction";
+import { DetailCopyController } from "./detailCopy";
+import { createActionMenuController } from "./actionMenu";
+import { hasStatusUnread, renderActionActivityIndicator, statusActivityKind, statusWorkKind } from "./activityBadge";
 import type { KeyboardNavigableSection } from "./navigationFocus";
 import { activateSelectableRow, focusSelectedOrFirstSelectableRow, handleSelectableRowKeyboard } from "./selectableRow";
 import { listStyles } from "./shared";
+import { sidebarListStyles } from "./sidebarListStyles";
 
 @customElement("machine-list")
 export class MachineList extends LitElement implements KeyboardNavigableSection {
+  constructor() {
+    super();
+    stylesheetIntegrationCapability.createController(this);
+    new LocalizationController(this);
+  }
+
   @property({ attribute: false }) machines: Machine[] = [];
   @property({ attribute: false }) selected?: Machine;
   @property({ attribute: false }) statuses: Record<string, MachineHealth> = {};
@@ -18,27 +30,17 @@ export class MachineList extends LitElement implements KeyboardNavigableSection 
   @property({ type: Boolean, reflect: true }) collapsible = false;
   @property({ type: Boolean, reflect: true }) collapsed = false;
   @property({ attribute: false }) onSelect?: (machine: Machine) => void;
+  @property({ attribute: false }) onEdit?: (machine: Machine) => void;
   @property({ attribute: false }) onRemove?: (machine: Machine) => void | Promise<void>;
   @property({ attribute: false }) onToggleCollapsed?: () => void;
   @property({ attribute: false }) onFocusNextSection?: () => void | Promise<void>;
   @property({ attribute: false }) onCancelKeyboardNavigation?: () => void | Promise<void>;
+  private readonly detailCopy = new DetailCopyController(this);
   @state() private openMenuMachineId: string | undefined;
-  @state() private menuStyle = "";
-
-  private readonly onDocumentClick = (event: MouseEvent) => {
-    if (event.composedPath().includes(this)) return;
-    this.openMenuMachineId = undefined;
-  };
-
-  override connectedCallback(): void {
-    super.connectedCallback();
-    document.addEventListener("click", this.onDocumentClick);
-  }
-
-  override disconnectedCallback(): void {
-    document.removeEventListener("click", this.onDocumentClick);
-    super.disconnectedCallback();
-  }
+  readonly actionMenu = createActionMenuController(this, () => {
+    const row = [...this.renderRoot.querySelectorAll<HTMLElement>("[data-machine-id]")].find((item) => item.dataset["machineId"] === this.openMenuMachineId);
+    return row?.querySelector<HTMLElement>(".action-menu-toggle") ?? undefined;
+  }, () => { this.openMenuMachineId = undefined; });
 
   protected override updated(changed: PropertyValues<this>): void {
     if (changed.has("machines") && this.openMenuMachineId !== undefined && !this.machines.some((machine) => machine.id === this.openMenuMachineId)) this.openMenuMachineId = undefined;
@@ -53,7 +55,7 @@ export class MachineList extends LitElement implements KeyboardNavigableSection 
   override render() {
     return html`
       <section>
-        <h2>${this.renderHeading()}</h2>
+        <h2 class="ui-toolbar">${this.renderHeading()}</h2>
         ${this.collapsed ? null : html`
           <div class="list-body">
             ${this.machines.map((machine) => this.renderMachine(machine))}
@@ -65,21 +67,21 @@ export class MachineList extends LitElement implements KeyboardNavigableSection 
 
   private renderMachine(machine: Machine) {
     const status = this.statuses[machine.id]?.status ?? machine.status ?? "unknown";
-    const statusLabel = status === "online" ? "online" : status === "offline" ? "offline" : status === "error" ? "error" : "unknown";
-    const hasRemoveAction = canRemoveMachine(machine) && this.onRemove !== undefined;
+    const statusLabel = messages.t(status);
     return html`
       <div
-        class=${`action-row machine-row ${this.selected?.id === machine.id ? "selected" : ""} ${hasRemoveAction ? "" : "no-actions"}`}
+        class=${`action-row machine-row ${this.selected?.id === machine.id ? "selected" : ""} `}
         tabindex="0"
         title=${machine.baseUrl ?? machine.name}
+        data-machine-id=${machine.id}
         @click=${(event: MouseEvent) => { activateSelectableRow(event, () => this.onSelect?.(machine)); }}
         @keydown=${(event: KeyboardEvent) => { this.handleMachineKeydown(event, machine); }}
       >
         <div class="action-main">
-          <span class="action-name machine-primary"><span class="machine-primary-label">${machine.name}</span></span><small>${machine.kind === "local" ? "Local Pi Web" : machine.baseUrl ?? "Remote Pi Web"} · ${statusLabel}</small>
+          <span class="action-name machine-primary"><span class="machine-primary-label"><bdi>${machine.name}</bdi></span></span><small>${messages.t("subtitle", { location: machine.kind === "local" ? messages.t("local") : machine.baseUrl ?? messages.t("remote"), status: statusLabel })}</small>
           ${this.renderActivity(machine)}
         </div>
-        ${hasRemoveAction ? this.renderMachineMenu(machine) : null}
+        ${this.renderMachineMenu(machine)}
       </div>
     `;
   }
@@ -90,8 +92,9 @@ export class MachineList extends LitElement implements KeyboardNavigableSection 
     // Unread survives offline: an offline machine keeps its last-known unread
     // state (stale-but-present still counts), so only the work dot is gated.
     const kind = status === "offline" || status === "error" ? undefined : statusActivityKind(flags);
-    const unreadLabel = hasStatusUnread(flags) ? "Unread sessions on this machine" : undefined;
-    return renderActionActivityIndicator(kind, kind === "terminal" ? "Machine terminal active" : "Machine active", unreadLabel);
+    const unreadLabel = hasStatusUnread(flags) ? messages.t("unread") : undefined;
+    const workKind = kind === undefined ? undefined : statusWorkKind(flags);
+    return renderActionActivityIndicator(kind, workKind === "terminal" ? messages.t("terminal") : messages.t("active"), unreadLabel, workKind);
   }
 
   private renderMachineMenu(machine: Machine) {
@@ -100,16 +103,24 @@ export class MachineList extends LitElement implements KeyboardNavigableSection 
     return html`
       <div class="action-menu">
         <button
-          class="action-menu-toggle"
-          title="Machine actions"
-          aria-label=${`Actions for ${machine.name}`}
+          class="ui-button ui-button--icon action-menu-toggle ui-popup-trigger"
+          title=${messages.t("actions")}
+          aria-label=${messages.t("actionsFor", { name: machine.name })}
           aria-expanded=${String(open)}
           aria-controls=${menuId}
-          @click=${(event: MouseEvent) => { event.stopPropagation(); this.toggleMenu(machine.id, event.currentTarget); }}
+          @click=${(event: MouseEvent) => { event.stopPropagation(); this.toggleMenu(machine.id); }}
         >⋯</button>
         ${open ? html`
-          <div class="action-menu-panel machine-menu-panel" id=${menuId} style=${this.menuStyle} @click=${(event: MouseEvent) => { event.stopPropagation(); }}>
-            <button class="danger" title=${`Remove ${machine.name}`} @click=${() => { this.removeMachine(machine); }}>Remove</button>
+          <div popover="auto" class="action-menu-panel machine-menu-panel ui-menu ui-menu--grouped ui-popup-panel" data-ui-context="machine-actions" id=${menuId} @click=${(event: MouseEvent) => { event.stopPropagation(); }}>
+            ${canRemoveMachine(machine) && (this.onEdit !== undefined || this.onRemove !== undefined) ? html`
+              <div class="ui-menu-group" data-menu-group="actions">
+                ${this.onEdit === undefined ? null : html`<button class="ui-button ui-menu-item" @click=${() => { this.openMenuMachineId = undefined; this.onEdit?.(machine); }}>${messages.t("edit")}</button>`}
+                ${this.onRemove === undefined ? null : html`<button class="danger ui-button ui-menu-item" title=${messages.t("removeNamed", { name: machine.name })} @click=${() => { this.removeMachine(machine); }}>${messages.t("remove")}</button>`}
+              </div>
+            ` : null}
+            <div class="ui-menu-group" data-menu-group="details">
+              ${renderCopyIdAction("machine", machine.id, this.detailCopy)}
+            </div>
           </div>
         ` : null}
       </div>
@@ -117,18 +128,17 @@ export class MachineList extends LitElement implements KeyboardNavigableSection 
   }
 
   private renderHeading() {
-    if (!this.collapsible) return html`<span>Machines</span>`;
-    const selectedSummary = this.selected?.name ?? "No machine selected";
+    if (!this.collapsible) return html`<span>${messages.t("machines")}</span>`;
+    const selectedSummary = this.selected?.name ?? messages.t("noSelection");
     const selectedTitle = this.selected?.baseUrl ?? selectedSummary;
-    return html`<button class="section-toggle" aria-expanded=${String(!this.collapsed)} @click=${() => { this.onToggleCollapsed?.(); }}><span class="section-title"><span class="section-name">${this.collapsed ? "▸" : "▾"} Machines</span>${this.collapsed ? html`<small class="section-selected" title=${selectedTitle}>${selectedSummary}</small>` : null}</span><small class="section-count">${this.machines.length}</small></button>`;
+    return html`<button class="ui-button ui-toolbar-title section-toggle" aria-expanded=${String(!this.collapsed)} @click=${() => { this.onToggleCollapsed?.(); }}><span class="section-title"><span class="section-name">${this.collapsed ? "▸" : "▾"} ${messages.t("machines")}</span>${this.collapsed ? html`<small class="section-selected" title=${selectedTitle}>${selectedSummary}</small>` : null}</span><small class="section-count">${localization.number(this.machines.length)}</small></button>`;
   }
 
-  private toggleMenu(machineId: string, target: EventTarget | null): void {
+  private toggleMenu(machineId: string): void {
     if (this.openMenuMachineId === machineId) {
       this.openMenuMachineId = undefined;
       return;
     }
-    this.menuStyle = actionMenuPanelStyle(target, { constrainTo: "viewport" });
     this.openMenuMachineId = machineId;
   }
 
@@ -153,12 +163,10 @@ export class MachineList extends LitElement implements KeyboardNavigableSection 
 
   static override styles = [
     listStyles,
+    sidebarListStyles,
     css`
-      .machine-row.no-actions .action-main { border-radius: 8px; }
       .machine-primary { display: flex; align-items: baseline; gap: 6px; }
       .machine-primary-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-      .machine-menu-panel button.danger { color: var(--pi-danger); }
-      .machine-menu-panel button.danger:hover, .machine-menu-panel button.danger:focus { background: color-mix(in srgb, var(--pi-danger) 14%, transparent); }
     `,
   ];
 }
@@ -168,5 +176,5 @@ export function canRemoveMachine(machine: Machine): boolean {
 }
 
 function machineMenuId(machineId: string): string {
-  return `machine-menu-${machineId.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+  return `machine-menu-${encodeURIComponent(machineId)}`;
 }

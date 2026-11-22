@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
-import { MachineService, type CreateMachineInput, type UpdateMachineInput } from "./machineService.js";
+import type { MachineService, CreateMachineInput, UpdateMachineInput } from "./machineService.js";
 
-export function registerMachineRoutes(app: FastifyInstance, machines = new MachineService()): void {
+export function registerMachineRoutes(app: FastifyInstance, machines: MachineService): void {
   app.get("/api/machines", async () => ({ machines: await machines.list() }));
 
   app.post<{ Body: CreateMachineInput }>("/api/machines", async (request, reply) => {

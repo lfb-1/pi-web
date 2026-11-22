@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { initialAppState } from "../appState";
 import { isCachedNewSessionInfo, loadCachedNewSessions, markCachedNewSessionInfo, rememberCachedNewSession } from "../cachedNewSessions";
 import { loadDraft, saveDraft } from "../promptDraftStorage";
+import { clearStagedAttachments, loadStagedAttachments, saveStagedAttachments, type PendingAttachment } from "../promptAttachmentStaging";
 import { SessionController } from "./sessionController";
 import { defaultApi, emptyPage, FakeSocket, MemoryStorage, oldSession, replacementSession, sessionKey, sessionLookupId, status, workspace, type AppState } from "./sessionController.testSupport";
 
@@ -51,6 +52,7 @@ describe("SessionController cached-new sessions", () => {
     const api: typeof defaultApi = {
       ...defaultApi,
       stop: (session) => { stoppedIds.push(sessionLookupId(session)); return Promise.resolve({ stopped: true }); },
+      transcriptSnapshot: (session) => Promise.resolve({ page: emptyPage, status: status(sessionLookupId(session)), seq: 0, partial: null }),
       messages: () => Promise.resolve(emptyPage),
       status: (session) => Promise.resolve(status(sessionLookupId(session))),
     };
@@ -62,6 +64,8 @@ describe("SessionController cached-new sessions", () => {
       { api, socket: new FakeSocket() },
     );
     saveDraft(sessionKey(transientSession.id), "discard me");
+    const discardedAttachment: PendingAttachment = { id: "attachment-1", kind: "file", name: "notes.txt", mimeType: "text/plain", data: "aGVsbG8=", size: 5 };
+    saveStagedAttachments(sessionKey(transientSession.id), [discardedAttachment]);
 
     await controller.deleteCachedNewSession(transientSession);
 
@@ -71,26 +75,33 @@ describe("SessionController cached-new sessions", () => {
     expect(state.sessionActivities[transientSession.id]).toBeUndefined();
     expect(state.sendingPrompts[transientSession.id]).toBeUndefined();
     expect(loadDraft(sessionKey(transientSession.id))).toBe("");
+    expect(loadStagedAttachments(sessionKey(transientSession.id))).toEqual([]);
     expect(state.selectedSession?.id).toBe(nextSession.id);
   });
 
-  it("recreates missing browser-cached new sessions and moves their draft", async () => {
+  it.each(["before response", "after response"] as const)("recreates missing browser-cached new sessions without duplicates and moves their draft (broadcast %s)", async (broadcastTiming) => {
     const storage = new MemoryStorage();
     Object.defineProperty(globalThis, "localStorage", { value: storage, configurable: true });
     rememberCachedNewSession(oldSession);
     saveDraft(sessionKey(oldSession.id), "draft text");
+    const carriedAttachment: PendingAttachment = { id: "attachment-1", kind: "file", name: "notes.txt", mimeType: "text/plain", data: "aGVsbG8=", size: 5 };
+    saveStagedAttachments(sessionKey(oldSession.id), [carriedAttachment]);
 
-    let state: AppState = { ...initialAppState(), selectedWorkspace: workspace, sessions: [markCachedNewSessionInfo(oldSession)] };
+    const unrelatedSession = { ...oldSession, id: "unrelated-session", path: "/tmp/unrelated-session.jsonl" };
+    let state: AppState = { ...initialAppState(), selectedWorkspace: workspace, sessions: [markCachedNewSessionInfo(oldSession), unrelatedSession] };
     const urlUpdates: ({ replace?: boolean | undefined } | undefined)[] = [];
     const socket = new FakeSocket();
     const api: typeof defaultApi = {
       ...defaultApi,
-      startSession: () => Promise.resolve(replacementSession),
-      messages: (session) => {
-        if (sessionLookupId(session) === oldSession.id) return Promise.reject(new Error("Session not found"));
-        return Promise.resolve(emptyPage);
+      startSession: () => {
+        if (broadcastTiming === "before response") controller.applyGlobalEvent({ type: "session.created", session: replacementSession });
+        return Promise.resolve(replacementSession);
       },
-      status: (session) => Promise.resolve(status(sessionLookupId(session))),
+      transcriptSnapshot: (session) => {
+        if (sessionLookupId(session) === oldSession.id) return Promise.reject(new Error("Session not found"));
+        return Promise.resolve({ page: emptyPage, status: status(sessionLookupId(session)), seq: 0, partial: null });
+      },
+      thinkingLevels: () => Promise.resolve({ levels: [] }),
     };
     const controller = new SessionController(
       () => state,
@@ -101,14 +112,107 @@ describe("SessionController cached-new sessions", () => {
     );
 
     await controller.selectSession(markCachedNewSessionInfo(oldSession), { updateUrl: false });
+    if (broadcastTiming === "after response") controller.applyGlobalEvent({ type: "session.created", session: replacementSession });
 
     expect(state.selectedSession?.id).toBe(replacementSession.id);
-    expect(state.sessions.map((session) => session.id)).toEqual([replacementSession.id]);
+    expect(state.sessions.map((session) => session.id)).toEqual([replacementSession.id, unrelatedSession.id]);
     expect(socket.connectedSessionIds).toEqual([oldSession.id, replacementSession.id]);
     expect(loadDraft(sessionKey(oldSession.id))).toBe("");
     expect(loadDraft(sessionKey(replacementSession.id))).toBe("draft text");
+    expect(loadStagedAttachments(sessionKey(oldSession.id))).toEqual([]);
+    expect(loadStagedAttachments(sessionKey(replacementSession.id))).toEqual([carriedAttachment]);
     expect(loadCachedNewSessions().map((session) => session.id)).toEqual([replacementSession.id]);
     expect(urlUpdates).toEqual([{ replace: true }]);
+
+    // `oldSession`/`replacementSession` are shared fixture ids reused by other
+    // tests in this file; the staged-attachment store is an in-memory module
+    // singleton (unlike localStorage-backed drafts, which each test resets by
+    // swapping in a fresh MemoryStorage), so clear explicitly to avoid leaking
+    // this attachment into a later test that reuses the same id.
+    clearStagedAttachments(sessionKey(replacementSession.id));
+  });
+
+  it.each([false, true])("reconciles rejected cached-session navigation without replacing newer selection (newer: %s)", async (selectNewer) => {
+    const storage = new MemoryStorage();
+    Object.defineProperty(globalThis, "localStorage", { value: storage, configurable: true });
+    rememberCachedNewSession(oldSession);
+    saveDraft(sessionKey(oldSession.id), "keep this draft");
+    const cachedSession = markCachedNewSessionInfo(oldSession);
+    const newerSession = { ...oldSession, id: "newer-session" };
+    let state: AppState = { ...initialAppState(), selectedWorkspace: workspace, sessions: [cachedSession, newerSession] };
+    const urlUpdates: unknown[] = [];
+    const socket = new FakeSocket();
+    const api: typeof defaultApi = {
+      ...defaultApi,
+      startSession: () => Promise.resolve(replacementSession),
+      transcriptSnapshot: (session) => sessionLookupId(session) === oldSession.id
+        ? Promise.reject(new Error("Session not found"))
+        : Promise.resolve({ page: emptyPage, status: status(sessionLookupId(session)), seq: 0, partial: null }),
+      status: (session) => Promise.resolve(status(sessionLookupId(session))),
+    };
+    const controller = new SessionController(
+      () => state,
+      (patch) => { state = { ...state, ...patch }; },
+      (options) => { urlUpdates.push(options); },
+      undefined,
+      {
+        api,
+        socket,
+        navigateToSession: async (session, options) => {
+          expect(session?.id).toBe(replacementSession.id);
+          expect(options?.expected?.sessionId).toBe(oldSession.id);
+          expect(state.selectedSession?.id).toBe(oldSession.id);
+          if (selectNewer) await controller.selectSession(newerSession, { updateUrl: false });
+          return false;
+        },
+      },
+    );
+
+    await controller.selectSession(cachedSession, { updateUrl: false });
+
+    expect(state.selectedSession?.id).toBe(selectNewer ? newerSession.id : undefined);
+    expect(state.sessions.map((session) => session.id)).toEqual([replacementSession.id, newerSession.id]);
+    expect(loadCachedNewSessions().map((session) => session.id)).toEqual([replacementSession.id]);
+    expect(loadDraft(sessionKey(oldSession.id))).toBe("");
+    expect(loadDraft(sessionKey(replacementSession.id))).toBe("keep this draft");
+    expect(urlUpdates).toEqual([]);
+    controller.dispose();
+  });
+
+  it("publishes a command-result replacement before selecting its session", async () => {
+    let state: AppState = {
+      ...initialAppState(),
+      selectedWorkspace: workspace,
+      selectedSession: oldSession,
+      sessions: [oldSession],
+    };
+    const selectedAtNavigation: string[] = [];
+    const api: typeof defaultApi = {
+      ...defaultApi,
+      runCommand: () => Promise.resolve({ type: "done", message: "Session forked", session: replacementSession, promptDraft: "fork me" }),
+    };
+    const controller = new SessionController(
+      () => state,
+      (patch) => { state = { ...state, ...patch }; },
+      () => undefined,
+      undefined,
+      {
+        api,
+        socket: new FakeSocket(),
+        navigateToSession: (session, options) => {
+          selectedAtNavigation.push(state.selectedSession?.id ?? "missing");
+          expect(options?.expected?.sessionId).toBe(oldSession.id);
+          state = { ...state, selectedSession: session };
+          return Promise.resolve(true);
+        },
+      },
+    );
+
+    await controller.send("/fork");
+
+    expect(selectedAtNavigation).toEqual([oldSession.id]);
+    expect(state.selectedSession?.id).toBe(replacementSession.id);
+    expect(state.sessions[0]?.id).toBe(replacementSession.id);
   });
 
   it("stores command prompt drafts for replacement sessions before selecting them", async () => {
@@ -126,6 +230,7 @@ describe("SessionController cached-new sessions", () => {
     const api: typeof defaultApi = {
       ...defaultApi,
       respondToCommand: () => Promise.resolve({ type: "done", message: "Session forked", session: replacementSession, promptDraft: "fork me" }),
+      transcriptSnapshot: (session) => Promise.resolve({ page: emptyPage, status: status(sessionLookupId(session)), seq: 0, partial: null }),
       messages: () => Promise.resolve(emptyPage),
       status: (session) => Promise.resolve(status(sessionLookupId(session))),
     };

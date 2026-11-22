@@ -1,14 +1,19 @@
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { ExtensionToolContext } from "../../piSdk.js";
 import { describe, expect, it, vi } from "vitest";
+import { Check } from "pi-web-typebox/value";
+import { KNOWN_THINKING_LEVELS } from "../../shared/thinkingLevels.js";
 import { createSpawnSessionToolDefinition } from "./spawnSessionTool.js";
+import { stubExtensionToolContext } from "./piSessionService.testSupport.js";
 
 const dispatchModel = { provider: "anthropic", id: "claude-sonnet" };
 
-function ctxFor(sessionId: string, model?: unknown, thinkingLevel?: string): ExtensionContext {
-  const sessionManager = { getSessionId: () => sessionId };
+function ctxFor(sessionId: string, model?: unknown, thinkingLevel?: string): ExtensionToolContext {
   // The spawn tool only reads sessionManager.getSessionId, model, and thinkingLevel.
-  // eslint-disable-next-line @typescript-eslint/consistent-type-assertions -- test stub with the minimal surface the tool reads.
-  return { sessionManager, ...(model === undefined ? {} : { model }), ...(thinkingLevel === undefined ? {} : { thinkingLevel }) } as unknown as ExtensionContext;
+  return stubExtensionToolContext({
+    sessionManager: { getSessionId: () => sessionId },
+    model,
+    thinkingLevel,
+  });
 }
 
 describe("createSpawnSessionToolDefinition", () => {
@@ -58,15 +63,52 @@ describe("createSpawnSessionToolDefinition", () => {
     expect(result.content[0]).toMatchObject({ type: "text", text: "Started independent session new-3 in /repos/a using model openai/gpt-5." });
   });
 
-  it("teaches the model parameter format and the #provider/model-id reference convention", () => {
+  it("restricts model overrides to instructions without priming a concrete model", () => {
     const tool = createSpawnSessionToolDefinition("/repos/a", { spawn: vi.fn() });
 
     expect(tool.parameters).toMatchObject({
       properties: {
         // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment -- stringMatching yields `any` against the loosely typed tool schema.
-        model: { description: expect.stringMatching(/provider\/model-id.*#provider\/model-id.*Omit to inherit/s) },
+        model: { description: expect.stringMatching(/provider\/model-id.*only when instructed.*specific model.*choose an appropriate one.*omit it to inherit.*unknown value is rejected/si) },
       },
     });
+    expect(JSON.stringify(tool.parameters)).not.toContain("anthropic/claude-sonnet-4-5");
+  });
+
+  it("serializes optional thinking levels as an explicitly typed string enum for providers", () => {
+    const tool = createSpawnSessionToolDefinition("/repos/a", { spawn: vi.fn() });
+    const schema: unknown = JSON.parse(JSON.stringify(tool.parameters));
+
+    expect(schema).toMatchObject({ properties: { thinkingLevel: {
+      type: "string",
+      enum: [...KNOWN_THINKING_LEVELS],
+    } } });
+    expect(schema).toHaveProperty("required", ["prompt"]);
+  });
+
+  it.each(KNOWN_THINKING_LEVELS)("overrides inherited thinking with %s without changing the parent", async (thinkingLevel) => {
+    const spawn = vi.fn(() => Promise.resolve({ sessionId: "new", cwd: "/repos/a" }));
+    const tool = createSpawnSessionToolDefinition("/repos/a", { spawn });
+    const ctx = ctxFor("parent", dispatchModel, "high");
+    const params = { prompt: "work", model: "openai/gpt-5", thinkingLevel };
+
+    expect(Check(tool.parameters, params)).toBe(true);
+    await tool.execute("call", params, undefined, undefined, ctx);
+
+    expect(spawn).toHaveBeenCalledWith(expect.objectContaining({ thinkingLevel, modelSpec: "openai/gpt-5" }));
+    expect(ctx.thinkingLevel).toBe("high");
+  });
+
+  it("makes thinking overrides instruction-only and rejects invalid levels in the tool schema", () => {
+    const tool = createSpawnSessionToolDefinition("/repos/a", { spawn: vi.fn() });
+    expect(tool.parameters).toMatchObject({ properties: { thinkingLevel: {
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment -- asymmetric matcher against the tool schema.
+      description: expect.stringMatching(/only when instructed.*specific thinking level.*choose an appropriate one.*omit it to inherit.*clamped/),
+    } } });
+    expect(Check(tool.parameters, { prompt: "work" })).toBe(true);
+    for (const thinkingLevel of ["unknown", "", null, 1]) {
+      expect(Check(tool.parameters, { prompt: "work", thinkingLevel })).toBe(false);
+    }
   });
 
   it("propagates the spawn callback error so the agent loop reports it", async () => {

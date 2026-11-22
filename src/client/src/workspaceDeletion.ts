@@ -1,23 +1,32 @@
+import { localization } from "./localization/browser";
+import definitions from "./workspaceRemoval.messages";
 import { workspaceDeleteOperation, workspaceDeleteOperationMetadataKey, targetWorkspaceIdMetadataKey } from "../../shared/workspaceDeletion";
 import type { AppState } from "./appState";
 import type { TerminalCommandRun, Workspace } from "./api";
 
-export { targetWorkspaceIdMetadataKey, workspaceDeleteOperation, workspaceDeleteOperationMetadataKey, workspaceDeletionMetadata } from "../../shared/workspaceDeletion";
+export { workspaceDeleteOperation, workspaceDeletionMetadata } from "../../shared/workspaceDeletion";
 
-/** Removal availability and wording come from the current owner, never Git fields. */
+const messages = localization.registerMessages("core.workspaceRemoval", definitions);
+
+/** Removal availability and wording come from the current owner, never inferred from Git fields. */
 export function canDeleteWorkspace(workspace: Workspace | undefined): boolean {
   return workspace?.removal !== undefined && !workspace.isMain;
 }
 
-export function workspaceRemovalConfirmation(workspace: Workspace): string | undefined {
-  return workspace.removal?.confirmation;
+export function workspaceRemovalActionLabel(workspace: Workspace): string | undefined {
+  return workspace.removal?.localization?.kind === "gitWorktree"
+    ? messages.t("gitAction") : workspace.removal?.actionLabel;
 }
 
-export function workspaceDeletionRunFilter(projectId?: string): { projectId?: string; metadata: Record<string, string> } {
-  return {
-    ...(projectId === undefined ? {} : { projectId }),
-    metadata: { [workspaceDeleteOperationMetadataKey]: workspaceDeleteOperation },
-  };
+export function workspaceRemovalConfirmation(workspace: Workspace): string | undefined {
+  const presentation = workspace.removal?.localization;
+  return presentation?.kind === "gitWorktree"
+    ? messages.t("gitConfirmation", { label: presentation.label, path: presentation.path, command: "git worktree remove" })
+    : workspace.removal?.confirmation;
+}
+
+export function workspaceDeletionRunFilter(): { metadata: Record<string, string> } {
+  return { metadata: { [workspaceDeleteOperationMetadataKey]: workspaceDeleteOperation } };
 }
 
 export function latestWorkspaceDeletionRuns(runs: TerminalCommandRun[]): Record<string, TerminalCommandRun> {

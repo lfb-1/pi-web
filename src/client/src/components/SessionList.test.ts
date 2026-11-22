@@ -1,22 +1,18 @@
-import type { TemplateResult } from "lit";
-import { describe, expect, it, vi } from "vitest";
-import { mainAgentSessions } from "../agentSessionGraph";
+// @vitest-environment happy-dom
+
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SessionInfo, SessionStatus } from "../api";
 import { markCachedNewSessionInfo } from "../cachedNewSessions";
 import { isArchivableSessionInfo, isTransientNewSessionInfo } from "../sessionPersistence";
-// Vitest runs in the node environment with no DOM, so menu/bulk-bar wiring is
-// verified through the shared TemplateResult inspection escape hatch: handler
-// lookups stay anchored to the buttons' own user-facing text.
-import {
-  findOptionalTemplateClickHandlerForText,
-  isTemplateEventHandler,
-  isTemplateResult,
-  templateClickHandlerForText,
-  templateStrings,
-  templateValues,
-  type TemplateEventHandler,
-} from "../templateInspection.testSupport";
+import { installPopoverFake } from "./anchoredPopup.testSupport";
+installPopoverFake();
 import { SessionList, sessionRowActivityKind, sessionRowsForCurrentTree, sessionRowUnread, unreadSessionCount } from "./SessionList";
+
+afterEach(() => {
+  document.body.replaceChildren();
+  localStorage.clear();
+  vi.restoreAllMocks();
+});
 
 describe("sessionRowActivityKind", () => {
   const idle = sessionStatus("s");
@@ -26,8 +22,40 @@ describe("sessionRowActivityKind", () => {
     expect(sessionRowActivityKind(session("s"), { ...idle, isStreaming: true }, undefined, true)).toBe("sending");
   });
 
+  it("restores persisted intervention, then honors a matching live false when work resumes", () => {
+    const waiting = session("s", { interventionRequired: true });
+    expect(sessionRowActivityKind(waiting, undefined, undefined, false)).toBe("intervention-required");
+    expect(sessionRowActivityKind(waiting, sessionStatus("other", { interventionRequired: false }), undefined, false)).toBe("intervention-required");
+    expect(sessionRowActivityKind(waiting, { ...idle, interventionRequired: false, isStreaming: true }, undefined, false)).toBe("session");
+    expect(sessionRowActivityKind(waiting, { ...idle, interventionRequired: false }, undefined, false, { s: { "core:intervention-required": true } })).toBe("intervention-required");
+  });
+
+  it("clears stale status and listing attention from a complete snapshot", () => {
+    const waiting = session("s", { interventionRequired: true });
+    const staleStatus = { ...idle, interventionRequired: true };
+    expect(sessionRowActivityKind(waiting, staleStatus, undefined, false, {})).toBeUndefined();
+    expect(sessionRowActivityKind(waiting, staleStatus, undefined, false, { s: { "core:working": true } })).toBe("session");
+    expect(sessionRowActivityKind(waiting, staleStatus, undefined, false, { s: { "core:intervention-required": false } })).toBeUndefined();
+  });
+
+  it("prioritizes live and machine intervention over working and sending", () => {
+    expect(sessionRowActivityKind(session("s"), { ...idle, interventionRequired: true }, undefined, true)).toBe("intervention-required");
+    expect(sessionRowActivityKind(session("s"), undefined, undefined, false, { s: { "core:intervention-required": true, "core:working": true } })).toBe("intervention-required");
+    expect(sessionRowActivityKind(session("s", { archived: true, interventionRequired: true }), undefined, undefined, false)).toBeUndefined();
+  });
+
   it("reports 'session' for server activity when not sending", () => {
     expect(sessionRowActivityKind(session("s"), { ...idle, isStreaming: true }, undefined, false)).toBe("session");
+  });
+
+  it("uses the complete daemon projection instead of stale chat status and activity", () => {
+    const staleStatus = { ...idle, isStreaming: true };
+    const staleActivity = { sessionId: "s", phase: "active" as const, label: "Working", at: "now" };
+    expect(sessionRowActivityKind(session("s"), staleStatus, staleActivity, false, {})).toBeUndefined();
+    expect(sessionRowActivityKind(session("s"), idle, undefined, false, { s: { "core:working": true } })).toBe("session");
+    expect(sessionRowActivityKind(session("s"), idle, undefined, true, {})).toBe("sending");
+    // Older daemons omit the projection and retain event-based compatibility.
+    expect(sessionRowActivityKind(session("s"), staleStatus, staleActivity, false, undefined)).toBe("session");
   });
 
   it("shows no active-work indicator for a session that is only starting up", () => {
@@ -45,6 +73,37 @@ describe("sessionRowActivityKind", () => {
   it("never shows an indicator for archived or cached-new sessions, even while sending", () => {
     expect(sessionRowActivityKind({ ...session("s"), archived: true }, idle, undefined, true)).toBeUndefined();
     expect(sessionRowActivityKind(markCachedNewSessionInfo(session("s")), idle, undefined, true)).toBeUndefined();
+  });
+});
+
+describe("intervention navigation", () => {
+  it("renders persisted attention and clears it on a working snapshot without changing unread", async () => {
+    const waiting = session("waiting", { persisted: true, interventionRequired: true });
+    const list = sessionList([waiting], new Set([waiting.id]));
+    document.body.append(list);
+    await list.updateComplete;
+    const row = list.shadowRoot?.querySelector<HTMLElement>(".action-row");
+    expect(row?.classList.contains("intervention-required")).toBe(true);
+    expect(row?.getAttribute("data-busy")).toBe("false");
+    expect(row?.querySelector(".session-meta")?.textContent).toContain("Needs input");
+    expect(row?.querySelector(".unread-ring .intervention-required")).not.toBeNull();
+
+    list.sessionFlags = { waiting: { "core:working": true, "core:intervention-required": true } };
+    await list.updateComplete;
+    expect(row?.getAttribute("data-busy")).toBe("true");
+    expect(row?.getAttribute("data-activity")).toBe("intervention-required");
+    await openSessionMenu(list, waiting.id);
+    const reload = [...list.shadowRoot?.querySelectorAll<HTMLButtonElement>(".action-menu-panel button") ?? []]
+      .find((button) => button.textContent === "Reload from disk");
+    expect(reload?.disabled).toBe(true);
+
+    list.statuses = { waiting: sessionStatus("waiting", { interventionRequired: false, isStreaming: true }) };
+    list.sessionFlags = { waiting: { "core:working": true } };
+    await list.updateComplete;
+    expect(row?.classList.contains("intervention-required")).toBe(false);
+    expect(row?.getAttribute("data-busy")).toBe("true");
+    expect(row?.querySelector(".session-meta")?.textContent).not.toContain("Needs input");
+    expect(row?.querySelector(".unread-ring .activity-indicator.session")).not.toBeNull();
   });
 });
 
@@ -100,71 +159,147 @@ describe("session action eligibility", () => {
 });
 
 describe("mark-as-read actions", () => {
-  it("offers Mark as read in the menu of an unread current session and forwards it", () => {
+  it("offers Mark as unread for a read current session without selecting it or mutating unread state", async () => {
+    const read = session("read");
+    const list = sessionList([read], new Set());
+    list.selected = read;
+    list.onMarkUnread = vi.fn();
+    list.onMarkRead = vi.fn();
+    list.onSelect = vi.fn();
+
+    await openSessionMenu(list, read.id);
+    const markUnread = list.shadowRoot?.querySelector<HTMLButtonElement>('button[title="Mark session as unread"]');
+    expect(markUnread?.textContent).toBe("Mark as unread");
+    expect(list.shadowRoot?.querySelector('button[title="Mark session as read"]')).toBeNull();
+    markUnread?.click();
+    await list.updateComplete;
+
+    expect(list.onMarkUnread).toHaveBeenCalledExactlyOnceWith(read);
+    expect(list.onMarkRead).not.toHaveBeenCalled();
+    expect(list.onSelect).not.toHaveBeenCalled();
+    expect(list.unreadSessionIds.size).toBe(0);
+    expect(list.shadowRoot?.querySelector(".action-menu-panel")).toBeNull();
+
+    list.unreadSessionIds = new Set([read.id]);
+    await openSessionMenu(list, read.id);
+    expect(list.shadowRoot?.querySelector('button[title="Mark session as unread"]')).toBeNull();
+    expect(list.shadowRoot?.querySelector('button[title="Mark session as read"]')).not.toBeNull();
+  });
+
+  it.each([
+    ["cached", markCachedNewSessionInfo(session("ineligible"))],
+    ["transient", session("ineligible", { persisted: false })],
+    ["archived", session("ineligible", { archived: true })],
+    ["agent child", session("ineligible", { parentSessionPath: "/sessions/missing.jsonl", agentSubsession: true })],
+  ])("does not offer Mark as unread for a read %s session", async (_kind, ineligible) => {
+    const list = sessionList([ineligible], new Set());
+    document.body.append(list);
+    await list.updateComplete;
+    if (ineligible.archived === true) {
+      list.shadowRoot?.querySelector<HTMLButtonElement>(".subheading .section-toggle")?.click();
+      await list.updateComplete;
+    }
+    await openSessionMenu(list, ineligible.id);
+    expect(list.shadowRoot?.querySelector('button[title="Mark session as unread"]')).toBeNull();
+  });
+
+  it("offers Mark as unread for an ordinary fork, not just root sessions", async () => {
+    const fork = session("fork", { parentSessionPath: "/sessions/missing.jsonl" });
+    const list = sessionList([fork], new Set());
+    await openSessionMenu(list, fork.id);
+    expect(list.shadowRoot?.querySelector('button[title="Mark session as unread"]')).not.toBeNull();
+  });
+
+  it("offers Mark as read in the menu of an unread current session and forwards it", async () => {
     const unread = session("unread");
     const list = sessionList([unread, session("read")], new Set([unread.id]));
     const onMarkRead = vi.fn<(session: SessionInfo) => void>();
     list.onMarkRead = onMarkRead;
 
-    openSessionMenu(list, unread.id);
-    templateClickHandlerForText(renderList(list), "Mark as read")(new Event("click"));
+    await openSessionMenu(list, unread.id);
+    const markRead = list.shadowRoot?.querySelector<HTMLButtonElement>('button[title="Mark session as read"]');
+    expect(markRead?.textContent).toBe("Mark as read");
+    // Fixed actions must escape the scroller's isolated paint context without
+    // leaving the component (document-click dismissal still belongs to it).
+    expect(markRead?.closest(".list-body")).toBeNull();
+    expect(markRead?.closest(".action-menu-panel")?.parentElement).toBe(list.shadowRoot?.querySelector("section"));
+    markRead?.click();
 
     expect(onMarkRead).toHaveBeenCalledWith(unread);
     expect(componentState(list, "openMenuSessionId")).toBeUndefined();
   });
 
-  it("hides Mark as read for read, transient, and archived sessions even when tracked as unread", () => {
+  it("retargets the floating menu to the clicked session and closes it when the session disappears", async () => {
+    const first = session("first");
+    const second = session("second");
+    const list = sessionList([first, second], new Set([first.id, second.id]));
+    const onMarkRead = vi.fn();
+    list.onMarkRead = onMarkRead;
+    await openSessionMenu(list, first.id);
+    await openSessionMenu(list, second.id);
+    expect(list.shadowRoot?.querySelectorAll(".action-menu-panel")).toHaveLength(1);
+    list.shadowRoot?.querySelector<HTMLButtonElement>('button[title="Mark session as read"]')?.click();
+    expect(onMarkRead).toHaveBeenCalledWith(second);
+    await list.updateComplete;
+    expect(list.shadowRoot?.querySelector(".action-menu-panel")).toBeNull();
+
+    await openSessionMenu(list, first.id);
+    list.sessions = [{ ...first, archived: true }, second];
+    await list.updateComplete;
+    expect(list.shadowRoot?.querySelector(".action-menu-panel")).toBeNull();
+    list.sessions = [second];
+    await list.updateComplete;
+    await list.updateComplete;
+    expect(list.shadowRoot?.querySelector(".action-menu-panel")).toBeNull();
+  });
+
+  it("hides Mark as read for read, transient, and archived sessions even when tracked as unread", async () => {
     const read = session("read");
     const cached = markCachedNewSessionInfo(session("cached"));
     const archived = { ...session("archived"), archived: true, archivedAt: "2026-06-09T00:00:00.000Z" };
     const list = sessionList([read, cached, archived], new Set([cached.id, archived.id]));
 
-    openSessionMenu(list, read.id);
-    expect(findOptionalTemplateClickHandlerForText(renderList(list), "Mark as read")).toBeUndefined();
+    await openSessionMenu(list, read.id);
+    expect(list.shadowRoot?.querySelector('button[title="Mark session as read"]')).toBeNull();
 
-    openSessionMenu(list, cached.id);
-    expect(findOptionalTemplateClickHandlerForText(renderList(list), "Mark as read")).toBeUndefined();
+    await openSessionMenu(list, cached.id);
+    expect(list.shadowRoot?.querySelector('button[title="Mark session as read"]')).toBeNull();
 
-    setComponentState(list, "archivedExpanded", true);
-    openSessionMenu(list, archived.id);
-    expect(findOptionalTemplateClickHandlerForText(renderList(list), "Mark as read")).toBeUndefined();
+    list.shadowRoot?.querySelector<HTMLButtonElement>(".subheading .section-toggle")?.click();
+    await list.updateComplete;
+    await openSessionMenu(list, archived.id);
+    expect(list.shadowRoot?.querySelector('button[title="Mark session as read"]')).toBeNull();
   });
 
-  it("enables bulk Mark read only when a selected session is unread and forwards only the unread selection", () => {
+  it("enables bulk Mark read only when a selected session is unread and forwards only the unread selection", async () => {
     const unreadA = session("unread-a");
     const readB = session("read-b");
     const unreadC = session("unread-c");
     const list = sessionList([unreadA, readB, unreadC], new Set([unreadA.id, unreadC.id]));
     const onMarkReadMany = vi.fn<(sessions: SessionInfo[]) => void>();
     list.onMarkReadMany = onMarkReadMany;
-    setComponentState(list, "selectionScopes", new Set(["current"]));
-
-    setComponentState(list, "selectedSessionIds", new Set([readB.id]));
-    const disabledButton = markReadButton(renderList(list));
-    expect(disabledButton.disabled).toBe(true);
-    disabledButton.click(new Event("click"));
+    document.body.append(list);
+    await list.updateComplete;
+    list.shadowRoot?.querySelector<HTMLButtonElement>(".bulk-select-entry")?.click();
+    await list.updateComplete;
+    const boxes = [...(list.shadowRoot?.querySelectorAll<HTMLInputElement>(".session-checkbox") ?? [])];
+    boxes[1]?.click();
+    await list.updateComplete;
+    const markRead = [...(list.shadowRoot?.querySelectorAll<HTMLButtonElement>(".bulk-actions button") ?? [])].find((button) => button.textContent === "Mark read");
+    expect(markRead?.disabled).toBe(true);
+    markRead?.click();
     expect(onMarkReadMany).not.toHaveBeenCalled();
 
-    setComponentState(list, "selectedSessionIds", new Set([unreadA.id, readB.id, unreadC.id]));
-    const enabledButton = markReadButton(renderList(list));
-    expect(enabledButton.disabled).toBe(false);
-    enabledButton.click(new Event("click"));
+    boxes[0]?.click();
+    boxes[2]?.click();
+    await list.updateComplete;
+    expect(markRead?.disabled).toBe(false);
+    markRead?.click();
     expect(onMarkReadMany).toHaveBeenCalledWith([unreadA, unreadC]);
   });
 });
 
 describe("sessionRowsForCurrentTree", () => {
-  it("nests forked main sessions while excluding their subagents", () => {
-    const main = session("main");
-    const fork = session("fork", { parentSessionPath: main.path, parentSessionRelation: "fork", name: "Main — Fork 1" });
-    const subagent = session("worker", { parentSessionPath: fork.path, parentSessionRelation: "subagent", name: "subagent-worker-11223344-1" });
-
-    expect(rowSummaries(sessionRowsForCurrentTree(mainAgentSessions([main, fork, subagent])))).toEqual([
-      { id: "main", depth: 0, hasMissingParent: false },
-      { id: "fork", depth: 1, hasMissingParent: false },
-    ]);
-  });
-
   it("keeps archived ancestors visible while they have unarchived descendants", () => {
     const parent = { ...session("parent"), archived: true, archivedAt: "2026-06-09T00:00:00.000Z" };
     const child = session("child", { parentSessionPath: parent.path });
@@ -205,6 +340,143 @@ describe("sessionRowsForCurrentTree", () => {
   });
 });
 
+it("orders archived rows by activity immediately after archiving while preserving parent-child nesting", async () => {
+  const old = session("old", { archived: true, modified: "2026-01-01T00:00:00.000Z", archivedAt: "2026-01-05T00:00:00.000Z" });
+  const newer = session("newer", { modified: "2026-01-03T00:00:00.000Z" });
+  const child = session("child", { archived: true, parentSessionPath: old.path, modified: "2026-01-04T00:00:00.000Z" });
+  const list = sessionList([newer, old, child], new Set());
+  document.body.append(list);
+  await list.updateComplete;
+  const root = list.shadowRoot;
+  if (root === null) throw new Error("Missing session list shadow root");
+  const toggle = [...root.querySelectorAll<HTMLButtonElement>(".section-toggle")].find((button) => button.textContent.includes("Archived"));
+  if (toggle === undefined) throw new Error("Missing archive toggle");
+  toggle.click();
+  await list.updateComplete;
+
+  // Optimistic archiving keeps the original array order until the next server refresh.
+  const archivedNewer = { ...newer, archived: true, archivedAt: "2026-01-05T00:00:00.000Z" };
+  list.sessions = [archivedNewer, old, child];
+  await list.updateComplete;
+  expect([...root.querySelectorAll<HTMLElement>(".action-row.archived")].map((row) => row.title)).toEqual([newer.path, old.path, child.path]);
+
+  // An old server/index order must not override activity ordering either.
+  list.sessions = [old, child, archivedNewer];
+  await list.updateComplete;
+  expect([...root.querySelectorAll<HTMLElement>(".action-row.archived")].map((row) => row.title)).toEqual([newer.path, old.path, child.path]);
+});
+
+describe("pinned session drag ordering", () => {
+  it("does not swallow a fresh click on an unpinned session after cancellation", async () => {
+    const recent = session("recent");
+    const list = sessionList([session("a"), session("b"), recent], new Set());
+    list.pinnedRootIds = ["a", "b"];
+    list.onReorderPin = vi.fn();
+    list.onSelect = vi.fn();
+    document.body.append(list);
+    await list.updateComplete;
+    stubSessionDragGeometry(list);
+    const row = sessionDragRow(list, "b");
+    sessionPointer(row, "pointerdown", 75);
+    sessionPointer(row, "pointermove", 10);
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    sessionPointer(document.body, "pointerup", 10);
+    const target = sessionDragRow(list, "recent");
+    sessionPointer(target, "pointerdown", 125);
+    sessionPointer(target, "pointerup", 125);
+    target.click();
+    expect(list.onReorderPin).not.toHaveBeenCalled();
+    expect(list.onSelect).toHaveBeenCalledExactlyOnceWith(recent);
+  });
+
+  it("reorders only pinned roots and carries their descendants with the acknowledged order", async () => {
+    const first = session("a");
+    const child = session("child", { parentSessionPath: first.path });
+    const second = session("b");
+    const recent = session("recent");
+    const orphan = session("orphan", { parentSessionPath: "/missing.jsonl" });
+    const archived = session("archived", { archived: true });
+    const list = sessionList([first, child, second, recent, orphan, archived], new Set());
+    list.pinnedRootIds = ["a", "b", "orphan", "archived"];
+    list.onReorderPin = vi.fn();
+    list.onSelect = vi.fn();
+    document.body.append(list);
+    await list.updateComplete;
+    const root = list.shadowRoot;
+    if (root === null) throw new Error("Missing session root");
+    expect([...root.querySelectorAll<HTMLElement>("[data-reorder-id]")].map((row) => row.dataset["reorderId"])).toEqual(["a", "b"]);
+    expect(sessionDragRow(list, "child").dataset["reorderGroupId"]).toBe("a");
+    stubSessionDragGeometry(list);
+    const row = sessionDragRow(list, "b");
+    sessionPointer(row, "pointerdown", 125);
+    // The target midpoint includes its child: y=40 is before the group,
+    // although it would be after the root row alone.
+    sessionPointer(row, "pointermove", 40);
+    await list.updateComplete;
+    sessionPointer(row, "pointerup", 40);
+    row.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(list.onReorderPin).toHaveBeenCalledExactlyOnceWith(second, first, "before");
+    expect(list.onSelect).not.toHaveBeenCalled();
+    list.pinnedRootIds = ["b", "a", "orphan", "archived"];
+    await list.updateComplete;
+    expect([...root.querySelectorAll<HTMLElement>("[data-session-id]")].map((item) => item.dataset["sessionId"])).toEqual(["b", "a", "child", "recent", "orphan"]);
+  });
+
+  it("cancels on scope and selection-mode changes, but not status-only session refreshes", async () => {
+    const list = sessionList([session("a"), session("b")], new Set());
+    list.pinnedRootIds = ["a", "b"];
+    list.onReorderPin = vi.fn();
+    document.body.append(list);
+    await list.updateComplete;
+    stubSessionDragGeometry(list);
+    const row = sessionDragRow(list, "b");
+    sessionPointer(row, "pointerdown", 75);
+    sessionPointer(row, "pointermove", 10);
+    list.sessions = list.sessions.map((item) => ({ ...item, messageCount: 2 }));
+    await list.updateComplete;
+    expect(list.shadowRoot?.querySelector(".list-drag-preview")).not.toBeNull();
+    list.workspaceId = "other-workspace";
+    await list.updateComplete;
+    expect(list.shadowRoot?.querySelector(".list-drag-preview")).toBeNull();
+    sessionPointer(row, "pointerup", 10);
+    expect(list.onReorderPin).not.toHaveBeenCalled();
+
+    sessionPointer(row, "pointerdown", 75);
+    sessionPointer(row, "pointermove", 10);
+    const selection = list.shadowRoot?.querySelector<HTMLButtonElement>(".bulk-select-entry");
+    if (!selection) throw new Error("Missing selection control");
+    selection.click();
+    await list.updateComplete;
+    expect(list.shadowRoot?.querySelector(".list-drag-preview")).toBeNull();
+    expect(list.shadowRoot?.querySelector("[data-reorder-id]")).toBeNull();
+    sessionPointer(row, "pointerup", 10);
+    expect(list.onReorderPin).not.toHaveBeenCalled();
+    selection.click();
+    list.onReorderPin = undefined;
+    await list.updateComplete;
+    expect(list.shadowRoot?.querySelector("[data-reorder-id]")).toBeNull();
+  });
+});
+
+function sessionDragRow(list: SessionList, id: string): HTMLElement {
+  const row = [...(list.shadowRoot?.querySelectorAll<HTMLElement>("[data-session-id]") ?? [])].find((item) => item.dataset["sessionId"] === id);
+  if (row === undefined) throw new Error(`Missing session ${id}`);
+  return row;
+}
+
+function stubSessionDragGeometry(list: SessionList): void {
+  const body = list.shadowRoot?.querySelector(".list-body");
+  if (body === null || body === undefined) throw new Error("Missing session scroll body");
+  vi.spyOn(body, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 200, 300));
+  list.shadowRoot?.querySelectorAll("[data-session-id]").forEach((row, index) => {
+    vi.spyOn(row, "getBoundingClientRect").mockReturnValue(new DOMRect(0, index * 50, 200, 50));
+  });
+}
+
+function sessionPointer(target: Element, type: string, clientY: number): void {
+  target.dispatchEvent(new PointerEvent(type, { pointerId: 1, pointerType: "mouse", isPrimary: true, button: 0, clientX: 40, clientY, bubbles: true, composed: true }));
+}
+
 function rowSummaries(rows: ReturnType<typeof sessionRowsForCurrentTree>) {
   return rows.map((row) => ({ id: row.session.id, depth: row.depth, hasMissingParent: row.hasMissingParent }));
 }
@@ -216,60 +488,19 @@ function sessionList(sessions: SessionInfo[], unreadSessionIds: ReadonlySet<stri
   return list;
 }
 
-function renderList(list: SessionList): TemplateResult {
-  return list.render();
-}
-
-function openSessionMenu(list: SessionList, sessionId: string): void {
-  setComponentState(list, "openMenuSessionId", sessionId);
+async function openSessionMenu(list: SessionList, sessionId: string): Promise<void> {
+  if (!list.isConnected) document.body.append(list);
+  await list.updateComplete;
+  const session = list.sessions.find((candidate) => candidate.id === sessionId);
+  const row = [...(list.shadowRoot?.querySelectorAll<HTMLElement>(".action-row") ?? [])].find((candidate) => candidate.title === session?.path);
+  const toggle = row?.querySelector<HTMLButtonElement>(".action-menu-toggle");
+  if (!toggle) throw new Error(`Missing session actions for ${sessionId}`);
+  toggle.click();
+  await list.updateComplete;
 }
 
 function componentState(list: SessionList, property: string): unknown {
   return Reflect.get(list, property);
-}
-
-function setComponentState(list: SessionList, property: string, value: unknown): void {
-  if (!Reflect.set(list, property, value)) throw new Error(`Could not set session list property ${property}`);
-}
-
-// Locates the bulk "Mark read" button inside the selection toolbar template,
-// anchored to the button's own static text so unrelated toolbar changes do not
-// break the lookup. The disabled binding sits immediately before its @click.
-function markReadButton(template: TemplateResult): { disabled: boolean; click: TemplateEventHandler } {
-  const host = findTemplateWithStaticText(template, ">Mark read</button>");
-  const strings = templateStrings(host);
-  const values = templateValues(host);
-  for (let index = 0; index < values.length; index += 1) {
-    if (strings[index + 1]?.includes(">Mark read</button>") !== true) continue;
-    const click = values[index];
-    const disabled = values[index - 1];
-    if (!isTemplateEventHandler(click) || typeof disabled !== "boolean") throw new Error("Mark read button wiring is unavailable");
-    return { disabled, click };
-  }
-  throw new Error("Expected a click handler before >Mark read</button>");
-}
-
-function findTemplateWithStaticText(value: unknown, text: string): TemplateResult {
-  const found = findOptionalTemplateWithStaticText(value, text);
-  if (found === undefined) throw new Error(`Expected template containing ${text}`);
-  return found;
-}
-
-function findOptionalTemplateWithStaticText(value: unknown, text: string): TemplateResult | undefined {
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      const found = findOptionalTemplateWithStaticText(item, text);
-      if (found !== undefined) return found;
-    }
-    return undefined;
-  }
-  if (!isTemplateResult(value)) return undefined;
-  if (templateStrings(value).some((chunk) => chunk.includes(text))) return value;
-  for (const item of templateValues(value)) {
-    const found = findOptionalTemplateWithStaticText(item, text);
-    if (found !== undefined) return found;
-  }
-  return undefined;
 }
 
 

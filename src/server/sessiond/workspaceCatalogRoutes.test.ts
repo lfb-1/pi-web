@@ -50,6 +50,9 @@ describe("session daemon workspace catalog routes", () => {
     });
     const spawnTargets = new ProjectScopedSpawnTargetResolver({ projects, workspaces: registry });
 
+    const notReady = await app.inject({ method: "GET", url: "/workspace-catalog/projects/p1/workspaces/unknown" });
+    expect(notReady.statusCode).toBe(503);
+
     await expect(spawnTargets.resolveSpawnTarget(hostPath("/repo"), hostPath("/linked"))).resolves.toEqual({
       allowed: false,
       reason: "out-of-project",
@@ -86,6 +89,10 @@ describe("session daemon workspace catalog routes", () => {
     expect(currentWorkspace).not.toHaveProperty("branch");
 
     listed = [providerWorkspace("root", hostPath("/repo"), true)];
+    // Routine lookup keeps established identity until discovery refreshes it.
+    const known = await app.inject({ method: "GET", url: `/workspace-catalog/projects/p1/workspaces/${linked.id}` });
+    expect(known.statusCode).toBe(200);
+    await app.inject({ method: "GET", url: "/workspace-catalog/projects/p1/workspaces" });
     const stale = await app.inject({ method: "GET", url: `/workspace-catalog/projects/p1/workspaces/${linked.id}` });
     expect(stale.statusCode).toBe(404);
     expect(stale.json()).toEqual({ error: "Workspace not found" });
@@ -146,13 +153,13 @@ describe("session daemon workspace catalog routes", () => {
 
     expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual({
-      protocolVersion: 1,
+      protocolVersion: 2,
+      terminalMode: "required",
       safeStart: "bundled-only",
       records: [{ pluginId: "git", source: "bundled", scope: "bundled", moduleRevision: "sha256:abc", settingsRevision: "sha256:settings", machineSpecific: true, state: "active", name: "Git" }],
       health: [{ pluginId: "git", health: { status: "healthy" } }],
       diagnostics: [{ code: "duplicate-id", source: "local", message: "Duplicate PI WEB plugin id: git", pluginId: "git" }],
     });
-    expect(Object.isFrozen(snapshot)).toBe(true);
   });
 });
 

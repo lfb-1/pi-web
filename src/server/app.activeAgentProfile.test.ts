@@ -81,6 +81,7 @@ describe("buildApp active profile composition", () => {
       config: configService,
       sessionDaemon: {
         request: () => Promise.reject(new Error("connect ECONNREFUSED")),
+        requestStream: () => Promise.reject(new Error("connect ECONNREFUSED")),
         connectWebSocket: () => { throw new Error("sessiond is offline"); },
       },
       clientDist: false,
@@ -106,9 +107,11 @@ describe("buildApp active profile composition", () => {
       const manifest = await app.inject({ method: "GET", url: "/pi-web-plugins/manifest.json" });
       expect(after.statusCode).toBe(200);
       expect(after.json<{ plugins: unknown[] }>().plugins).toEqual(expect.arrayContaining([expect.objectContaining({ id: "offline-browser", enabled: false })]));
-      const manifestBody = manifest.json<{ lifecycleVersion: number; plugins: { id: string }[] }>();
-      expect(manifestBody.lifecycleVersion).toBe(1);
-      expect(manifestBody.plugins.map(({ id }) => id)).not.toContain("offline-browser");
+      expect(manifest.statusCode).toBe(503);
+      expect(manifest.json()).toMatchObject({
+        error: "Required Terminal plugin runtime is unavailable",
+        code: "required-plugin-runtime-unavailable",
+      });
     } finally {
       await app.close();
     }
@@ -175,6 +178,7 @@ function configResponse(config: PiWebConfigResponse["config"]): PiWebConfigRespo
       port: false,
       allowedHosts: false,
       spawnSessions: false,
+      sessionMessages: false,
       subsessions: false,
       askUser: false,
     },
@@ -192,6 +196,7 @@ function emptyConfigService(): PiWebConfigService {
       port: false,
       allowedHosts: false,
       spawnSessions: false,
+      sessionMessages: false,
       subsessions: false,
       askUser: false,
     },

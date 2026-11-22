@@ -18,7 +18,10 @@
     />
     <meta property="og:url" content="https://pi-web.dev/faq" />
     <meta property="og:image" content="https://pi-web.dev/assets/pi-web-banner.png" />
-    <meta property="og:image:alt" content="PI WEB browser UI for persistent Pi Coding Agent sessions" />
+    <meta property="og:image:type" content="image/png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="PI WEB — A remote-first runtime for AI coding agents. Teal bar mark and uppercase wordmark on dark navy." />
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:title" content="PI WEB FAQ — Pi web UI troubleshooting" />
     <meta
@@ -26,6 +29,7 @@
       content="Fix common PI WEB install, service, PATH, remote access, and session issues."
     />
     <meta name="twitter:image" content="https://pi-web.dev/assets/pi-web-banner.png" />
+    <meta name="twitter:image:alt" content="PI WEB — A remote-first runtime for AI coding agents. Teal bar mark and uppercase wordmark on dark navy." />
     <link rel="icon" type="image/svg+xml" href="assets/favicon.svg" />
     <script>
       (() => {
@@ -41,46 +45,45 @@
     />
     <link rel="stylesheet" href="styles.css" />
   </head>
-  <body>
+  <body class="docs-page">
+    <a class="skip-link" href="#main">Skip to content</a>
     <header class="site-header">
       <nav class="container nav" aria-label="Main navigation">
         <a class="brand" href="./" aria-label="PI WEB home">PI WEB</a>
         <div class="nav-links">
           <div class="nav-pages">
-            <a href="remote-first">Remote-first</a>
-            <a href="machines">Fleet</a>
-            <a href="install">Install</a>
-            <a href="config">Config</a>
-            <a href="plugins">Plugins</a>
-            <a href="faq" aria-current="page">FAQ</a>
+            <a href="install">Docs</a>
+            <a href="community-plugins">Plugins</a>
+            <a href="https://github.com/jmfederico/pi-web">GitHub</a>
           </div>
           <div class="nav-actions">
-            <a class="github-link" href="https://github.com/jmfederico/pi-web" aria-label="PI WEB on GitHub">
-              <svg class="github-icon" viewBox="0 0 16 16" aria-hidden="true">
-                <path
-                  fill="currentColor"
-                  d="M8 0C3.58 0 0 3.67 0 8.2c0 3.63 2.29 6.7 5.47 7.79.4.08.55-.18.55-.4 0-.2-.01-.85-.01-1.55-2.01.38-2.53-.5-2.69-.96-.09-.24-.48-.96-.82-1.16-.28-.16-.68-.56-.01-.57.63-.01 1.08.59 1.23.84.72 1.24 1.87.89 2.33.68.07-.53.28-.89.51-1.09-1.78-.21-3.64-.91-3.64-4.04 0-.89.31-1.62.82-2.2-.08-.2-.36-1.03.08-2.16 0 0 .67-.22 2.2.84A7.4 7.4 0 0 1 8 3.94c.68 0 1.36.09 2 .28 1.53-1.06 2.2-.84 2.2-.84.44 1.13.16 1.96.08 2.16.51.58.82 1.31.82 2.2 0 3.14-1.87 3.83-3.65 4.04.29.26.54.76.54 1.53 0 1.1-.01 1.99-.01 2.27 0 .22.15.49.55.4A8.12 8.12 0 0 0 16 8.2C16 3.67 12.42 0 8 0Z"
-                />
-              </svg>
-              <span>GitHub</span>
-            </a>
-            <button class="theme-toggle" type="button" data-theme-toggle aria-label="Toggle light and dark theme">
+            <button class="theme-toggle" type="button" data-theme-toggle aria-label="Change theme">
               <span data-theme-icon aria-hidden="true">◐</span>
               <span data-theme-label>Theme</span>
             </button>
+            <a class="button primary nav-start" href="install">Get started <span aria-hidden="true">↗</span></a>
           </div>
         </div>
       </nav>
     </header>
+    <nav class="doc-nav" aria-label="Documentation">
+      <div class="container">
+        <a href="install">Install</a>
+        <a href="remote-first">Remote access</a>
+        <a href="machines">Machines</a>
+        <a href="config">Configuration</a>
+        <a href="plugins">Plugin guide</a>
+        <a href="faq" aria-current="page">FAQ</a>
+      </div>
+    </nav>
 
-    <main>
+    <main id="main">
       <section class="page-hero">
         <div class="container">
-          <p class="eyebrow"><span class="pulse"></span> FAQ & troubleshooting</p>
-          <h1>Fix the things that usually go wrong first.</h1>
+          <p class="overline">Help and troubleshooting</p>
+          <h1>FAQ</h1>
           <p>
-            Most PI WEB install issues are environment issues: native service manager availability, PATH setup, Node
-            version managers, or remote access expectations.
+            Find answers about setup, remote access, and everyday use. If something stops working, choose the symptom below for checks and recovery steps.
           </p>
         </div>
       </section>
@@ -103,8 +106,14 @@
             <a href="#laptop-or-server">Laptop or server?</a>
             <a href="#plugins">Can I use local plugins?</a>
             <a href="#worktree-list-out-of-date">A worktree I created is missing</a>
+            <a href="#navigation-order">How do I arrange navigation lists?</a>
+            <a href="#session-links">How do I link to a session?</a>
+            <a href="#session-notices">Where are persistent session warnings?</a>
+            <a href="#chat-images">How do chat images load?</a>
+            <a href="#chat-updates">Chat updates stopped</a>
             <a href="#sessions-stop">Sessions stop unexpectedly</a>
             <a href="#model-response-terminated">Model responses fail with 'terminated'</a>
+            <a href="#provider-extension-no-effect">My provider extension has no effect</a>
             <a href="#logs">Where are logs?</a>
           </aside>
 
@@ -125,9 +134,8 @@
             <article id="is-pi-web-a-web-ui" class="faq-item">
               <h2>Is PI WEB a Pi web UI?</h2>
               <p>
-                Yes. PI WEB is a web UI for Pi Coding Agent that runs and supervises persistent sessions from a browser.
-                Unlike simple session viewers, PI WEB is built around real server-side workspaces, long-running session
-                daemons, git worktrees, remote machines, terminals, files, and multi-device supervision.
+                Yes. Give agents tasks, review their work, and manage several conversations from your browser.
+                Your agents and files stay on the computer or server running PI WEB. You can switch devices without starting over.
               </p>
             </article>
 
@@ -161,18 +169,16 @@
             <article id="doctor-fails" class="faq-item">
               <h2>What does <code>pi-web doctor</code> check?</h2>
               <p>
-                It keeps two kinds of checks separate. General login-shell readiness covers Node 22.19.0 or newer, npm, Pi, and optional
-                ripgrep. Native-service diagnostics validate only the exact prerequisites of the selected service plan in
-                the real systemd user-manager or launchd <code>gui/&lt;uid&gt;</code> context. Development installs follow their
-                installed checkout plan; production checks are clearly labelled prospective when the installed executable
-                strategy cannot be reconstructed safely.
+                Doctor checks whether your login shell can find Node 22.19.0 or newer, npm, Pi, and optional ripgrep.
+                It also checks the tools needed by your services in their service-manager environment, which can differ
+                from your terminal. Follow its login-file guidance when tools are missing.
               </p>
               <p>
-                Missing plan requirements fail doctor and include login-file guidance. Manager, timeout, malformed-output,
-                and cleanup failures are reported as probe infrastructure problems rather than being mislabeled as PATH
-                drift. On unsupported/manual-only platforms, native-service drift checks are skipped. Doctor also checks
-                that the <code>node-pty</code> native module can load, prints installed and running PI WEB versions, and reports
-                systemd lingering when relevant.
+                It also checks terminal support (<code>node-pty</code>), reports installed and running PI WEB versions,
+                and checks Linux user-service lingering when relevant. Read skipped or prospective checks carefully:
+                manual-only platforms skip service-manager checks, and a prospective check is not confirmation that
+                your installed services work. If the service-manager check itself fails, resolve that error before
+                treating the result as a PATH problem.
               </p>
             </article>
 
@@ -264,9 +270,9 @@
               </p>
               <ul>
                 <li>Use NetBird, Tailscale, WireGuard, private LAN, SSH tunnel, or an authenticated reverse proxy.</li>
-                <li>Remote Pi auth, OAuth state, sessions, terminals, repositories, plugin settings, and server providers stay on the target machine.</li>
+                <li>Credentials, sessions, terminals, repositories, and plugin settings stay on the target machine.</li>
                 <li>API-key model-provider configuration and subscription (OAuth) login both work from the gateway; a subscription flow that asks for a code or redirect URL needs the full URL pasted back, because its redirect page belongs to the target machine.</li>
-                <li>Remote browser plugins are trusted page code; server entries are trusted in-process target code. Compatible contributions follow the selected machine.</li>
+                <li>Plugins follow the selected machine. Only enable plugins you trust: they can run code in your browser or on the target machine. See <a href="plugins#remote-machines">remote-machine plugins</a>.</li>
                 <li>If the remote reports offline, check that the gateway server can reach the remote URL and try <strong>Actions → Refresh Selected Machine</strong>.</li>
               </ul>
               <p><a href="machines">Read the fleet guide →</a></p>
@@ -307,10 +313,13 @@
                 Yes. Put trusted plugin packages in <code>~/.pi-web/plugins/&lt;plugin-id&gt;/</code>, or symlink a
                 development folder there. If <code>PI_WEB_DATA_DIR</code> is set, use
                 <code>$PI_WEB_DATA_DIR/plugins</code> instead. Browser-only edits need a tab reload. A server-backed edit
-                requires a manual restart of <code>pi-web-sessiond.service</code> followed by the reload; restarting
-                sessiond may interrupt active sessions/runtime ownership.
+                requires a session-daemon restart followed by the reload, which can interrupt active sessions.
               </p>
-              <p><a href="plugins">Read the plugin guide →</a></p>
+              <p>
+                See <a href="plugins#install-and-manage">installing and managing plugins</a> for setup and restart steps.
+                If a plugin prevents PI WEB from starting, use the
+                <a href="plugins#trust-and-recovery">offline disable and safe-start commands</a>.
+              </p>
             </article>
 
             <article id="worktree-list-out-of-date" class="faq-item">
@@ -332,11 +341,83 @@
               </p>
             </article>
 
+            <article id="navigation-order" class="faq-item">
+              <h2>How do I arrange projects, workspaces, and sessions?</h2>
+              <p>
+                Drag a project or workspace row to reorder it. On touch screens, press and hold the row before
+                dragging; swipe normally to scroll. The insertion line shows where the row will land. Press
+                <kbd>Escape</kbd> or release outside the list to cancel. You can also use the row’s
+                <strong>⋯</strong> menu and choose <strong>Move up</strong> or <strong>Move down</strong>.
+                PI WEB saves the order on that machine, so it survives reloads and is available from other devices.
+                New items follow the saved items. To copy a project or workspace path, open its
+                <strong>⋯</strong> menu and use the copy button beside <strong>Path</strong>.
+              </p>
+              <p>
+                For sessions, choose <strong>Pin session</strong> on a top-level parent. Its entire tree appears
+                under <strong>Pinned</strong>, while other trees retain their normal recent-first order. Drag a
+                pinned parent to move its whole tree, or use <strong>Move up</strong> and <strong>Move down</strong>
+                in its menu. Choose <strong>Unpin session</strong> to return a tree to the recent list.
+                Nested sessions cannot be pinned
+                independently; archived sessions remain in the archive.
+              </p>
+            </article>
+
+            <article id="session-links" class="faq-item">
+              <h2>How do I link to a session?</h2>
+              <p>
+                Add <code>?session=&lt;session ID&gt;</code> to your PI WEB address. Pi gives agent shell commands
+                their own ID as <code>PI_SESSION_ID</code>, so you can ask an agent to include
+                <code>https://pi.example.com/?session=${PI_SESSION_ID}</code> in an email or notification.
+              </p>
+              <p>
+                When the link opens, PI WEB finds the project and workspace that list the session and redirects to the
+                full session link. It checks this machine first, then connected machines; add
+                <code>&amp;machine=&lt;machine ID&gt;</code> to check only one. Only sessions you could open from a
+                workspace's session list are found; for others, the link reports that the session was not found.
+              </p>
+            </article>
+
+            <article id="session-notices" class="faq-item">
+              <h2>Where are persistent session warnings?</h2>
+              <p>Open <strong>Navigation → Notices</strong> for the selected session’s current conditions, such as skill diagnostics, extension load failures, or billing notices. Pin Notices to keep its count visible immediately after Chat, or first when Chat has no tab. Leave it unpinned to open it through Navigation instead.</p>
+              <p>Notices is available only while the selected session has warnings. When they clear, the destination disappears without forgetting its pin preference. An old link or browser-history entry then shows the normal unavailable-panel message.</p>
+              <p>Most conditions remain until their cause is resolved; a dismiss button appears only when the underlying warning supports suppression. Event notifications about work happening in the session remain in the chat, where they can be dismissed.</p>
+            </article>
+
+            <article id="chat-images" class="faq-item">
+              <h2>How do chat images load?</h2>
+              <p>
+                Images load as needed while you browse the conversation. Select an image to enlarge it.
+                Markdown images outside the workspace require <strong>Show image</strong> approval before loading.
+              </p>
+              <p>
+                This changes only what PI WEB sends to the browser; Pi's session files and model inputs stay unchanged.
+                Update and restart the session daemon on each selected machine to enable separate image delivery.
+                A daemon restart can interrupt active sessions, so wait for important work to finish first.
+              </p>
+            </article>
+
+            <article id="chat-updates" class="faq-item">
+              <h2>Chat updates stopped</h2>
+              <p>
+                The session keeps running when you leave the browser. When you return, PI WEB reconnects and checks
+                for new messages without clearing your draft or reading position. While the conversation is visible,
+                it also checks history every 30 seconds. Activity indicators and chat delivery are separate:
+                activity can continue while chat messages are delayed.
+              </p>
+              <p>
+                Routine checks are silent. If the chat may be out of date or could not refresh, a notice above the conversation offers
+                <strong>Refresh messages</strong>. The notice stays until the conversation recovers.
+                Refreshing reconnects the conversation; it does not restart the session or resend your prompt.
+              </p>
+            </article>
+
             <article id="sessions-stop" class="faq-item">
               <h2>Sessions stop unexpectedly</h2>
               <p>
-                Active agent runtimes are owned by the session daemon. Browser disconnects and web/API restarts should
-                not stop them. If they stop anyway, check whether the session daemon service restarted or crashed.
+                Sessions should keep running after browser disconnects and web/API restarts, as long as the host stays
+                awake and the session daemon keeps running. If work stops, check whether the host slept or rebooted,
+                or the session daemon restarted or crashed.
               </p>
               <div class="code-card">
                 <div class="copy-row">
@@ -351,17 +432,18 @@
             <article id="model-response-terminated" class="faq-item">
               <h2>Model responses fail with 'terminated' after about 5 minutes</h2>
               <p>
-                A session transcript line like <code>(SYSTEM) Model response failed: terminated</code> at roughly
+                On Node.js, a session transcript line like <code>(SYSTEM) Model response failed: terminated</code> at roughly
                 the five-minute mark means a model stream stayed idle longer than the HTTP idle timeout governed by
                 Pi's <code>httpIdleTimeoutMs</code> agent setting (five minutes by default). Slow backends such as a
                 local vLLM server that emits one large final chunk can exceed it.
               </p>
+              <p>Bun session daemons do not apply <code>httpIdleTimeoutMs</code>. Startup logs report this limitation; Bun's native timeout and proxy behavior remain unchanged. Use Node.js if you need this setting. The steps below apply to Node.js.</p>
               <p>
                 Raise or disable the timeout in the active agent profile's <code>settings.json</code>
                 (<code>~/.pi/agent/settings.json</code> by default); the
                 <a href="https://pi.dev/docs/latest/settings">Pi settings reference</a> documents the accepted
                 values. The session daemon applies the value once at daemon start, so restart the session daemon
-                afterwards.
+                afterwards. This can interrupt active sessions; wait for important work to finish first.
               </p>
               <div class="code-card">
                 <div class="copy-row">
@@ -374,11 +456,28 @@
               </div>
               <div class="code-card">
                 <div class="copy-row">
-                  <strong>Restart the session daemon</strong>
+                  <strong>Restart the session daemon (Linux systemd)</strong>
                   <button class="copy-button" data-copy="#http-idle-timeout-restart">Copy</button>
                 </div>
                 <pre id="http-idle-timeout-restart"><code><span class="prompt">$</span> systemctl --user restart pi-web-sessiond</code></pre>
               </div>
+            </article>
+
+            <article id="provider-extension-no-effect" class="faq-item">
+              <h2>My provider extension loads but has no effect</h2>
+              <p>
+                Look for <code>PROVIDER_MUTATION_IGNORED</code> in the <a href="#logs">session-daemon logs</a>;
+                each entry includes a reason and recovery guidance.
+              </p>
+              <p>
+                Global extensions must register providers in their factory before the daemon starts. After changing one,
+                manually restart the daemon; <code>/reload</code> is not enough. This interrupts active sessions and
+                terminals, so restart from outside hosted sessions after important work finishes.
+              </p>
+              <p>
+                Restarting does not enable project-only or <code>session_start</code>-only registrations.
+                See the <a href="config#pi-extension-provider-baseline">provider baseline rules</a>.
+              </p>
             </article>
 
             <article id="logs" class="faq-item">
@@ -399,15 +498,12 @@
 
     <footer class="site-footer">
       <div class="container footer-inner">
-        <span>PI WEB FAQ</span>
+        <div><a class="brand" href="./">PI WEB</a><p>A web interface for Pi Coding Agent.</p></div>
         <div class="footer-links">
-          <a href="./">Home</a>
-          <a href="remote-first">Remote-first</a>
-          <a href="machines">Fleet</a>
-          <a href="install">Install</a>
-          <a href="config">Config</a>
-          <a href="plugins">Plugins</a>
-          <a href="https://github.com/jmfederico/pi-web/issues">Issues</a>
+          <a href="install">Documentation</a>
+          <a href="community-plugins">Plugins</a>
+          <a href="faq">FAQ</a>
+          <a href="https://github.com/jmfederico/pi-web">GitHub</a>
           <span class="version-switcher" role="group" aria-label="Documentation version">
             <a class="version-switcher-option" data-version-option="stable" href="https://pi-web.dev/faq" aria-current="true">Stable</a>
             <a class="version-switcher-option" data-version-option="dev" href="https://pi-web.dev/dev/faq">Dev</a>

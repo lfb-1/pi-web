@@ -3,9 +3,12 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { VERSION as PI_CODING_AGENT_VERSION } from "../piSdk.js";
 import { comparePackageVersions, getPiWebRuntime, getPiWebStatus, getPiWebVersionStatus, updateCommandFor } from "./piWebStatus.js";
 import { SessionDaemonClient } from "../sessiond/sessionDaemonClient.js";
+import { piWebRuntimeIdentity } from "../shared/piWebRuntime.js";
 import type { PiWebRuntimeComponent } from "../shared/apiTypes.js";
+import { WEB_RUNTIME_CAPABILITIES } from "../shared/capabilities.js";
 
 const originalSkipVersionCheck = process.env["PI_WEB_SKIP_VERSION_CHECK"];
 const originalHome = process.env["HOME"];
@@ -15,6 +18,10 @@ const originalDockerMode = process.env["PI_WEB_DOCKER_MODE"];
 const originalDockerInstallDir = process.env["PI_WEB_DOCKER_INSTALL_DIR"];
 const originalDockerDevRepoRoot = process.env["PI_WEB_DOCKER_DEV_REPO_ROOT"];
 const originalAgentDir = process.env["PI_WEB_AGENT_DIR"];
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
 
 afterEach(() => {
   restoreEnv("PI_WEB_SKIP_VERSION_CHECK", originalSkipVersionCheck);
@@ -29,6 +36,23 @@ afterEach(() => {
 });
 
 describe("PI WEB status", () => {
+  it("reports each process's factual engine separately", async () => {
+    const daemon = daemonWithRuntime({ ...runningSessiondRuntime(), runtime: { name: "bun", version: "1.3.99" } });
+    const status = await getPiWebVersionStatus(daemon);
+    const runtime = await getPiWebRuntime(daemon);
+    expect(status.components.web.runtime).toEqual(piWebRuntimeIdentity());
+    expect(runtime.components.web.runtime).toEqual(piWebRuntimeIdentity());
+    expect(status.components.sessiond.runtime).toEqual({ name: "bun", version: "1.3.99" });
+    expect(runtime.components.sessiond.runtime).toEqual({ name: "bun", version: "1.3.99" });
+  });
+
+  it("does not attribute this process's engine to a legacy or unavailable daemon", async () => {
+    const legacy = await getPiWebVersionStatus(daemonWithRuntime(runningSessiondRuntime()));
+    expect(legacy.components.sessiond).not.toHaveProperty("runtime");
+    const unavailable = await getPiWebVersionStatus({ request: () => Promise.reject(new Error("offline")) });
+    expect(unavailable.components.sessiond).not.toHaveProperty("runtime");
+  });
+
   it("compares semver-shaped CalVer versions", () => {
     expect(comparePackageVersions("1.202605.9", "1.202605.8")).toBeGreaterThan(0);
     expect(comparePackageVersions("1.202605.8", "1.202605.8")).toBe(0);
@@ -44,6 +68,26 @@ describe("PI WEB status", () => {
     expect(status.components.web.component).toBe("web");
     expect(status.components.sessiond.runtimeVersion).toBe("1.202605.7");
     expect(status).not.toHaveProperty("release");
+  });
+
+  it("reports the loaded Pi version for each component, preferring the daemon report", async () => {
+    const daemon = daemonWithRuntime({ ...runningSessiondRuntime(), piVersion: "0.83.0" });
+
+    const status = await getPiWebVersionStatus(daemon);
+    const runtime = await getPiWebRuntime(daemon);
+
+    expect(status.components.web.piVersion).toBe(PI_CODING_AGENT_VERSION);
+    expect(status.components.sessiond.piVersion).toBe("0.83.0");
+    expect(runtime.components.web.piVersion).toBe(PI_CODING_AGENT_VERSION);
+    expect(runtime.components.sessiond.piVersion).toBe("0.83.0");
+  });
+
+  it("falls back to this process's Pi version when the daemon predates Pi version reporting", async () => {
+    const daemon = daemonWithRuntime(runningSessiondRuntime());
+
+    const status = await getPiWebVersionStatus(daemon);
+
+    expect(status.components.sessiond.piVersion).toBe(PI_CODING_AGENT_VERSION);
   });
 
   it("detects session daemon package installs from the configured agent dir for runtime responses", async () => {
@@ -62,6 +106,28 @@ describe("PI WEB status", () => {
       const status = await getPiWebVersionStatus(daemon, { activeAgentProfile: activeProfile(agentDir) });
 
       expect(status.components.sessiond.installation).toMatchObject({ kind: "pi-package", source: process.cwd(), scope: "user" });
+    } finally {
+      await rm(agentDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps a local checkout local when a configured Pi package is vendored inside it", async () => {
+    disableDockerRuntimeEnv();
+    const agentDir = await tempHome();
+    try {
+      await installConfiguredPiWebPackage(agentDir, join(process.cwd(), "dist", "pi-packages", "relays"));
+      const daemon = daemonWithRuntime({
+        component: "sessiond",
+        label: "Session daemon",
+        runtimeVersion: "1.202605.7",
+        available: true,
+        capabilities: [],
+      });
+
+      const status = await getPiWebVersionStatus(daemon, { activeAgentProfile: activeProfile(agentDir) });
+
+      expect(status.components.web.installation?.kind).not.toBe("pi-package");
+      expect(status.components.sessiond.installation?.kind).not.toBe("pi-package");
     } finally {
       await rm(agentDir, { recursive: true, force: true });
     }
@@ -95,7 +161,7 @@ describe("PI WEB status", () => {
 
     const runtime = await getPiWebRuntime(daemon);
 
-    expect(runtime.components.web.capabilities).toEqual(["plugins.lifecycle"]);
+    expect(runtime.components.web.capabilities).toEqual([...WEB_RUNTIME_CAPABILITIES]);
     expect(runtime.components.sessiond.capabilities).toEqual([]);
     expect(runtime.capabilities).toEqual(["plugins.lifecycle"]);
   });
@@ -168,7 +234,7 @@ describe("PI WEB status", () => {
     });
 
     expect(runtime.components.web.available).toBe(true);
-    expect(runtime.components.web.capabilities).toEqual(["plugins.lifecycle"]);
+    expect(runtime.components.web.capabilities).toEqual([...WEB_RUNTIME_CAPABILITIES]);
     expect(runtime.components.web.runtimeVersion).toBeDefined();
     expect(runtime.components.web).not.toHaveProperty("deprecatedAgentInputs");
     expect(runtime.components.web.error).toContain("Could not check for deprecated agent configuration inputs");
@@ -239,7 +305,9 @@ describe("PI WEB status", () => {
 
       expect(status.components.sessiond.available).toBe(false);
       expect(status.components.sessiond.error).toBe("runtime check returned HTTP 500");
-      expect(status.messages.map((message) => message.id)).toContain("sessiond-unavailable");
+      const notice = status.messages.find((message) => message.id === "sessiond-unavailable");
+      expect(notice).toMatchObject({ severity: "info", title: "Session daemon version unknown" });
+      expect(notice?.body).toContain("The last check could not determine the session daemon version.");
     } finally {
       await rm(home, { recursive: true, force: true });
     }
@@ -270,12 +338,11 @@ describe("PI WEB status", () => {
     }
   });
 
-  it("suppresses Pi package update planning without an active state profile", async () => {
+  it("suppresses Pi package update planning without an active state profile", () => {
     const hasCommand = vi.fn(() => Promise.resolve(true));
 
-    const updateCommand = await updateCommandFor(
+    const updateCommand = updateCommandFor(
       { kind: "pi-package", source: "npm:@jmfederico/pi-web", scope: "user", path: "/tmp/pi-web" },
-      "pi-web restart",
       { activeAgentProfile: undefined, hasCommand },
     );
 
@@ -283,46 +350,42 @@ describe("PI WEB status", () => {
     expect(hasCommand).not.toHaveBeenCalled();
   });
 
-  it("preserves and shell-quotes the active state profile in Pi-package update commands", async () => {
+  it("preserves and shell-quotes the active state profile in Pi-package update commands", () => {
     const dir = "/tmp/profile's/state";
-    const updateCommand = await updateCommandFor(
+    const updateCommand = updateCommandFor(
       { kind: "pi-package", source: "npm:@jmfederico/pi-web", scope: "user", path: "/tmp/pi-web" },
-      "pi-web restart",
       {
         activeAgentProfile: activeProfile(dir),
-        hasCommand: (candidate) => Promise.resolve(candidate === "pi"),
+        hasCommand: () => Promise.resolve(false),
       },
     );
 
-    expect(updateCommand).toBe("PI_CODING_AGENT_DIR='/tmp/profile'\\''s/state' pi update 'npm:@jmfederico/pi-web' && pi-web restart");
+    expect(updateCommand).toBe(`PI_CODING_AGENT_DIR=${shellQuote(dir)} ${shellQuote(process.execPath)} ${shellQuote(join("/tmp/pi-web", "dist", "cli.js"))} update`);
   });
 
-  it("scopes node-pty script approval in npm-global update commands", async () => {
-    const updateCommand = await updateCommandFor(
+  it("delegates npm-global updates to the interactive shared CLI", () => {
+    const updateCommand = updateCommandFor(
       { kind: "npm-global", path: "/opt/npm/@jmfederico/pi-web" },
-      "pi-web restart",
-      { activeAgentProfile: undefined, hasCommand: () => Promise.resolve(true) },
+      { activeAgentProfile: undefined, hasCommand: (candidate) => Promise.resolve(candidate === "pi-web") },
     );
 
-    expect(updateCommand).toBe("npm install -g @jmfederico/pi-web --allow-scripts=node-pty && pi-web restart");
+    expect(updateCommand).toBe(`${shellQuote(process.execPath)} ${shellQuote(join("/opt/npm/@jmfederico/pi-web", "dist", "cli.js"))} update`);
   });
 
-  it("suppresses npm-global update commands when npm is unavailable", async () => {
-    const updateCommand = await updateCommandFor(
+  it("targets the same npm installation even when pi-web is unavailable on PATH", () => {
+    const updateCommand = updateCommandFor(
       { kind: "npm-global", path: "/opt/npm/@jmfederico/pi-web" },
-      "pi-web restart",
       { activeAgentProfile: undefined, hasCommand: () => Promise.resolve(false) },
     );
 
-    expect(updateCommand).toBeUndefined();
+    expect(updateCommand).toBe(`${shellQuote(process.execPath)} ${shellQuote(join("/opt/npm/@jmfederico/pi-web", "dist", "cli.js"))} update`);
   });
 
-  it("suppresses Pi-package updates when the active state profile cannot be represented safely", async () => {
+  it("suppresses Pi-package updates when the active state profile cannot be represented safely", () => {
     const hasCommand = vi.fn(() => Promise.resolve(true));
 
-    const updateCommand = await updateCommandFor(
+    const updateCommand = updateCommandFor(
       { kind: "pi-package", source: "npm:@jmfederico/pi-web", scope: "user", path: "/tmp/pi-web" },
-      "pi-web restart",
       { activeAgentProfile: activeProfile("relative/state"), hasCommand },
     );
 
@@ -330,14 +393,27 @@ describe("PI WEB status", () => {
     expect(hasCommand).not.toHaveBeenCalled();
   });
 
-  it("suppresses Pi-package updates when the pi command is not on PATH", async () => {
-    const updateCommand = await updateCommandFor(
-      { kind: "pi-package", source: "npm:@jmfederico/pi-web", scope: "user", path: "/tmp/pi-web" },
-      "pi-web restart",
+  it("routes local checkouts to their CLI without PATH dependencies", () => {
+    const updateCommand = updateCommandFor(
+      { kind: "local", path: "/tmp/pi web's checkout" },
       { activeAgentProfile: activeProfile("/opt/pi/state"), hasCommand: () => Promise.resolve(false) },
     );
 
-    expect(updateCommand).toBeUndefined();
+    expect(updateCommand).toBe(`PI_CODING_AGENT_DIR=${shellQuote("/opt/pi/state")} ${shellQuote(process.execPath)} ${shellQuote(join("/tmp/pi web's checkout", "dist", "cli.js"))} update`);
+  });
+
+  it.each([undefined, "relative/pi-web"])("suppresses Pi-package commands without an absolute installation path: %s", (path) => {
+    expect(updateCommandFor(
+      { kind: "pi-package", ...(path === undefined ? {} : { path }) },
+      { activeAgentProfile: activeProfile("/opt/pi/state"), hasCommand: () => Promise.resolve(true) },
+    )).toBeUndefined();
+  });
+
+  it("preserves the active profile for npm-global updates too", () => {
+    expect(updateCommandFor(
+      { kind: "npm-global", path: "/opt/pi-web" },
+      { activeAgentProfile: activeProfile("/opt/pi/state"), hasCommand: () => Promise.resolve(true) },
+    )).toBe(`PI_CODING_AGENT_DIR=${shellQuote("/opt/pi/state")} ${shellQuote(process.execPath)} ${shellQuote(join("/opt/pi-web", "dist", "cli.js"))} update`);
   });
 
   it.skipIf(process.platform !== "linux")("suggests native systemd commands for local development services", async () => {
@@ -366,6 +442,34 @@ describe("PI WEB status", () => {
     }
   });
 
+  it("does not offer a broad CLI restart as a per-component command", async () => {
+    process.env["PI_WEB_SKIP_VERSION_CHECK"] = "1";
+    disableDockerRuntimeEnv();
+    const home = await tempHome();
+    const binDir = await tempHome();
+    try {
+      process.env["HOME"] = home;
+      await installExecutable(binDir, "pi-web");
+      const npm = join(binDir, "npm");
+      const packageRoot = fileURLToPath(new URL("../../", import.meta.url));
+      await writeFile(npm, `#!/bin/sh\nprintf '%s\\n' ${shellQuote(packageRoot)}\n`);
+      await chmod(npm, 0o755);
+      process.env["PATH"] = `${binDir}:${process.env["PATH"] ?? ""}`;
+
+      const status = await getPiWebStatus(daemonWithRuntime(runningSessiondRuntime()));
+
+      expect(status.components.web.installation?.kind).toBe("npm-global");
+      expect(status.commands.restart).toBe("pi-web restart");
+      expect(status.commands).not.toHaveProperty("restartWeb");
+      expect(status.commands).not.toHaveProperty("restartSessiond");
+    } finally {
+      await Promise.all([
+        rm(home, { recursive: true, force: true }),
+        rm(binDir, { recursive: true, force: true }),
+      ]);
+    }
+  });
+
   it("suggests Docker commands when running inside the Docker runtime", async () => {
     process.env["PI_WEB_SKIP_VERSION_CHECK"] = "1";
     process.env["PI_WEB_DOCKER_RUNTIME"] = "1";
@@ -378,7 +482,7 @@ describe("PI WEB status", () => {
 
     expect(status.components.web.installation).toEqual({ kind: "docker", path: "/srv/pi-web-docker", dockerMode: "runtime" });
     expect(status.commands).toEqual({
-      update: "pi-web-docker update",
+      update: `'${process.execPath}' '${fileURLToPath(new URL("../../dist/cli.js", import.meta.url))}' update`,
       restart: "pi-web-docker restart",
       restartWeb: "pi-web-docker restart-web",
       restartSessiond: "pi-web-docker restart-sessiond",
@@ -399,7 +503,7 @@ describe("PI WEB status", () => {
     const status = await getPiWebStatus(daemon);
 
     expect(status.commands).toEqual({
-      update: "pi-web-docker --dev update",
+      update: `'${process.execPath}' '${fileURLToPath(new URL("../../dist/cli.js", import.meta.url))}' update`,
       restart: "pi-web-docker --dev restart",
       restartWeb: "pi-web-docker --dev restart-web",
       restartSessiond: "pi-web-docker --dev restart-sessiond",
@@ -418,7 +522,7 @@ describe("PI WEB status", () => {
     const status = await getPiWebStatus(daemon);
 
     expect(status.components.web.installation).toEqual({ kind: "docker", path: "/workspace/pi-web", dockerMode: "dev" });
-    expect(status.commands.update).toBe("pi-web-docker --dev update");
+    expect(status.commands.update).toBe(`'${process.execPath}' '${fileURLToPath(new URL("../../dist/cli.js", import.meta.url))}' update`);
     expect(status.commands.status).toBe("pi-web-docker --dev status");
   });
 
@@ -495,8 +599,8 @@ async function installSystemdServiceFiles(home: string, names: string[]): Promis
   await Promise.all(names.map((name) => writeFile(join(dir, name), "")));
 }
 
-async function installConfiguredPiWebPackage(agentDir: string): Promise<void> {
-  await writeFile(join(agentDir, "settings.json"), `${JSON.stringify({ packages: [process.cwd()] }, null, 2)}\n`, "utf8");
+async function installConfiguredPiWebPackage(agentDir: string, packagePath: string = process.cwd()): Promise<void> {
+  await writeFile(join(agentDir, "settings.json"), `${JSON.stringify({ packages: [packagePath] }, null, 2)}\n`, "utf8");
 }
 
 async function installExecutable(dir: string, name: string): Promise<void> {

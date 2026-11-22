@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { createPiSessionManagerGateway } from "./piSessionManagerGateway.js";
-import { PiSessionService, type PiAgentSession, type PiSessionRuntime } from "./piSessionService.js";
+import { PiSessionService, type PiAgentSession, type PiSessionRuntime, type ResolvedSessionFile } from "./piSessionService.js";
 import { SessionNotificationStore } from "./sessionNotificationStore.js";
 import { CapturingSessionEventHub, emptyArchiveStore, fakeRuntime, fakeSessionManager, runtimeCreator, sessionGateway, sessionRecord, sessionRef, testModelRuntime, type RuntimeCreator, type SessionGateway } from "./piSessionService.testSupport.js";
 
@@ -160,7 +160,7 @@ describe("PiSessionService lifecycle, listing, and reload", () => {
 
     const messagesPromise = service.messages(sessionRef(sessionId));
     await createStarted.promise;
-    const statusPromise = service.status(sessionRef("single-flight"));
+    const statusPromise = service.status(sessionRef(sessionId));
     await new Promise<void>((resolve) => setImmediate(resolve));
     const callsWhileOpening = createCalls;
     releaseCreate.resolve();
@@ -183,13 +183,359 @@ describe("PiSessionService lifecycle, listing, and reload", () => {
     expect(loser.calls.dispose).toBe(0);
   });
 
+  it("rejects abbreviated ids after warming an active session without mutating its runtime", async () => {
+    const sessionId = "warmed-active-session";
+    const fake = fakeRuntime(sessionId, {
+      sessionManager: fakeSessionManager("/workspace", { getSessionId: () => sessionId }),
+    });
+    const service = new PiSessionService(new CapturingSessionEventHub(), {
+      agentDir: TEST_AGENT_DIR,
+      modelRuntime: testModelRuntime,
+      archiveStore: emptyArchiveStore(),
+      createAgentRuntime: runtimeCreator(fake.runtime),
+      sessionManager: sessionGateway([sessionRecord(sessionId)]),
+      heartbeatIntervalMs: 60_000,
+    });
+    try {
+      const exact = sessionRef(sessionId);
+      const abbreviated = sessionRef("warmed-active");
+      await expect(service.status(exact)).resolves.toMatchObject({ sessionId });
+      await expect(service.status(abbreviated)).rejects.toThrow("Session not found");
+      await expect(service.messages(abbreviated)).rejects.toThrow("Session not found");
+      await expect(service.prompt(abbreviated, "must not be delivered")).rejects.toThrow("Session not found");
+      await expect(service.archive(abbreviated)).rejects.toThrow("Session not found");
+      await expect(service.status(sessionRef(sessionId, "/other"))).rejects.toThrow("Session not found");
+      await service.abort(abbreviated);
+      await service.stop(abbreviated);
+      expect(fake.calls.prompt).toEqual([]);
+      expect(fake.calls.abort).toBe(0);
+      expect(fake.calls.dispose).toBe(0);
+      expect(service.activeCount()).toBe(1);
+      await expect(service.status(exact)).resolves.toMatchObject({ sessionId });
+    } finally {
+      await service.dispose();
+    }
+  });
+
+  it("reads externally appended transcript entries without replacing or aborting the idle runtime", async () => {
+    const sessionId = "externally-growing-session";
+    const staleBranch = [{ type: "message", message: { role: "user", content: "before" } }];
+    let diskBranch = [...staleBranch];
+    const runtimeManager = fakeSessionManager("/workspace", {
+      getSessionId: () => sessionId,
+      getSessionFile: () => `/sessions/${sessionId}.jsonl`,
+      getBranch: () => staleBranch,
+    });
+    const fake = fakeRuntime(sessionId, { sessionFile: `/sessions/${sessionId}.jsonl`, sessionManager: runtimeManager });
+    const open = vi.fn(() => fakeSessionManager("/workspace", {
+      getSessionId: () => sessionId,
+      getSessionFile: () => `/sessions/${sessionId}.jsonl`,
+      getBranch: () => diskBranch,
+    }));
+    const gateway: SessionGateway = {
+      create: () => fakeSessionManager(),
+      list: () => Promise.resolve([sessionRecord(sessionId)]),
+      listAll: () => Promise.resolve([sessionRecord(sessionId)]),
+      invalidateSessionFile: () => undefined,
+      resolveSessionFile: () => Promise.resolve({ id: sessionId, cwd: "/workspace", path: `/sessions/${sessionId}.jsonl` }),
+      readBranch: () => Promise.resolve(open().getBranch()),
+      open,
+    };
+    const service = new PiSessionService(new CapturingSessionEventHub(), {
+      agentDir: TEST_AGENT_DIR,
+      modelRuntime: testModelRuntime,
+      archiveStore: emptyArchiveStore(),
+      createAgentRuntime: runtimeCreator(fake.runtime),
+      sessionManager: gateway,
+      heartbeatIntervalMs: 60_000,
+    });
+
+    await expect(service.messages(sessionRef(sessionId))).resolves.toMatchObject({
+      messages: [{ role: "user", content: "before" }],
+      total: 1,
+    });
+    diskBranch = [
+      ...staleBranch,
+      { type: "message", message: { role: "assistant", content: "after" } },
+    ];
+
+    await expect(service.messages(sessionRef(sessionId))).resolves.toMatchObject({
+      messages: [{ role: "user", content: "before" }, { role: "assistant", content: "after" }],
+      total: 2,
+    });
+    expect(fake.calls.abort).toBe(0);
+    expect(fake.calls.dispose).toBe(0);
+    expect(service.activeCount()).toBe(1);
+
+    await service.dispose();
+  });
+
+  it("serves the live runtime branch when the known transcript file is absent on disk", async () => {
+    // A session created in memory and never persisted knows its future file
+    // path, but nothing exists on disk: messages/status must serve the runtime
+    // branch instead of failing on the missing disk snapshot.
+    const sessionId = "unpersisted-session";
+    const runtimeBranch = [{ type: "message", message: { role: "user", content: "in memory only" } }];
+    const fake = fakeRuntime(sessionId, {
+      sessionFile: `/sessions/${sessionId}.jsonl`,
+      sessionManager: fakeSessionManager("/workspace", {
+        getSessionId: () => sessionId,
+        getSessionFile: () => `/sessions/${sessionId}.jsonl`,
+        getBranch: () => runtimeBranch,
+      }),
+    });
+    const readBranch = vi.fn(() => Promise.resolve(undefined));
+    const gateway: SessionGateway = {
+      create: () => fakeSessionManager(),
+      list: () => Promise.resolve([sessionRecord(sessionId)]),
+      listAll: () => Promise.resolve([sessionRecord(sessionId)]),
+      invalidateSessionFile: () => undefined,
+      resolveSessionFile: () => Promise.resolve({ id: sessionId, cwd: "/workspace", path: `/sessions/${sessionId}.jsonl` }),
+      readBranch,
+      open: () => fake.session.sessionManager,
+    };
+    const service = new PiSessionService(new CapturingSessionEventHub(), {
+      agentDir: TEST_AGENT_DIR,
+      modelRuntime: testModelRuntime,
+      archiveStore: emptyArchiveStore(),
+      createAgentRuntime: runtimeCreator(fake.runtime),
+      sessionManager: gateway,
+      heartbeatIntervalMs: 60_000,
+    });
+
+    await expect(service.messages(sessionRef(sessionId))).resolves.toMatchObject({
+      messages: [{ role: "user", content: "in memory only" }],
+      total: 1,
+    });
+    await expect(service.status(sessionRef(sessionId))).resolves.toMatchObject({ sessionId, messageCount: 1 });
+    expect(readBranch).toHaveBeenCalled();
+    expect(fake.calls.abort).toBe(0);
+    expect(fake.calls.dispose).toBe(0);
+
+    await service.dispose();
+  });
+
+  it("resolves a file-less idle session's transcript file at most once per throttle window", async () => {
+    // A session created in memory and never persisted has no transcript file:
+    // each 5 s poll tick calls messages() and status(), and every call used to
+    // rescan the session directory. Resolution is throttled per runtime, so
+    // steady-state polling of a file-less session stays O(1).
+    const sessionId = "never-persisted-session";
+    const runtimeBranch = [{ type: "message", message: { role: "user", content: "in memory only" } }];
+    const fake = fakeRuntime(sessionId, {
+      sessionFile: undefined,
+      sessionManager: fakeSessionManager("/workspace", {
+        getSessionId: () => sessionId,
+        getSessionFile: () => undefined,
+        getBranch: () => runtimeBranch,
+      }),
+    });
+    const resolveSessionFile = vi.fn(() => Promise.resolve(undefined));
+    const readBranch = vi.fn(() => Promise.resolve(undefined));
+    const gateway: SessionGateway = {
+      create: () => fakeSessionManager(),
+      list: () => Promise.resolve([]),
+      listAll: () => Promise.resolve([]),
+      invalidateSessionFile: () => undefined,
+      resolveSessionFile,
+      readBranch,
+      open: () => fake.session.sessionManager,
+    };
+    let nowMs = 1_000_000;
+    const service = new PiSessionService(new CapturingSessionEventHub(), {
+      agentDir: TEST_AGENT_DIR,
+      modelRuntime: testModelRuntime,
+      archiveStore: emptyArchiveStore(),
+      createAgentRuntime: runtimeCreator(fake.runtime),
+      sessionManager: gateway,
+      heartbeatIntervalMs: 60_000,
+      now: () => new Date(nowMs),
+    });
+    // Activate the runtime the way a UI-created session is: in memory, never persisted.
+    await service.start("/workspace");
+
+    // Two poll ticks, each a messages() plus a status() call: one resolution total.
+    await expect(service.messages(sessionRef(sessionId))).resolves.toMatchObject({ total: 1 });
+    await expect(service.status(sessionRef(sessionId))).resolves.toMatchObject({ sessionId, messageCount: 1 });
+    await service.messages(sessionRef(sessionId));
+    await service.status(sessionRef(sessionId));
+    expect(resolveSessionFile).toHaveBeenCalledTimes(1);
+    expect(readBranch).not.toHaveBeenCalled();
+
+    nowMs += 30_000;
+    await service.messages(sessionRef(sessionId));
+    expect(resolveSessionFile).toHaveBeenCalledTimes(2);
+
+    await service.dispose();
+  });
+
+  it("notices a transcript file that appears after a throttled file-less resolution", async () => {
+    // The throttle must not become a permanent negative cache: once the
+    // window lapses, polling re-resolves and serves the new disk snapshot.
+    const sessionId = "late-persisted-session";
+    const runtimeBranch = [{ type: "message", message: { role: "user", content: "in memory only" } }];
+    const diskBranch = [{ type: "message", message: { role: "user", content: "now on disk" } }];
+    const fake = fakeRuntime(sessionId, {
+      sessionFile: undefined,
+      sessionManager: fakeSessionManager("/workspace", {
+        getSessionId: () => sessionId,
+        getSessionFile: () => undefined,
+        getBranch: () => runtimeBranch,
+      }),
+    });
+    let resolvedPath: string | undefined = undefined;
+    const resolveSessionFile = vi.fn(() => Promise.resolve(
+      resolvedPath === undefined ? undefined : { id: sessionId, cwd: "/workspace", path: resolvedPath },
+    ));
+    const readBranch = vi.fn(() => Promise.resolve(diskBranch));
+    const gateway: SessionGateway = {
+      create: () => fakeSessionManager(),
+      list: () => Promise.resolve([]),
+      listAll: () => Promise.resolve([]),
+      invalidateSessionFile: () => undefined,
+      resolveSessionFile,
+      readBranch,
+      open: () => fake.session.sessionManager,
+    };
+    let nowMs = 1_000_000;
+    const service = new PiSessionService(new CapturingSessionEventHub(), {
+      agentDir: TEST_AGENT_DIR,
+      modelRuntime: testModelRuntime,
+      archiveStore: emptyArchiveStore(),
+      createAgentRuntime: runtimeCreator(fake.runtime),
+      sessionManager: gateway,
+      heartbeatIntervalMs: 60_000,
+      now: () => new Date(nowMs),
+    });
+    await service.start("/workspace");
+
+    await expect(service.messages(sessionRef(sessionId))).resolves.toMatchObject({
+      messages: [{ role: "user", content: "in memory only" }],
+    });
+
+    // The file appears within the window: the throttled negative result still
+    // serves the runtime branch, and no new resolution runs.
+    resolvedPath = `/sessions/${sessionId}.jsonl`;
+    await expect(service.messages(sessionRef(sessionId))).resolves.toMatchObject({
+      messages: [{ role: "user", content: "in memory only" }],
+    });
+    expect(resolveSessionFile).toHaveBeenCalledTimes(1);
+    expect(readBranch).not.toHaveBeenCalled();
+
+    // After the window, polling re-resolves once and reads the disk snapshot;
+    // the positive resolution is throttled too, while reads stay live.
+    nowMs += 30_000;
+    await expect(service.messages(sessionRef(sessionId))).resolves.toMatchObject({
+      messages: [{ role: "user", content: "now on disk" }],
+    });
+    await service.messages(sessionRef(sessionId));
+    expect(resolveSessionFile).toHaveBeenCalledTimes(2);
+    expect(readBranch).toHaveBeenCalledTimes(2);
+    expect(readBranch).toHaveBeenCalledWith(resolvedPath);
+
+    await service.dispose();
+  });
+
+  it("keeps the live runtime authoritative when work starts during disk resolution", async () => {
+    const sessionId = "becomes-active-session";
+    let streaming = false;
+    let finishResolve: ((match: ResolvedSessionFile) => void) | undefined;
+    const resolved = new Promise<ResolvedSessionFile>((resolve) => { finishResolve = resolve; });
+    const runtimeBranch = [{ type: "message", message: { role: "user", content: "live runtime" } }];
+    const fake = fakeRuntime(sessionId, {
+      sessionFile: undefined,
+      sessionManager: fakeSessionManager("/workspace", {
+        getSessionId: () => sessionId,
+        getSessionFile: () => undefined,
+        getBranch: () => runtimeBranch,
+      }),
+    });
+    Object.defineProperty(fake.session, "isStreaming", { get: () => streaming });
+    const readBranch = vi.fn(() => Promise.resolve([{ type: "message", message: { role: "user", content: "external disk" } }]));
+    const gateway: SessionGateway = {
+      create: () => fakeSessionManager(),
+      list: () => Promise.resolve([sessionRecord(sessionId)]),
+      listAll: () => Promise.resolve([sessionRecord(sessionId)]),
+      invalidateSessionFile: () => undefined,
+      resolveSessionFile: () => resolved,
+      readBranch,
+      open: () => fake.session.sessionManager,
+    };
+    const service = new PiSessionService(new CapturingSessionEventHub(), {
+      agentDir: TEST_AGENT_DIR,
+      modelRuntime: testModelRuntime,
+      archiveStore: emptyArchiveStore(),
+      createAgentRuntime: runtimeCreator(fake.runtime),
+      sessionManager: gateway,
+      heartbeatIntervalMs: 60_000,
+    });
+
+    const messages = service.messages(sessionRef(sessionId));
+    await vi.waitFor(() => { expect(finishResolve).toBeTypeOf("function"); });
+    streaming = true;
+    finishResolve?.({ id: sessionId, cwd: "/workspace", path: `/sessions/${sessionId}.jsonl` });
+
+    await expect(messages).resolves.toMatchObject({
+      messages: [{ role: "user", content: "live runtime" }],
+      total: 1,
+    });
+    expect(readBranch).not.toHaveBeenCalled();
+    expect(fake.calls.abort).toBe(0);
+    expect(fake.calls.dispose).toBe(0);
+
+    await service.dispose();
+  });
+
+  it("keeps reading the live runtime while it reports active work", async () => {
+    const sessionId = "active-growing-session";
+    const runtimeBranch = [{ type: "message", message: { role: "user", content: "live runtime" } }];
+    const fake = fakeRuntime(sessionId, {
+      isStreaming: true,
+      sessionFile: `/sessions/${sessionId}.jsonl`,
+      sessionManager: fakeSessionManager("/workspace", {
+        getSessionId: () => sessionId,
+        getSessionFile: () => `/sessions/${sessionId}.jsonl`,
+        getBranch: () => runtimeBranch,
+      }),
+    });
+    const open = vi.fn(() => fakeSessionManager("/workspace", {
+      getSessionId: () => sessionId,
+      getBranch: () => [{ type: "message", message: { role: "user", content: "external disk" } }],
+    }));
+    const gateway: SessionGateway = {
+      create: () => fakeSessionManager(),
+      list: () => Promise.resolve([sessionRecord(sessionId)]),
+      listAll: () => Promise.resolve([sessionRecord(sessionId)]),
+      invalidateSessionFile: () => undefined,
+      resolveSessionFile: () => Promise.resolve({ id: sessionId, cwd: "/workspace", path: `/sessions/${sessionId}.jsonl` }),
+      readBranch: () => Promise.resolve(open().getBranch()),
+      open,
+    };
+    const service = new PiSessionService(new CapturingSessionEventHub(), {
+      agentDir: TEST_AGENT_DIR,
+      modelRuntime: testModelRuntime,
+      archiveStore: emptyArchiveStore(),
+      createAgentRuntime: runtimeCreator(fake.runtime),
+      sessionManager: gateway,
+      heartbeatIntervalMs: 60_000,
+    });
+
+    await expect(service.messages(sessionRef(sessionId))).resolves.toMatchObject({
+      messages: [{ role: "user", content: "live runtime" }],
+      total: 1,
+    });
+    expect(open).toHaveBeenCalledOnce();
+    expect(fake.calls.abort).toBe(0);
+    expect(fake.calls.dispose).toBe(0);
+
+    await service.dispose();
+  });
+
   /**
    * Opening one known session must not depend on — or wait behind — a listing of
    * its whole workspace: `getActive` routes prompt/shell/runCommand, so a
    * `list` call here would let an in-flight listing serialize unrelated sends.
    * The rejecting `list` fake fails loudly if that coupling ever comes back.
-   * Requested with an id prefix so the resolved full id, not the caller's
-   * prefix, is what the session is opened under.
    */
   it("opens an inactive session by direct id resolution without listing its workspace", async () => {
     const sessionId = "direct-resolve-session";
@@ -201,7 +547,7 @@ describe("PiSessionService lifecycle, listing, and reload", () => {
     });
     const list = vi.fn(() => Promise.reject(new Error("opening one session must not list its workspace")));
     const resolveSessionFile = vi.fn((refCwd: string, refId: string) => Promise.resolve(
-      sessionId.startsWith(refId) ? { id: sessionId, cwd: refCwd, path: `/sessions/${sessionId}.jsonl` } : undefined,
+      sessionId === refId ? { id: sessionId, cwd: refCwd, path: `/sessions/${sessionId}.jsonl` } : undefined,
     ));
     const open = vi.fn(() => fakeSessionManager());
     const gateway: SessionGateway = {
@@ -221,23 +567,22 @@ describe("PiSessionService lifecycle, listing, and reload", () => {
       heartbeatIntervalMs: 60_000,
     });
 
-    const page = await service.messages(sessionRef(sessionId.slice(0, 6)));
+    await expect(service.messages(sessionRef(sessionId.slice(0, 6)))).rejects.toThrow("Session not found");
+    expect(open).not.toHaveBeenCalled();
+    const page = await service.messages(sessionRef(sessionId));
 
     expect(page.messages).toEqual([{ role: "user", content: "resolved directly" }]);
-    expect(resolveSessionFile).toHaveBeenCalledWith("/workspace", sessionId.slice(0, 6));
+    expect(resolveSessionFile).toHaveBeenCalledWith("/workspace", sessionId);
     expect(open).toHaveBeenCalledWith(`/sessions/${sessionId}.jsonl`);
     expect(list).not.toHaveBeenCalled();
     await service.dispose();
   });
 
   /**
-   * Charter-level invariant: an id-prefix ref must never act on a different,
-   * prefix-extended session. This runs through the real gateway so the whole
-   * open path is covered — the service wiring and the resolver's
-   * exact-before-prefix precedence — rather than a fake that could agree with
-   * a broken rule. The exact session's file is the *older* one on purpose:
-   * every ambiguity tie-break the resolver has (creation-time order) points at
-   * the extended session, so only the exact-id rule can produce this outcome.
+   * A full id must never act on a different, prefix-extended session. This
+   * runs through the real gateway so service wiring and header equality are
+   * covered together. The exact session's file is the older one on purpose:
+   * only the exact-id rule can select it over the newer extended session.
    */
   it("opens the exact session for a full id even when a newer prefix-extended session exists", async () => {
     const sessionId = "abc123";
@@ -340,7 +685,7 @@ describe("PiSessionService lifecycle, listing, and reload", () => {
 
     const messagesPromise = service.messages(sessionRef(sessionId));
     await bindStarted.promise;
-    const statusPromise = service.status(sessionRef("retry-open"));
+    const statusPromise = service.status(sessionRef(sessionId));
     await new Promise<void>((resolve) => setImmediate(resolve));
     const callsWhileOpening = createCalls;
     const failedLookups = Promise.allSettled([messagesPromise, statusPromise]);
@@ -618,6 +963,7 @@ describe("PiSessionService lifecycle, listing, and reload", () => {
     await expect(service.runCommand(sessionRef("failed-runtime-reload"), "/reload")).resolves.toEqual({
       type: "unsupported",
       message: "Reload failed: reload failed after rotation",
+      presentation: { kind: "commandResult", feedback: { code: "reloadFailed", detail: "reload failed after rotation" } },
     });
     expect(service.notificationInbox(sessionRef("failed-runtime-reload")).notifications.map((notification) => notification.message)).toEqual([
       "candidate before failure",
@@ -652,6 +998,7 @@ describe("PiSessionService lifecycle, listing, and reload", () => {
     await expect(service.runCommand(sessionRef("failed-before-rotation"), "/reload")).resolves.toEqual({
       type: "unsupported",
       message: "Reload failed: reload failed before rotation",
+      presentation: { kind: "commandResult", feedback: { code: "reloadFailed", detail: "reload failed before rotation" } },
     });
     expect(service.notificationInbox(sessionRef("failed-before-rotation"))).toEqual(before);
 
@@ -835,6 +1182,38 @@ describe("PiSessionService lifecycle, listing, and reload", () => {
     await service.dispose();
   });
 
+  it("orders archives by activity using index metadata and legacy fallbacks without opening files", async () => {
+    const open = vi.fn(() => { throw new Error("listing must not open archived files"); });
+    const service = new PiSessionService(new CapturingSessionEventHub(), {
+      agentDir: TEST_AGENT_DIR,
+      modelRuntime: testModelRuntime,
+      archiveStore: {
+        list: () => Promise.resolve([
+          { sessionId: "old", cwd: "/workspace", archivedAt: "2026-01-05T00:00:00.000Z", originalPath: "/sessions/old.jsonl", archivePath: "/archive/old.jsonl", created: "2026-01-01T00:00:00.000Z", modified: "2026-01-01T00:00:00.000Z", messageCount: 2, firstMessage: "old" },
+          { sessionId: "new", cwd: "/workspace", archivedAt: "2026-01-03T00:00:00.000Z", originalPath: "/sessions/new.jsonl", archivePath: "/archive/new.jsonl", created: "2026-01-01T00:00:00.000Z", modified: "2026-01-03T00:00:00.000Z", messageCount: 2, firstMessage: "new" },
+          { sessionId: "legacy", cwd: "/workspace", archivedAt: "2026-01-04T00:00:00.000Z" },
+        ]),
+        get: () => Promise.resolve(undefined),
+        archive: () => { throw new Error("listing must not archive"); },
+        restore: () => Promise.resolve(),
+        isArchived: () => Promise.resolve(false),
+      },
+      sessionManager: {
+        ...sessionGateway([
+          sessionRecord("active"),
+          { ...sessionRecord("legacy"), modified: new Date("2026-01-02T00:00:00.000Z") },
+        ]),
+        open,
+      },
+      heartbeatIntervalMs: 60_000,
+    });
+
+    const sessions = await service.list("/workspace");
+    expect(sessions.map((session) => session.id)).toEqual(["active", "new", "legacy", "old"]);
+    expect(open).not.toHaveBeenCalled();
+    await service.dispose();
+  });
+
   it("lists archived records that have been moved out of the active session directory", async () => {
     const service = new PiSessionService(new CapturingSessionEventHub(), {
       agentDir: TEST_AGENT_DIR,
@@ -910,6 +1289,7 @@ describe("PiSessionService lifecycle, listing, and reload", () => {
     await expect(service.runCommand(sessionRef("runtime-reload-session"), "/reload")).resolves.toEqual({
       type: "done",
       message: "Session runtime resources reloaded. Extensions, skills, prompt templates, themes, and context/system prompt files are refreshed for this session. Reload the browser page separately for PI WEB browser plugin changes.",
+      presentation: { kind: "commandResult", feedback: { code: "reloaded" } },
     });
 
     expect(fake.calls.reload).toBe(1);
@@ -1096,7 +1476,7 @@ describe("PiSessionService lifecycle, listing, and reload", () => {
       modelRuntime: testModelRuntime,
       archiveStore: {
         list: () => Promise.resolve([]),
-        get: (sessionId) => Promise.resolve(sessionId === "archived" || "archived".startsWith(sessionId)
+        get: (sessionId) => Promise.resolve(sessionId === "archived"
           ? { sessionId: "archived", cwd: "/workspace", archivedAt: "2026-01-02T00:00:00.000Z", archivePath: "/archive/archived.jsonl" }
           : undefined),
         archive: () => Promise.resolve({ sessionId: "archived", cwd: "/workspace", archivedAt: "2026-01-02T00:00:00.000Z" }),
@@ -1133,6 +1513,7 @@ describe("PiSessionService lifecycle, listing, and reload", () => {
         open: () => fakeSessionManager(),
       },
       workspaceActivity: {
+        applySessionIntervention: () => undefined,
         applySessionStatus: () => undefined,
         applySessionActivity: () => undefined,
         removeSession: () => undefined,

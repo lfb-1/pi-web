@@ -1,13 +1,18 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
-import { ASK_USER_ID_MAX_LENGTH, ASK_USER_OPTION_LIMIT, ASK_USER_OTHER_TEXT_MAX_LENGTH, ASK_USER_QUESTION_LIMIT, EXTENSION_DIALOG_ID_MAX_LENGTH, EXTENSION_DIALOG_INPUT_MAX_LENGTH, SESSION_TREE_CUSTOM_INSTRUCTIONS_MAX_LENGTH, SESSION_UNREAD_CATALOG_ID_MAX_LENGTH, SESSION_UNREAD_CWD_MAX_LENGTH, SESSION_UNREAD_SESSION_ID_MAX_LENGTH, type AskUserAnswer, type AskUserSubmission, type ExtensionDialogAnswerRequest, type ExtensionDialogCancelRequest, type SessionBulkMutationRequest, type SessionBulkMutationRef, type SessionCleanupRequest, type SessionTreeForkRequest, type SessionTreeNavigateRequest, type SessionTreeSummaryChoice, type SessionUnreadAcknowledgeRequest } from "../../shared/apiTypes.js";
-import { projectBrowserMessageResponse } from "../browserMessageProjection.js";
+import { ASK_USER_COMMENT_MAX_LENGTH, ASK_USER_ID_MAX_LENGTH, ASK_USER_OPTION_LIMIT, ASK_USER_OTHER_TEXT_MAX_LENGTH, ASK_USER_QUESTION_LIMIT, EXTENSION_DIALOG_ID_MAX_LENGTH, EXTENSION_DIALOG_INPUT_MAX_LENGTH, SESSION_TREE_CUSTOM_INSTRUCTIONS_MAX_LENGTH, SESSION_UNREAD_CATALOG_ID_MAX_LENGTH, SESSION_UNREAD_CWD_MAX_LENGTH, SESSION_UNREAD_SESSION_ID_MAX_LENGTH, type AskUserAnswer, type AskUserSubmission, type ExtensionDialogAnswerRequest, type ExtensionDialogCancelRequest, type SessionBulkMutationRequest, type SessionBulkMutationRef, type SessionCleanupRequest, type SessionModelScopeMode, type SessionTreeForkRequest, type SessionTreeNavigateRequest, type SessionTreeSummaryChoice, type SessionUnreadAcknowledgeRequest } from "../../shared/apiTypes.js";
+import { parseSessionDefaultsUpdate } from "../../shared/sessionDefaults.js";
+import { projectBrowserMessageResponse, projectBrowserStreamSnapshot, projectBrowserTranscriptSnapshot, type BrowserImageProjector } from "../browserMessageProjection.js";
+import { isSessionMediaId, SESSION_MEDIA_MODE } from "../../shared/sessionMedia.js";
+import { isSessionImageMimeType } from "./sessionMediaIndex.js";
 import { normalizeRequestCwd } from "../workingDirectory.js";
 import type { SessionEventHub } from "../realtime/sessionEventHub.js";
+import { parseQueueMessageMutation } from "./queuedMessageMutation.js";
 import type { SessionRouteRef, SessionRouteService } from "./sessionService.js";
 import { normalizeSessionCleanupRequest } from "./sessionCleanup.js";
 
 interface SessionQuery {
   cwd?: string;
+  media?: string;
 }
 
 interface MessageQuery extends SessionQuery {
@@ -67,6 +72,23 @@ export function registerSessionRoutes(app: FastifyInstance, sessions: SessionRou
   app.get(`${prefix}/sessions/unread`, async (_request, reply) => {
     try {
       return await sessions.unreadCatalog();
+    } catch (error) {
+      return reply.code(503).send({ error: errorMessage(error) });
+    }
+  });
+
+  app.post<{ Params: { sessionId: string }; Body: Record<string, unknown> | undefined }>(`${prefix}/sessions/:sessionId/unread`, async (request, reply) => {
+    let sessionId: string;
+    let cwd: string;
+    try {
+      const body = requireRecord(request.body);
+      sessionId = requireNonEmptyBoundedString(request.params.sessionId, "sessionId", SESSION_UNREAD_SESSION_ID_MAX_LENGTH);
+      cwd = normalizeRequestCwd(requireNonEmptyBoundedString(body["cwd"], "cwd", SESSION_UNREAD_CWD_MAX_LENGTH));
+    } catch (error) {
+      return reply.code(400).send({ error: errorMessage(error) });
+    }
+    try {
+      return await sessions.markUnread(sessionId, cwd);
     } catch (error) {
       return reply.code(503).send({ error: errorMessage(error) });
     }
@@ -166,9 +188,29 @@ export function registerSessionRoutes(app: FastifyInstance, sessions: SessionRou
     try {
       const page = { ...optionalField("before", optionalNumber(request.query.before)), ...optionalField("limit", optionalNumber(request.query.limit)) };
       const messages = await sessions.messages(ref, page);
-      return projectBrowserMessageResponse(messages);
+      return projectBrowserMessageResponse(messages, imageProjector(request.query, eventHub, ref));
     } catch (error) {
       return reply.code(404).send({ error: errorMessage(error) });
+    }
+  });
+
+  app.get<{ Params: { sessionId: string; mediaId: string }; Querystring: SessionQuery }>(`${prefix}/sessions/:sessionId/media/:mediaId`, async (request, reply) => {
+    const ref = sessionRefFromQueryOr400(request.params.sessionId, request.query, reply);
+    if (ref === undefined) return reply;
+    if (!isSessionMediaId(request.params.mediaId)) return reply.code(400).send({ error: "Invalid media id" });
+    try {
+      const media = await sessions.media(ref, request.params.mediaId);
+      if (media === undefined) return await reply.code(404).send({ error: "Session media not found" });
+      if (!isSessionImageMimeType(media.mimeType)) throw new Error("Unsupported session image MIME type");
+      return await reply
+        .type(media.mimeType)
+        .header("Cache-Control", "private, max-age=31536000, immutable")
+        .header("Content-Length", media.data.byteLength)
+        .header("X-Content-Type-Options", "nosniff")
+        .send(media.data);
+    } catch (error) {
+      if (isSessionNotFoundError(error)) return reply.code(404).send({ error: errorMessage(error) });
+      throw error; // Fastify logs unexpected failures and returns 500, not a false miss.
     }
   });
 
@@ -182,11 +224,22 @@ export function registerSessionRoutes(app: FastifyInstance, sessions: SessionRou
     }
   });
 
+  app.get<{ Params: { sessionId: string }; Querystring: MessageQuery }>(`${prefix}/sessions/:sessionId/transcript-snapshot`, async (request, reply) => {
+    const ref = sessionRefFromQueryOr400(request.params.sessionId, request.query, reply);
+    if (ref === undefined) return reply;
+    try {
+      const snapshot = await sessions.transcriptSnapshot(ref, { ...optionalField("limit", optionalNumber(request.query.limit)) });
+      return projectBrowserTranscriptSnapshot(snapshot, imageProjector(request.query, eventHub, ref));
+    } catch (error) {
+      return reply.code(404).send({ error: errorMessage(error) });
+    }
+  });
+
   app.get<{ Params: { sessionId: string }; Querystring: SessionQuery }>(`${prefix}/sessions/:sessionId/stream-snapshot`, async (request, reply) => {
     const ref = sessionRefFromQueryOr400(request.params.sessionId, request.query, reply);
     if (ref === undefined) return reply;
     try {
-      return await sessions.streamSnapshot(ref);
+      return projectBrowserStreamSnapshot(await sessions.streamSnapshot(ref), imageProjector(request.query, eventHub, ref));
     } catch (error) {
       return reply.code(404).send({ error: errorMessage(error) });
     }
@@ -199,6 +252,36 @@ export function registerSessionRoutes(app: FastifyInstance, sessions: SessionRou
       return { models: await sessions.availableModels(ref) };
     } catch (error) {
       return reply.code(404).send({ error: errorMessage(error) });
+    }
+  });
+
+  app.get<{ Params: { sessionId: string }; Querystring: SessionQuery }>(`${prefix}/sessions/:sessionId/models/catalog`, async (request, reply) => {
+    const ref = sessionRefFromQueryOr400(request.params.sessionId, request.query, reply);
+    if (ref === undefined) return reply;
+    try {
+      return await sessions.modelCatalog(ref);
+    } catch (error) {
+      return reply.code(404).send({ error: errorMessage(error) });
+    }
+  });
+
+  app.post<{ Params: { sessionId: string }; Body: { cwd?: unknown; provider?: unknown; modelId?: unknown; enabled?: unknown } | undefined }>(`${prefix}/sessions/:sessionId/models/enabled`, async (request, reply) => {
+    try {
+      const body = optionalRecord(request.body);
+      return await sessions.setModelEnabled(sessionRefFromBody(request.params.sessionId, body), requireString(body, "provider"), requireString(body, "modelId"), requireBoolean(body, "enabled"));
+    } catch (error) {
+      return reply.code(mutationErrorStatus(error)).send({ error: errorMessage(error) });
+    }
+  });
+
+  app.post<{ Params: { sessionId: string }; Body: { cwd?: unknown; mode?: unknown } | undefined }>(`${prefix}/sessions/:sessionId/models/scope`, async (request, reply) => {
+    try {
+      const body = optionalRecord(request.body);
+      const mode = body["mode"];
+      if (!isSessionModelScopeMode(mode)) throw new Error("mode field must be all, manual, or current");
+      return await sessions.setModelScope(sessionRefFromBody(request.params.sessionId, body), mode);
+    } catch (error) {
+      return reply.code(mutationErrorStatus(error)).send({ error: errorMessage(error) });
     }
   });
 
@@ -219,6 +302,23 @@ export function registerSessionRoutes(app: FastifyInstance, sessions: SessionRou
       return await sessions.cycleModel(sessionRefFromBody(request.params.sessionId, body), direction ?? "forward");
     } catch (error) {
       return reply.code(mutationErrorStatus(error)).send({ error: errorMessage(error) });
+    }
+  });
+
+  app.get<{ Params: { sessionId: string }; Querystring: SessionQuery }>(`${prefix}/sessions/:sessionId/defaults`, async (request, reply) => {
+    try {
+      return await sessions.getSessionDefaults(sessionRefFromQuery(request.params.sessionId, request.query));
+    } catch (error) {
+      return reply.code(400).send({ error: errorMessage(error) });
+    }
+  });
+
+  app.post<{ Params: { sessionId: string }; Body: Record<string, unknown> | undefined }>(`${prefix}/sessions/:sessionId/defaults`, async (request, reply) => {
+    try {
+      const body = requireRecord(request.body);
+      return await sessions.setSessionDefaults(sessionRefFromBody(request.params.sessionId, body), parseSessionDefaultsUpdate(body));
+    } catch (error) {
+      return reply.code(400).send({ error: errorMessage(error) });
     }
   });
 
@@ -267,6 +367,15 @@ export function registerSessionRoutes(app: FastifyInstance, sessions: SessionRou
       const body = optionalRecord(request.body);
       await sessions.prompt(sessionRefFromBody(request.params.sessionId, body), body["text"], body["streamingBehavior"], body["attachments"]);
       return { accepted: true };
+    } catch (error) {
+      return reply.code(mutationErrorStatus(error)).send({ error: errorMessage(error) });
+    }
+  });
+
+  app.post<{ Params: { sessionId: string }; Body: unknown }>(`${prefix}/sessions/:sessionId/queue/message`, async (request, reply) => {
+    try {
+      const body = requireRecord(request.body);
+      return await sessions.mutateQueueMessage(sessionRefFromBody(request.params.sessionId, body), parseQueueMessageMutation(body));
     } catch (error) {
       return reply.code(mutationErrorStatus(error)).send({ error: errorMessage(error) });
     }
@@ -451,7 +560,7 @@ export function registerSessionRoutes(app: FastifyInstance, sessions: SessionRou
   app.get<{ Params: { sessionId: string }; Querystring: SessionQuery }>(`${prefix}/sessions/:sessionId/events`, { websocket: true }, (socket, request) => {
     // Only the id matters for event subscription; cwd is intentionally ignored
     // so a malformed value cannot throw inside the websocket handler.
-    eventHub.add(request.params.sessionId, socket);
+    eventHub.add(request.params.sessionId, socket, request.query.media === SESSION_MEDIA_MODE ? SESSION_MEDIA_MODE : undefined);
   });
 
   app.get(`${prefix}/sessions/events`, { websocket: true }, (socket) => {
@@ -461,6 +570,10 @@ export function registerSessionRoutes(app: FastifyInstance, sessions: SessionRou
   app.get(`${prefix}/events`, { websocket: true }, (socket) => {
     eventHub.addGlobal(socket);
   });
+}
+
+function imageProjector(query: SessionQuery, hub: SessionEventHub, ref: SessionRouteRef): BrowserImageProjector | undefined {
+  return query.media === SESSION_MEDIA_MODE ? (image) => hub.mediaIndex.reference(ref, image) : undefined;
 }
 
 function bulkMutationRefsFromBody(body: SessionBulkMutationRequest | undefined): SessionBulkMutationRef[] {
@@ -527,13 +640,18 @@ function requireRefCwd(cwd: unknown): string {
 function sessionTreeNavigateRequestFromBody(body: Record<string, unknown>): SessionTreeNavigateRequest {
   const targetId = requireNonEmptyString(body, "targetId");
   const expectedLeafId = requireNullableString(body, "expectedLeafId");
-  return { targetId, expectedLeafId, summary: sessionTreeSummaryChoice(body["summary"]) };
+  return {
+    targetId,
+    expectedLeafId,
+    summary: sessionTreeSummaryChoice(body["summary"]),
+    ...optionalField("retainCheckpoint", optionalBoolean(body, "retainCheckpoint")),
+  };
 }
 
 function sessionTreeForkRequestFromBody(body: Record<string, unknown>): SessionTreeForkRequest {
   const entryId = requireNonEmptyString(body, "entryId");
-  if (!Object.hasOwn(body, "expectedLeafId")) return { entryId };
-  return { entryId, expectedLeafId: requireNullableString(body, "expectedLeafId") };
+  const expectedLeafId = requireNullableString(body, "expectedLeafId");
+  return { entryId, expectedLeafId, ...optionalField("retainCheckpoint", optionalBoolean(body, "retainCheckpoint")) };
 }
 
 function sessionTreeSummaryChoice(value: unknown): SessionTreeSummaryChoice {
@@ -582,10 +700,14 @@ function askUserAnswerFromValue(value: unknown): AskUserAnswer {
   const otherText = record["otherText"];
   if (otherText !== undefined && typeof otherText !== "string") throw new Error("otherText field must be a string");
   if (typeof otherText === "string" && otherText.length > ASK_USER_OTHER_TEXT_MAX_LENGTH) throw new Error("otherText field is too long");
+  const comment = record["comment"];
+  if (comment !== undefined && typeof comment !== "string") throw new Error("comment field must be a string");
+  if (typeof comment === "string" && comment.length > ASK_USER_COMMENT_MAX_LENGTH) throw new Error("comment field is too long");
   return {
     id: requireBoundedId(record["id"], "id"),
     values: values.map((entry) => requireBoundedId(entry, "values entry")),
     ...(otherText === undefined ? {} : { otherText }),
+    ...(comment === undefined ? {} : { comment }),
   };
 }
 
@@ -627,6 +749,16 @@ function requireString(record: Record<string, unknown>, field: string): string {
   const value = record[field];
   if (typeof value !== "string") throw new Error(`${field} field must be a string`);
   return value;
+}
+
+function requireBoolean(record: Record<string, unknown>, field: string): boolean {
+  const value = record[field];
+  if (typeof value !== "boolean") throw new Error(`${field} field must be a boolean`);
+  return value;
+}
+
+function optionalBoolean(record: Record<string, unknown>, field: string): boolean | undefined {
+  return record[field] === undefined ? undefined : requireBoolean(record, field);
 }
 
 function requireNonEmptyString(record: Record<string, unknown>, field: string): string {
@@ -677,6 +809,10 @@ function optionalNumber(value: string | undefined): number | undefined {
   if (value === undefined || value === "") return undefined;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function isSessionModelScopeMode(value: unknown): value is SessionModelScopeMode {
+  return value === "all" || value === "manual" || value === "current";
 }
 
 function errorMessage(error: unknown): string {

@@ -2,7 +2,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { type AgentSessionRuntimeDiagnostic, type ResourceDiagnostic } from "@earendil-works/pi-coding-agent";
+import { type AgentSessionRuntimeDiagnostic, type ResourceDiagnostic } from "../../piSdk.js";
 import { anthropicSubscriptionWarning, collectRuntimeWarnings, dismissSessionWarning, type RuntimeWarningSources } from "./piSessionService.js";
 import { testModel } from "./piSessionService.testSupport.js";
 import type { PiAgentSession } from "./piSessionService.js";
@@ -104,6 +104,8 @@ function subscriptionSession(options: {
     settingsManager: {
       getWarnings: () => (options.anthropicExtraUsage === undefined ? {} : { anthropicExtraUsage: options.anthropicExtraUsage }),
       setWarnings: () => undefined,
+      getEnabledModels: () => undefined,
+      setEnabledModels: () => undefined,
     },
   };
 }
@@ -138,6 +140,7 @@ describe("anthropicSubscriptionWarning", () => {
     )).toEqual({
       severity: "warning",
       message: ANTHROPIC_SUBSCRIPTION_AUTH_WARNING,
+      presentation: { kind: "anthropicSubscriptionAuth" },
       source: "anthropic",
       dismiss: { id: "anthropicExtraUsage" },
     } satisfies SessionWarning);
@@ -182,24 +185,14 @@ describe("anthropicSubscriptionWarning", () => {
 });
 
 describe("dismissSessionWarning", () => {
-  it("durably suppresses the anthropic notice via pi's WarningSettings key", () => {
+  it.each([undefined, true])("suppresses the anthropic notice via pi's WarningSettings key (previous setting: %s)", (anthropicExtraUsage) => {
     const calls: { anthropicExtraUsage?: boolean }[] = [];
     dismissSessionWarning({
       settingsManager: {
-        getWarnings: () => ({}),
+        getWarnings: () => anthropicExtraUsage === undefined ? {} : { anthropicExtraUsage },
         setWarnings: (warnings) => { calls.push(warnings); },
-      },
-    }, "anthropicExtraUsage");
-
-    expect(calls).toEqual([{ anthropicExtraUsage: false }]);
-  });
-
-  it("preserves other warning settings when suppressing", () => {
-    const calls: { anthropicExtraUsage?: boolean }[] = [];
-    dismissSessionWarning({
-      settingsManager: {
-        getWarnings: () => ({ anthropicExtraUsage: true }),
-        setWarnings: (warnings) => { calls.push(warnings); },
+        getEnabledModels: () => undefined,
+        setEnabledModels: () => undefined,
       },
     }, "anthropicExtraUsage");
 
@@ -212,6 +205,8 @@ describe("dismissSessionWarning", () => {
       settingsManager: {
         getWarnings: () => ({}),
         setWarnings: () => { called = true; },
+        getEnabledModels: () => undefined,
+        setEnabledModels: () => undefined,
       },
     }, "somethingElse"); }).toThrow("Unknown session warning dismiss id: somethingElse");
     expect(called).toBe(false);

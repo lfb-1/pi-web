@@ -1,6 +1,11 @@
+import { appendFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createAgentSession, SessionManager } from "../../piSdk.js";
 import { describe, expect, it, vi } from "vitest";
-import type { SessionTreeNavigateRequest, SessionTreeSummaryChoice } from "../../shared/apiTypes.js";
+import { ASK_USER_ANSWERS_CUSTOM_TYPE, type SessionTreeNavigateRequest, type SessionTreeSummaryChoice } from "../../shared/apiTypes.js";
 import { WorkspaceActivityService } from "../activity/workspaceActivityService.js";
+import { createPiSessionManagerGateway } from "./piSessionManagerGateway.js";
 import { PiSessionService, type PiAgentSession, type PiSessionManager, type PiSessionServiceDependencies } from "./piSessionService.js";
 import { CapturingSessionEventHub, emptyArchiveStore, fakeRuntime, fakeSessionManager, runtimeCreator, sessionGateway, sessionRecord, sessionRef, testModel, testModelRuntime, type TestSession } from "./piSessionService.testSupport.js";
 import type { ProjectableSessionTreeNode } from "./sessionTreeProjection.js";
@@ -56,6 +61,185 @@ function treeHarness(
 }
 
 describe("PiSessionService session-tree behavior", () => {
+  it.each(["moved", "summarized", "unchanged", "cancelled", "failed"] as const)(
+    "does not create question events or cancellation records when tree navigation is %s",
+    async (scenario) => {
+      let leafId = "leaf-1";
+      const navigateTree = vi.fn<NavigateTree>(() => {
+        if (scenario === "failed") return Promise.reject(new Error("navigation failed"));
+        if (scenario === "moved" || scenario === "summarized") leafId = "target-1";
+        return Promise.resolve({
+          cancelled: scenario === "cancelled",
+          ...(scenario === "summarized" ? { summaryEntry: { id: "target-1" } } : {}),
+        });
+      });
+      const questionEntry = {
+        id: "leaf-1", type: "message", message: {
+          role: "toolResult", toolName: "ask_user", isError: false, details: { ask: {
+            askId: "ask-1", askedAt: "2026-01-01T00:00:00.000Z", questions: [{ id: "choice", question: "Which option?", options: [] }],
+          } },
+        },
+      };
+      const { service, fake, hub } = treeHarness({
+        getLeafId: () => leafId, getBranch: () => leafId === "leaf-1" ? [questionEntry] : [],
+      }, { navigateTree });
+      try {
+        await service.status(sessionRef(SESSION_ID));
+        const navigation = service.navigateTree(sessionRef(SESSION_ID), navigationRequest(
+          { mode: scenario === "summarized" ? "default" : "none" },
+        ));
+        if (scenario === "failed") await expect(navigation).rejects.toThrow("navigation failed");
+        else await expect(navigation).resolves.toEqual({ cancelled: scenario === "cancelled" });
+
+        expect(await service.status(sessionRef(SESSION_ID))).not.toHaveProperty("pendingAsk");
+        expect(hub.sessionEvents.filter(({ event }) => event.type.startsWith("ask."))).toEqual([]);
+        expect(fake.calls.sendCustomMessage).toEqual([]);
+        expect(fake.calls.prompt).toEqual([]);
+      } finally {
+        await service.dispose();
+      }
+    },
+  );
+
+  it.each(["fork", "back"] as const)("%s message shortcuts resolve checkpoint history only on the active branch", async (action) => {
+    const selected = { id: "selected", type: "message", message: { role: "assistant", content: [
+      { type: "toolCall", id: "call-1", name: "bash", arguments: { command: "date" } },
+      { type: "toolCall", id: "call-2", name: "read", arguments: { path: "file" } },
+    ] } };
+    const result = { id: "recorded-result", type: "message", message: { role: "toolResult", toolCallId: "call-1" } };
+    const leaf = { id: "leaf-1", type: "message", message: { role: "assistant", content: "Later response" } };
+    const otherBranchResult = { id: "other-branch-result", type: "message", message: { role: "toolResult", toolCallId: "call-2" } };
+    const navigateTree = vi.fn<NavigateTree>(() => Promise.resolve({ cancelled: false }));
+    const fork = vi.fn(() => Promise.resolve({ cancelled: false }));
+    const { service, fake } = treeHarness({
+      getBranch: () => [selected, result, leaf],
+      getEntries: () => [selected, result, otherBranchResult, leaf],
+    }, { navigateTree });
+    fake.runtime.fork = fork;
+    const executeBash = vi.spyOn(fake.session, "executeBash");
+    const act = (id: string, expectedLeafId = "leaf-1") => action === "fork"
+      ? service.forkFromTree(sessionRef(SESSION_ID), { entryId: id, expectedLeafId, retainCheckpoint: true })
+      : service.navigateTree(sessionRef(SESSION_ID), { targetId: id, expectedLeafId, retainCheckpoint: true, summary: { mode: "none" } });
+
+    try {
+      await expect(act("selected", "stale-leaf")).rejects.toThrow("session changed");
+      await expect(act("other-branch-result")).rejects.toThrow("no longer available on the active session branch");
+      expect(fork).not.toHaveBeenCalled();
+      expect(navigateTree).not.toHaveBeenCalled();
+      await expect(act("selected")).resolves.toMatchObject({ cancelled: false });
+      if (action === "fork") expect(fork).toHaveBeenCalledWith("recorded-result", { position: "at" });
+      else expect(navigateTree).toHaveBeenCalledWith("recorded-result", { summarize: false });
+      expect(fake.calls.prompt).toEqual([]);
+      expect(executeBash).not.toHaveBeenCalled();
+    } finally {
+      await service.dispose();
+    }
+  });
+
+  it.each(["fork", "back"] as const)("%s to questions excludes the old answer", async (action) => {
+    const question = { id: "question", type: "message", message: {
+      role: "toolResult", toolName: "ask_user", isError: false, details: { ask: { askId: "ask-1" } },
+    } };
+    const answer = { id: "answer", type: "custom_message", customType: ASK_USER_ANSWERS_CUSTOM_TYPE, display: true };
+    const navigateTree = vi.fn<NavigateTree>(() => Promise.resolve({ cancelled: false }));
+    const fork = vi.fn(() => Promise.resolve({ cancelled: false }));
+    const { service, fake } = treeHarness({ getBranch: () => [question, answer] }, { navigateTree });
+    fake.runtime.fork = fork;
+    try {
+      if (action === "fork") {
+        await service.forkFromTree(sessionRef(SESSION_ID), { entryId: "question", expectedLeafId: "leaf-1", retainCheckpoint: true });
+        expect(fork).toHaveBeenCalledWith("question", { position: "at" });
+      } else {
+        await service.navigateTree(sessionRef(SESSION_ID), {
+          targetId: "question", expectedLeafId: "leaf-1", retainCheckpoint: true, summary: { mode: "none" },
+        });
+        expect(navigateTree).toHaveBeenCalledWith("question", { summarize: false });
+      }
+    } finally { await service.dispose(); }
+  });
+
+  it("reopens questions through native navigation and accepts a different answer", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "pi-web-question-history-"));
+    const manager = SessionManager.inMemory(directory, { id: SESSION_ID });
+    const { session } = await createAgentSession({
+      cwd: directory, agentDir: join(directory, "agent"), modelRuntime: testModelRuntime, noTools: "all", sessionManager: manager,
+    });
+    const navigateTree: NavigateTree = (id, options) => session.navigateTree(id, options);
+    const fake = fakeRuntime(SESSION_ID, { sessionManager: manager, navigateTree });
+    const service = new PiSessionService(new CapturingSessionEventHub(), {
+      agentDir: TEST_AGENT_DIR, modelRuntime: testModelRuntime, archiveStore: emptyArchiveStore(),
+      createAgentRuntime: runtimeCreator(fake.runtime), sessionManager: sessionGateway([sessionRecord(SESSION_ID, directory)]), heartbeatIntervalMs: 60_000,
+    });
+    try {
+      const questionId = manager.appendMessage({ role: "toolResult", toolCallId: "call", toolName: "ask_user", isError: false,
+        content: [{ type: "text", text: "Posted questions" }], timestamp: Date.now(), details: { ask: {
+          askId: "ask-1", askedAt: "2026-01-01T00:00:00.000Z", questions: [{ id: "choice", question: "Which database?", options: [] }],
+        } },
+      });
+      manager.appendCustomMessageEntry(ASK_USER_ANSWERS_CUSTOM_TYPE, "Old answer", true, { askId: "ask-1" });
+      const ref = sessionRef(SESSION_ID, directory);
+      await service.navigateTree(ref, {
+        targetId: questionId, expectedLeafId: manager.getLeafId(), retainCheckpoint: true, summary: { mode: "none" },
+      });
+      expect(manager.getLeafId()).toBe(questionId);
+      expect(manager.getBranch().some((entry) => entry.type === "custom_message")).toBe(false);
+      await service.submitAsk(ref, "ask-1", { answers: [{ id: "choice", values: [], otherText: "A different database" }] });
+      expect(fake.calls.sendCustomMessage[0]?.message.details).toMatchObject({
+        askId: "ask-1", questions: [{ otherText: "A different database" }],
+      });
+    } finally {
+      await service.dispose();
+      session.dispose();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("does not overwrite an extension's new leaf after native checkpoint navigation returns", async () => {
+    let leafId = "leaf-1";
+    const selected = { id: "selected", type: "message", parentId: null, message: { role: "assistant", content: "Selected reply" } };
+    const notice = { id: "notice", type: "custom_message", parentId: "selected", content: "Retain this notice", display: true };
+    const leaf = { id: "leaf-1", type: "message", parentId: "notice", message: { role: "assistant", content: "Later reply" } };
+    const branch = vi.fn((id: string) => { leafId = id; });
+    const navigateTree = vi.fn<NavigateTree>(() => {
+      leafId = "extension-leaf";
+      return Promise.resolve({ cancelled: false, editorText: "Retain this notice" });
+    });
+    const { service } = treeHarness({
+      getLeafId: () => leafId, getBranch: () => [selected, notice, leaf], branch,
+    }, { navigateTree });
+    try {
+      await expect(service.navigateTree(sessionRef(SESSION_ID), {
+        targetId: "selected", expectedLeafId: "leaf-1", retainCheckpoint: true, summary: { mode: "none" },
+      })).resolves.toEqual({ cancelled: false });
+      expect(navigateTree).toHaveBeenCalledWith("notice", { summarize: false });
+      expect(leafId).toBe("extension-leaf");
+      expect(branch).not.toHaveBeenCalled();
+    } finally {
+      await service.dispose();
+    }
+  });
+
+  it("restores native tree methods if checkpoint navigation fails before moving the leaf", async () => {
+    const selected = { id: "selected", type: "message", parentId: null, message: { role: "assistant", content: "Selected reply" } };
+    const notice = { id: "notice", type: "custom_message", parentId: "selected", content: "Retain this notice", display: true };
+    const leaf = { id: "leaf-1", type: "message", parentId: "notice", message: { role: "assistant", content: "Later reply" } };
+    const navigateTree = vi.fn<NavigateTree>().mockRejectedValue(new Error("navigation failed"));
+    const { service, fake } = treeHarness({ getBranch: () => [selected, notice, leaf] }, { navigateTree });
+    const manager = fake.session.sessionManager;
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- Capture identity for restoration assertions, never invoke these methods.
+    const { branch, resetLeaf } = manager;
+    try {
+      await expect(service.navigateTree(sessionRef(SESSION_ID), {
+        targetId: "selected", expectedLeafId: "leaf-1", retainCheckpoint: true, summary: { mode: "none" },
+      })).rejects.toThrow("navigation failed");
+      expect(manager.getLeafId()).toBe("leaf-1");
+      expect(manager).toHaveProperty("branch", branch);
+      expect(manager).toHaveProperty("resetLeaf", resetLeaf);
+    } finally {
+      await service.dispose();
+    }
+  });
+
   it("opens /tree from the live manager through the safe projection boundary", async () => {
     const navigateTree = vi.fn<NavigateTree>(() => Promise.resolve({ cancelled: false }));
     const roots = [treeNode({
@@ -82,6 +266,7 @@ describe("PiSessionService session-tree behavior", () => {
           parentId: null,
           kind: "assistant",
           summary: "safe answer",
+          summaryPresentation: { type: "content", parts: [{ type: "text", text: "safe answer" }], fallback: "assistant-response" },
           timestamp: "2026-01-01T00:00:00.000Z",
         }],
         activeLeafId: "leaf-1",
@@ -114,6 +299,170 @@ describe("PiSessionService session-tree behavior", () => {
     expect(fake.calls.dispose).toBe(0);
 
     await service.dispose();
+  });
+
+  it("restores editor semantics when an editable message is already the active leaf", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "pi-web-active-tree-target-"));
+    const workspace = join(tempDir, "workspace");
+    const agentDir = join(tempDir, "agent");
+    await mkdir(workspace, { recursive: true });
+    const manager = SessionManager.inMemory(workspace, { id: SESSION_ID });
+    const { session: piSession } = await createAgentSession({
+      cwd: workspace,
+      agentDir,
+      modelRuntime: testModelRuntime,
+      noTools: "all",
+      sessionManager: manager,
+    });
+    const navigateTree = vi.fn<NavigateTree>((targetId, options) => piSession.navigateTree(targetId, options));
+    const fake = fakeRuntime(SESSION_ID, {
+      sessionFile: undefined,
+      sessionManager: manager,
+      navigateTree,
+    });
+    const service = new PiSessionService(new CapturingSessionEventHub(), {
+      agentDir: TEST_AGENT_DIR,
+      modelRuntime: testModelRuntime,
+      archiveStore: emptyArchiveStore(),
+      createAgentRuntime: runtimeCreator(fake.runtime),
+      sessionManager: sessionGateway([sessionRecord(SESSION_ID, workspace)]),
+      heartbeatIntervalMs: 60_000,
+    });
+
+    try {
+      manager.resetLeaf();
+      const userId = manager.appendMessage({ role: "user", content: "edit active user", timestamp: Date.now() });
+      await expect(service.navigateTree(sessionRef(SESSION_ID, workspace), {
+        targetId: userId,
+        expectedLeafId: userId,
+        summary: { mode: "none" },
+      })).resolves.toEqual({ cancelled: false, editorText: "edit active user" });
+      expect(manager.getLeafId()).toBeNull();
+
+      const customId = manager.appendCustomMessageEntry("test", "edit active custom", true);
+      await expect(service.navigateTree(sessionRef(SESSION_ID, workspace), {
+        targetId: customId,
+        expectedLeafId: customId,
+        summary: { mode: "none" },
+      })).resolves.toEqual({ cancelled: false, editorText: "edit active custom" });
+      expect(manager.getLeafId()).toBeNull();
+
+      const ordinaryCustomId = manager.appendCustomEntry("test-state", { preserved: true });
+      await expect(service.navigateTree(sessionRef(SESSION_ID, workspace), {
+        targetId: ordinaryCustomId,
+        expectedLeafId: ordinaryCustomId,
+        summary: { mode: "none" },
+      })).resolves.toEqual({ cancelled: false });
+      expect(manager.getLeafId()).toBe(ordinaryCustomId);
+    } finally {
+      await service.dispose();
+      piSession.dispose();
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("restores an active editable leaf when the compatibility navigation is cancelled", async () => {
+    let leafId: string | null = "target-1";
+    const parent = { type: "message", id: "parent-1", parentId: null, message: { role: "assistant", content: "answer" } };
+    const target = { type: "message", id: "target-1", parentId: "parent-1", message: { role: "user", content: "edit me" } };
+    const navigateTree = vi.fn<NavigateTree>();
+    navigateTree
+      .mockResolvedValueOnce({ cancelled: false })
+      .mockResolvedValueOnce({ cancelled: true, aborted: true });
+    const { service } = treeHarness({
+      getLeafId: () => leafId,
+      getBranch: () => leafId === "target-1" ? [parent, target] : [parent],
+      branch: (targetId) => { leafId = targetId; },
+      resetLeaf: () => { leafId = null; },
+    }, { navigateTree });
+
+    await expect(service.navigateTree(
+      sessionRef(SESSION_ID),
+      navigationRequest({ mode: "none" }, "target-1"),
+    )).resolves.toEqual({ cancelled: true, aborted: true });
+    expect(leafId).toBe("target-1");
+    await service.dispose();
+  });
+
+  it("releases a no-summary branch when the next prompt is durable beneath an external descendant", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "pi-web-tree-navigation-"));
+    const workspace = join(tempDir, "workspace");
+    const sessionDir = join(tempDir, "sessions");
+    const sessionFile = join(sessionDir, `2026-01-01T00-00-00-000Z_${SESSION_ID}.jsonl`);
+    await Promise.all([mkdir(workspace, { recursive: true }), mkdir(sessionDir, { recursive: true })]);
+    const entry = (id: string, parentId: string | null, role: "user" | "assistant", content: string) => ({
+      type: "message",
+      id,
+      parentId,
+      timestamp: "2026-01-01T00:00:00.000Z",
+      message: { role, content },
+    });
+    const initialEntries = [
+      entry("root-user", null, "user", "original question"),
+      entry("target-1", "root-user", "assistant", "selected answer"),
+      entry("abandoned-user", "target-1", "user", "abandoned follow-up"),
+      entry("leaf-1", "abandoned-user", "assistant", "abandoned answer"),
+    ];
+    await writeFile(sessionFile, `${[
+      { type: "session", version: 3, id: SESSION_ID, timestamp: "2026-01-01T00:00:00.000Z", cwd: workspace },
+      ...initialEntries,
+    ].map((line) => JSON.stringify(line)).join("\n")}\n`, "utf8");
+
+    const manager = SessionManager.open(sessionFile, sessionDir);
+    const navigateTree = vi.fn<NavigateTree>((targetId) => {
+      manager.branch(targetId);
+      return Promise.resolve({ cancelled: false });
+    });
+    const prompt = vi.fn((text: string) => {
+      manager.appendMessage({ role: "user", content: text, timestamp: Date.now() });
+      return Promise.resolve();
+    });
+    const fake = fakeRuntime(SESSION_ID, { sessionFile, sessionManager: manager, navigateTree, prompt });
+    const gateway = createPiSessionManagerGateway({
+      agentDir: join(tempDir, "agent"),
+      env: { PI_CODING_AGENT_SESSION_DIR: sessionDir },
+    });
+    const service = new PiSessionService(new CapturingSessionEventHub(), {
+      agentDir: TEST_AGENT_DIR,
+      modelRuntime: testModelRuntime,
+      archiveStore: emptyArchiveStore(),
+      createAgentRuntime: runtimeCreator(fake.runtime),
+      sessionManager: gateway,
+      heartbeatIntervalMs: 60_000,
+    });
+
+    try {
+      await expect(service.navigateTree(sessionRef(SESSION_ID, workspace), navigationRequest())).resolves.toEqual({ cancelled: false });
+      expect(navigateTree).toHaveBeenCalledWith("target-1", { summarize: false });
+
+      await expect(service.messages(sessionRef(SESSION_ID, workspace))).resolves.toMatchObject({
+        messages: [
+          { role: "user", content: "original question" },
+          { role: "assistant", content: "selected answer" },
+        ],
+        total: 2,
+      });
+      await expect(service.status(sessionRef(SESSION_ID, workspace))).resolves.toMatchObject({ messageCount: 2 });
+
+      await service.prompt(sessionRef(SESSION_ID, workspace), "continue here");
+      await vi.waitFor(() => { expect(prompt).toHaveBeenCalledWith("continue here", undefined); });
+
+      const promptLeafId = manager.getLeafId();
+      if (promptLeafId === null) throw new Error("Expected the prompt to append a session entry");
+      await appendFile(sessionFile, `${JSON.stringify(entry("external-leaf", promptLeafId, "assistant", "external continuation"))}\n`, "utf8");
+      await expect(service.messages(sessionRef(SESSION_ID, workspace))).resolves.toMatchObject({
+        messages: [
+          { role: "user", content: "original question" },
+          { role: "assistant", content: "selected answer" },
+          { role: "user", content: "continue here" },
+          { role: "assistant", content: "external continuation" },
+        ],
+        total: 4,
+      });
+    } finally {
+      await service.dispose();
+      await rm(tempDir, { recursive: true, force: true });
+    }
   });
 
   it("validates stale leaves, active work, unavailable runtimes, and custom instruction bounds", async () => {
@@ -177,6 +526,7 @@ describe("PiSessionService session-tree behavior", () => {
     await expect(service.runCommand(sessionRef(SESSION_ID), "/name blocked")).resolves.toEqual({
       type: "unsupported",
       message: "Cannot run commands while session tree navigation is active. Stop or finish the navigation first.",
+      presentation: { kind: "commandResult", feedback: { code: "navigationActive" } },
     });
     await expect(service.archive(sessionRef(SESSION_ID))).rejects.toThrow("Stop current session activity before archiving");
     expect(fake.calls.prompt).toEqual([]);

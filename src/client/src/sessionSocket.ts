@@ -1,13 +1,16 @@
 import { realtimeEvents, sessionEvents } from "./api";
-import { parseRealtimeStreamEvent, parseSessionAskClosedEvent, parseSessionAskOpenedEvent, parseSessionDialogClosedEvent, parseSessionDialogOpenedEvent, parseSessionNotificationInboxEvent, parseSessionStartupProgressEvent, parseSessionStreamEvent, parseSessionUnreadEvent } from "./api/parsers";
-import type { RealtimeEvent, SessionRef, SessionUiEvent } from "../../shared/apiTypes";
+import { parseRealtimeStreamEvent, parseServerNoticeEvent, parseSessionDialogClosedEvent, parseSessionDialogOpenedEvent, parseSessionNotificationInboxEvent, parseSessionStartupProgressEvent, parseSessionStreamEvent, parseSessionUnreadEvent } from "./api/parsers";
+import type { RealtimeEvent, ServerNoticeEvent, SessionRef, SessionUiEvent } from "../../shared/apiTypes";
 
 export type { GlobalSessionEvent, RealtimeEvent, SessionUiEvent } from "../../shared/apiTypes";
 
 export type BrowserRealtimeEvent = Exclude<RealtimeEvent, { type: "notifications.summary" }>;
 
+export type SessionConnectionState = "connecting" | "open";
+
 export class SessionSocket {
   private socket: WebSocket | undefined;
+  private onConnectionState: ((state: SessionConnectionState) => void) | undefined;
   private session: SessionRef | undefined;
   private onEvent: ((event: SessionUiEvent) => void) | undefined;
   private reconnectTimer?: number;
@@ -24,6 +27,7 @@ export class SessionSocket {
     onReconnect?: () => void,
     machineId = "local",
     onInitialOpen?: () => void,
+    onConnectionState?: (state: SessionConnectionState) => void,
   ): void {
     this.close();
     this.machineId = machineId;
@@ -31,12 +35,23 @@ export class SessionSocket {
     this.onEvent = onEvent;
     this.onReconnect = onReconnect;
     this.onInitialOpen = onInitialOpen;
+    this.onConnectionState = onConnectionState;
     this.shouldReconnect = true;
     this.open();
   }
 
   setHandler(onEvent: (event: SessionUiEvent) => void): void {
     this.onEvent = onEvent;
+  }
+
+  reconnect(): void {
+    if (!this.shouldReconnect) return;
+    // Browser resumes can leave an apparently OPEN transport that no longer works.
+    window.clearTimeout(this.reconnectTimer);
+    const previous = this.socket;
+    this.socket = undefined;
+    closeSocketQuietly(previous);
+    this.open();
   }
 
   close(): void {
@@ -48,6 +63,7 @@ export class SessionSocket {
     this.onEvent = undefined;
     this.onReconnect = undefined;
     this.onInitialOpen = undefined;
+    this.onConnectionState = undefined;
     this.hasOpened = false;
     this.machineId = "local";
   }
@@ -56,12 +72,15 @@ export class SessionSocket {
     const session = this.session;
     if (session === undefined || session.id === "" || session.cwd === "" || !this.shouldReconnect) return;
     const socket = sessionEvents(session, this.machineId);
+    socket.binaryType = "arraybuffer";
     this.socket = socket;
+    this.onConnectionState?.("connecting");
     socket.onopen = () => {
       if (this.socket !== socket) return;
       this.reconnectDelay = 500;
       const isReconnect = this.hasOpened;
       this.hasOpened = true;
+      this.onConnectionState?.("open");
       if (isReconnect) this.onReconnect?.();
       else this.onInitialOpen?.();
     };
@@ -70,6 +89,7 @@ export class SessionSocket {
     socket.onclose = () => {
       if (this.socket !== socket) return;
       this.socket = undefined;
+      this.onConnectionState?.("connecting");
       this.scheduleReconnect();
     };
   }
@@ -85,6 +105,11 @@ export class SessionSocket {
   private async handleMessage(data: MessageEvent["data"], socket: WebSocket, session: SessionRef): Promise<void> {
     const event = parseSessionSocketEvent(await parseSocketEvent(data));
     if (this.socket !== socket || event === undefined) return;
+    if (event.type === "session.diagnostic") {
+      // Diagnostics are live-only, outside transcript snapshot reconciliation.
+      console.error("[PI WEB] Session diagnostic", { machineId: this.machineId, sessionId: session.id, cwd: session.cwd, message: event.message });
+      return;
+    }
     if (event.type === "notifications.inbox" && (session.id !== event.summary.sessionId || session.cwd !== event.summary.cwd)) return;
     this.onEvent?.(event);
   }
@@ -105,6 +130,15 @@ export class RealtimeSocket {
     this.onEvent = onEvent;
     this.onOpen = onOpen;
     this.shouldReconnect = true;
+    this.open();
+  }
+
+  reconnect(): void {
+    if (!this.shouldReconnect) return;
+    window.clearTimeout(this.reconnectTimer);
+    const previous = this.socket;
+    this.socket = undefined;
+    closeSocketQuietly(previous);
     this.open();
   }
 
@@ -152,13 +186,10 @@ export class RealtimeSocket {
 
 export function parseSessionSocketEvent(event: unknown): SessionUiEvent | undefined {
   const type = eventType(event);
-  // Inbox, ask, and dialog frames have dedicated validators (they drive the
-  // notification inbox and the interactive cards answered on the model's or an
-  // extension's behalf). Every other accepted frame is session stream
-  // vocabulary, validated field by field.
+  // Inbox and extension-dialog frames have dedicated validators. Questions
+  // travel through the ordinary transcript vocabulary and are validated when
+  // projected into chat parts.
   if (type === "notifications.inbox") return safelyParseValidatedEvent(() => parseSessionNotificationInboxEvent(event));
-  if (type === "ask.opened") return safelyParseValidatedEvent(() => parseSessionAskOpenedEvent(event));
-  if (type === "ask.closed") return safelyParseValidatedEvent(() => parseSessionAskClosedEvent(event));
   if (type === "dialog.opened") return safelyParseValidatedEvent(() => parseSessionDialogOpenedEvent(event));
   if (type === "dialog.closed") return safelyParseValidatedEvent(() => parseSessionDialogClosedEvent(event));
   const parsed = safelyParseValidatedEvent(() => parseSessionStreamEvent(event));
@@ -168,6 +199,7 @@ export function parseSessionSocketEvent(event: unknown): SessionUiEvent | undefi
 export function parseRealtimeSocketEvent(event: unknown): BrowserRealtimeEvent | undefined {
   const type = eventType(event);
   if (type === "sessions.unread") return safelyParseValidatedEvent(() => parseSessionUnreadEvent(event));
+  if (type === "notices.updated") return safelyParseValidatedEvent((): ServerNoticeEvent => parseServerNoticeEvent(event));
   if (type === "session.startup") return safelyParseValidatedEvent(() => parseSessionStartupProgressEvent(event));
   return safelyParseValidatedEvent(() => parseRealtimeStreamEvent(event));
 }

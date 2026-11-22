@@ -7,15 +7,16 @@ const configResponse: PiWebConfigResponse = {
   exists: true,
   config: { host: "127.0.0.1" },
   effectiveConfig: { host: "127.0.0.1" },
-  envOverrides: { host: false, port: false, allowedHosts: false, spawnSessions: false, subsessions: false, askUser: false },
+  envOverrides: { host: false, port: false, allowedHosts: false, spawnSessions: false, subsessions: false, sessionMessages: false, askUser: false },
 };
 
 const pluginsResponse: PiWebPluginsResponse = {
-  lifecycleVersion: 1,
+  lifecycleVersion: 2,
   plugins: [],
   diagnostics: [],
   serverRuntime: {
     status: "available",
+    terminalMode: "recovery-disabled",
     restartRequired: false,
     recovery: {
       showSafeStart: "pi-web plugins safe-start show",

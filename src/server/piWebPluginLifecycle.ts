@@ -8,6 +8,7 @@ import {
   type PiWebPluginServerInfo,
 } from "../shared/apiTypes.js";
 import { PI_WEB_PLUGIN_RECOVERY_COMMANDS, pluginDisableRecoveryCommand } from "../shared/pluginRecoveryCommands.js";
+import { REQUIRED_TERMINAL_PLUGIN_ID } from "../shared/requiredTerminalPlugin.js";
 import type { ServerPluginHealthInspection, ServerPluginRuntimeRecord } from "./plugins/serverPluginRuntime.js";
 import type {
   PiWebPluginCatalogDiagnostic,
@@ -23,6 +24,9 @@ export type ProviderRuntimeLoadResult =
 export interface ReconciledBrowserPlugin {
   plugin: PiWebPluginCatalogEntry;
   backendRevision?: string;
+  pairedRequestVersion?: 1;
+  pairedChannelVersion?: 1;
+  pairedResourceVersion?: 1;
 }
 
 export interface PiWebPluginLifecycleReconciliation {
@@ -36,6 +40,7 @@ export function reconcilePiWebPluginLifecycle(
   runtime: ProviderRuntimeLoadResult,
   browserModuleUrl: (plugin: PiWebPluginCatalogEntry) => string,
   desiredSafeStart?: PiWebPluginSafeStart | "off",
+  relaxBrowserPairing = false,
 ): PiWebPluginLifecycleReconciliation {
   const activeSnapshot = runtime.status === "available" ? runtime.snapshot : undefined;
   const desiredById = new Map(desired.plugins.map((plugin) => [plugin.id, plugin]));
@@ -47,9 +52,12 @@ export function reconcilePiWebPluginLifecycle(
   const browserPlugins: ReconciledBrowserPlugin[] = [];
   const activeSafeStart = activeSnapshot?.safeStart ?? "off";
   const effectiveDesiredSafeStart = desiredSafeStart ?? activeSafeStart;
+  // Only sessiond's immutable snapshot may declare intentional no-Terminal
+  // recovery. Without one, normal required mode remains fail-closed.
+  const terminalMode = activeSnapshot?.terminalMode ?? "required";
 
   const plugins = [...pluginIds]
-    .sort((left, right) => left.localeCompare(right))
+    .sort(requiredTerminalIdFirst)
     .map((pluginId): PiWebPluginInfo => {
       const plugin = desiredById.get(pluginId);
       const record = recordsById.get(pluginId);
@@ -57,17 +65,28 @@ export function reconcilePiWebPluginLifecycle(
         ? serverInfo(pluginId, plugin, record, healthById.get(pluginId), runtime.status, activeSafeStart, effectiveDesiredSafeStart)
         : undefined;
 
-      if (plugin?.browserModule !== undefined && shouldPublishBrowserPlugin(plugin, server)) {
+      if (activeSnapshot !== undefined
+        && plugin?.browserModule !== undefined
+        && (terminalMode === "required" || plugin.id !== REQUIRED_TERMINAL_PLUGIN_ID)
+        && shouldPublishBrowserPlugin(plugin, server, record, effectiveDesiredSafeStart, relaxBrowserPairing)) {
         browserPlugins.push({
           plugin,
           ...(server?.activeRevision === undefined ? {} : { backendRevision: server.activeRevision }),
+          ...(record?.pairedRequestVersion === undefined ? {} : { pairedRequestVersion: record.pairedRequestVersion }),
+          ...(record?.pairedChannelVersion === undefined ? {} : { pairedChannelVersion: record.pairedChannelVersion }),
+          ...(record?.pairedResourceVersion === undefined ? {} : { pairedResourceVersion: record.pairedResourceVersion }),
         });
       }
 
       if (plugin !== undefined) {
         return {
           id: plugin.id,
-          ...(plugin.browserModule === undefined ? {} : { module: browserModuleUrl(plugin) }),
+          ...(plugin.id === REQUIRED_TERMINAL_PLUGIN_ID ? { required: true as const } : {}),
+          ...(activeSnapshot === undefined
+            || plugin.browserModule === undefined
+            || (terminalMode === "recovery-disabled" && plugin.id === REQUIRED_TERMINAL_PLUGIN_ID)
+            ? {}
+            : { module: browserModuleUrl(plugin) }),
           source: plugin.source,
           scope: plugin.scope,
           machineSpecific: plugin.machineSpecific,
@@ -81,6 +100,7 @@ export function reconcilePiWebPluginLifecycle(
       if (record === undefined || server === undefined) throw new Error(`Missing active server plugin record: ${pluginId}`);
       return {
         id: record.pluginId,
+        ...(record.pluginId === REQUIRED_TERMINAL_PLUGIN_ID ? { required: true as const } : {}),
         source: record.source,
         scope: record.scope,
         machineSpecific: record.machineSpecific,
@@ -104,6 +124,7 @@ export function reconcilePiWebPluginLifecycle(
       diagnostics,
       serverRuntime: {
         status: runtime.status,
+        terminalMode,
         ...(activeSnapshot?.safeStart === undefined ? {} : { safeStart: activeSnapshot.safeStart }),
         ...(desiredSafeStart === undefined ? {} : { desiredSafeStart }),
         restartRequired,
@@ -175,12 +196,23 @@ function serverEnabledForSafeStart(plugin: PiWebPluginCatalogEntry, safeStart: P
 function shouldPublishBrowserPlugin(
   plugin: PiWebPluginCatalogEntry,
   server: PiWebPluginServerInfo | undefined,
+  active: ServerPluginRuntimeRecord | undefined,
+  desiredSafeStart: PiWebPluginSafeStart | "off",
+  relaxBrowserPairing: boolean,
 ): boolean {
   if (plugin.browserModule === undefined) return false;
   if (server === undefined) return plugin.enabled;
   if (plugin.serverModule === undefined) return false;
+  if (relaxBrowserPairing && !serverEnabledForSafeStart(plugin, desiredSafeStart)) return false;
+  // Development may mix new browser assets with the running backend, but must
+  // not bypass configuration, package identity, health, or safe-start policy.
+  const developmentPair = relaxBrowserPairing
+    && plugin.settingsRevision === active?.settingsRevision
+    && plugin.source === active.source
+    && plugin.scope === active.scope
+    && plugin.machineSpecific === active.machineSpecific;
   return server.state === "active"
-    && !server.staleRevision
+    && (!server.staleRevision || developmentPair)
     && server.health?.status !== "unhealthy";
 }
 
@@ -197,6 +229,12 @@ function revisionsAreStale(
     || desired.source !== active.source
     || desired.scope !== active.scope
     || desired.machineSpecific !== active.machineSpecific;
+}
+
+function requiredTerminalIdFirst(left: string, right: string): number {
+  if (left === REQUIRED_TERMINAL_PLUGIN_ID) return right === REQUIRED_TERMINAL_PLUGIN_ID ? 0 : -1;
+  if (right === REQUIRED_TERMINAL_PLUGIN_ID) return 1;
+  return left.localeCompare(right);
 }
 
 function publicDiagnostics(

@@ -6,27 +6,31 @@ import type { PluginRuntimeContext } from "@jmfederico/pi-web/plugin-api";
 import plugin from "./pi-web-plugin.js";
 
 function contributions() {
-  return plugin.activate({
-    apiVersion: 2,
+  const result = plugin.activate({
+    apiVersion: 4,
     pluginId: "experiment-visualization",
     runtimePluginId: "experiment-visualization",
     html,
     svg,
-  }).contributions;
+    signal: new AbortController().signal,
+    lifetimeSignal: new AbortController().signal,
+  });
+  return result.contributions;
 }
 
 describe("Experiment Visualization plugin", () => {
   it("contributes one independent Visualization panel", () => {
-    const panel = contributions().workspacePanels?.find((candidate) => candidate.id === "workspace.experiment-visualization");
+    const result = contributions();
+    const panel = result.workspacePanels.find((candidate) => candidate.id === "workspace.experiment-visualization");
 
-    expect(contributions().workspacePanels).toHaveLength(1);
+    expect(result.workspacePanels).toHaveLength(1);
     expect(panel?.title).toBe("Visualization");
     expect(panel?.order).toBe(30);
     expect(panel?.onInvalidate).toBeTypeOf("function");
   });
 
-  it("opens Visualization from the action palette", async () => {
-    const action = contributions().actions?.find((candidate) => candidate.id === "workspace.open-experiment-visualization");
+  it("opens Visualization from the action palette", () => {
+    const action = contributions().actions.find((candidate) => candidate.id === "workspace.open-experiment-visualization");
     const selectWorkspaceTool = vi.fn();
     const context = runtimeContext({
       state: {
@@ -42,7 +46,7 @@ describe("Experiment Visualization plugin", () => {
     });
 
     expect(action?.title).toBe("Open Experiment Visualization");
-    await action?.run(context);
+    action?.run(context);
 
     expect(selectWorkspaceTool).toHaveBeenCalledWith("experiment-visualization:workspace.experiment-visualization");
   });
@@ -69,6 +73,7 @@ function runtimeContext(patch: Partial<PluginRuntimeContext> = {}): PluginRuntim
     startSession: noop,
     archiveSession: noop,
     stopActiveWork: noop,
+    navigate: () => Promise.resolve(),
     ...patch,
   };
 }

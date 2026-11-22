@@ -1,3 +1,6 @@
+import { LocalizationController } from "../localization/browser";
+import { authMessages as messages } from "../authMessages";
+import { stylesheetIntegrationCapability } from "../plugins/styles";
 import { LitElement, css, html, nothing, type PropertyValues, type TemplateResult } from "lit";
 import { customElement, property, query, state } from "lit/decorators.js";
 import type { AuthDialogState } from "../appState";
@@ -7,6 +10,7 @@ import { keyboardEventOriginatesFromNativeActivationControl } from "./keyboardEv
 import "./ModalSurface";
 import type { ModalSurface } from "./ModalSurface";
 import { scrollWhenSelected } from "./scrollWhenSelected";
+import { uiDialogStyles, uiFormStyles, uiSelectionStyles } from "./ui/dialogStyles";
 
 /** One keyboard-navigable choice on the option-list steps (method, providers, logout). */
 interface AuthDialogOption {
@@ -14,11 +18,19 @@ interface AuthDialogOption {
   key: string;
   title: TemplateResult | string;
   detail: string;
+  /** Plain text matched by the provider search box, independent of the rendered title. */
+  searchText: string;
   run: () => void;
 }
 
 @customElement("auth-dialog")
 export class AuthDialog extends LitElement {
+  constructor() {
+    super();
+    new LocalizationController(this);
+    stylesheetIntegrationCapability.createController(this);
+  }
+
   @property({ attribute: false }) state?: AuthDialogState;
   @property({ attribute: false }) onChooseMethod?: (authType: "oauth" | "api_key") => void;
   @property({ attribute: false }) onSelectProvider?: (providerId: string, authType: "oauth" | "api_key") => void;
@@ -29,6 +41,8 @@ export class AuthDialog extends LitElement {
   @property({ attribute: false }) onCancel?: () => void;
   @query("modal-surface") private surface?: ModalSurface;
   @state() private selectedIndex = 0;
+  /** Search box text on the provider-list steps; scoped to the current step. */
+  @state() private query = "";
 
   override render() {
     const state = this.state;
@@ -36,27 +50,90 @@ export class AuthDialog extends LitElement {
     return html`
       <modal-surface
         .onClose=${() => { this.cancel(); }}
-        .initialFocus=${state.step === "oauth" && state.flow.prompt !== undefined ? "input" : undefined}
+        .initialFocus=${this.initialFocusTarget(state)}
         .label=${this.dialogTitle(state)}
         @keydown=${(event: KeyboardEvent) => { this.handleKeyDown(event); }}
       >
-        <header>
-          <strong>${this.dialogTitle(state)}</strong>
-          <button title="Close" aria-label="Close" @click=${() => { this.cancel(); }}>×</button>
+        <header class="ui-dialog-header">
+          <strong class="ui-dialog-title">${this.dialogTitle(state)}</strong>
+          <button class="ui-button ui-button--icon" title=${messages.t("close")} aria-label=${messages.t("close")} @click=${() => { this.cancel(); }}>×</button>
         </header>
         ${this.renderBody(state)}
       </modal-surface>
     `;
   }
 
-  protected override willUpdate(changed: PropertyValues): void {
-    if (!changed.has("state")) return;
-    if (authDialogStateStep(changed.get("state")) !== this.state?.step) {
-      // Selection is scoped to the visible option list: entering a step starts at its first option.
+  /** Selectable choices for the option-list steps; undefined on the oauth step, which has no roving selection. */
+  private optionsFor(state: AuthDialogState): AuthDialogOption[] | undefined {
+    switch (state.step) {
+      case "method":
+        return [
+          { key: "oauth", title: messages.t("subscription"), detail: messages.t("subscriptionDetail"), searchText: messages.t("subscription"), run: () => { this.onChooseMethod?.("oauth"); } },
+          { key: "api_key", title: messages.t("credentials"), detail: messages.t("credentialsDetail"), searchText: messages.t("credentials"), run: () => { this.onChooseMethod?.("api_key"); } },
+        ];
+      case "providers":
+        return state.providers.map((provider) => ({
+          key: provider.id,
+          title: html`<bdi>${provider.name}</bdi>${provider.status.source !== undefined ? html` <em>${statusLabel(provider)}</em>` : null}`,
+          detail: messages.t("providerDetail", { provider: provider.id, type: authTypeLabel(provider.authType) }),
+          searchText: provider.name,
+          run: () => { this.onSelectProvider?.(provider.id, provider.authType); },
+        }));
+      case "logout":
+        return state.providers.map((provider) => ({
+          key: provider.id,
+          title: html`<bdi>${provider.name}</bdi>`,
+          detail: messages.t("providerDetail", { provider: provider.id, type: authTypeLabel(provider.authType) }),
+          searchText: provider.name,
+          run: () => { this.onLogoutProvider?.(provider.id); },
+        }));
+      case "starting":
+      case "oauth":
+        return undefined;
+    }
+  }
+
+  /** The search box target for the step: the OAuth prompt input or the provider search box. */
+  private initialFocusTarget(state: AuthDialogState): string | undefined {
+    if (state.step === "oauth") return state.flow.prompt !== undefined ? "input" : undefined;
+    if (state.step === "providers" || state.step === "logout") return state.providers.length > 0 ? "input" : undefined;
+    return undefined;
+  }
+
+  /** Whether the step renders a searchable provider list (selecting or removing stored credentials). */
+  private stepHasSearch(state: AuthDialogState): boolean {
+    return state.step === "providers" || state.step === "logout";
+  }
+
+  private handleSearchInput(event: Event): void {
+    if (event.target instanceof HTMLInputElement) {
+      this.query = event.target.value;
+      // Filtering replaces the list beneath the roving selection: start back at its first option.
       this.selectedIndex = 0;
+    }
+  }
+
+  private filteredOptions(options: AuthDialogOption[]): AuthDialogOption[] {
+    const query = this.query.trim().toLowerCase();
+    if (query === "") return options;
+    return options.filter((option) => `${option.searchText} ${option.detail} ${option.key}`.toLowerCase().includes(query));
+  }
+
+  /** The options actually rendered for the step: the roving selection and keyboard navigation see these. */
+  private visibleOptions(state: AuthDialogState): AuthDialogOption[] {
+    const options = this.optionsFor(state);
+    return options === undefined ? [] : this.filteredOptions(options);
+  }
+
+  protected override willUpdate(changed: PropertyValues): void {
+    if (changed.has("state") && authDialogStateStep(changed.get("state")) !== this.state?.step) {
+      // Selection and search text are scoped to the visible option list:
+      // entering a step starts at its first option with an empty query.
+      this.selectedIndex = 0;
+      this.query = "";
       return;
     }
-    const options = this.state === undefined ? undefined : this.optionsFor(this.state);
+    const options = this.state === undefined ? undefined : this.visibleOptions(this.state);
     if (options !== undefined) this.selectedIndex = Math.min(this.selectedIndex, Math.max(0, options.length - 1));
   }
 
@@ -77,104 +154,104 @@ export class AuthDialog extends LitElement {
 
   private dialogTitle(state: AuthDialogState): string {
     switch (state.step) {
-      case "method": return "Configure provider authentication";
-      case "providers": return state.authType === undefined ? "Select provider authentication" : state.authType === "oauth" ? "Select subscription provider" : "Select credential provider";
-      case "oauth": return `Login to ${state.flow.providerName}`;
-      case "logout": return "Remove stored provider authentication";
+      case "method": return messages.t("methodTitle");
+      case "starting": return messages.t(state.mode === "login" ? "startMcpLogin" : "startMcpLogout");
+      case "providers": return messages.t(state.authType === undefined ? "selectProvider" : state.authType === "oauth" ? "selectSubscription" : "selectCredentials");
+      case "oauth": return state.flow.target === "mcp"
+        ? state.flow.mcpMode === undefined ? messages.t("mcpAuthentication") : state.flow.select === undefined
+          ? messages.t(state.flow.mcpMode === "login" ? "mcpLoginProvider" : "mcpLogoutProvider", { provider: state.flow.providerName })
+          : messages.t(state.flow.mcpMode === "login" ? "mcpLogin" : "mcpLogout")
+        : messages.t("loginProvider", { provider: state.flow.providerName });
+      case "logout": return messages.t("removeTitle");
     }
   }
 
   private renderBody(state: AuthDialogState) {
     if (state.step === "oauth") return this.renderOAuth(state);
+    if (state.step === "starting") return html`
+      <div class="ui-dialog-body ui-form-body">
+        ${state.error === undefined ? html`<p role="status">${messages.t("startingMcp")}</p>` : html`<p class="ui-form-error" role="alert">${state.error}</p>`}
+        <div class="ui-form-actions"><button class="ui-button" @click=${() => { this.onCancel?.(); }}>${messages.t(state.error === undefined ? "cancel" : "close")}</button></div>
+      </div>`;
     const options = this.optionsFor(state) ?? [];
+    const visible = this.filteredOptions(options);
     return html`
-      <div class="options">
-        ${options.length === 0 ? html`<div class="empty">${state.step === "logout" ? "No stored credentials. Environment variables and models.json settings are unchanged." : "No providers available."}</div>` : options.map((option, index) => html`
+      ${this.stepHasSearch(state) && options.length > 0 ? html`
+        <div class="ui-dialog-search-row">
+          <input class="ui-dialog-search" aria-label=${messages.t("search")} placeholder=${messages.t("search")} .value=${this.query} @input=${(event: Event) => { this.handleSearchInput(event); }}>
+        </div>
+      ` : null}
+      <div class="options ui-selection-list">
+        ${options.length === 0 ? html`<div class="empty ui-dialog-empty">${state.step === "logout" ? messages.t("noCredentials") : messages.t("noProviders")}</div>`
+        : visible.length === 0 ? html`<div class="empty ui-dialog-empty">${messages.t("noMatches")}</div>`
+        : visible.map((option, index) => html`
           <button
-            class=${index === this.selectedIndex ? "selected" : ""}
+            class=${`ui-button ui-selection-option ${index === this.selectedIndex ? "selected" : ""}`}
             aria-current=${index === this.selectedIndex ? "true" : nothing}
             ${scrollWhenSelected(index === this.selectedIndex, option.key)}
             @focus=${() => { this.selectedIndex = index; }}
             @click=${() => { option.run(); }}
           >
             <span>${option.title}</span>
-            <small>${option.detail}</small>
+            <small class="ui-selection-detail"><bdi>${option.detail}</bdi></small>
           </button>
         `)}
       </div>
     `;
   }
 
-  /** Selectable choices for the option-list steps; undefined on the oauth step, which has no roving selection. */
-  private optionsFor(state: AuthDialogState): AuthDialogOption[] | undefined {
-    switch (state.step) {
-      case "method":
-        return [
-          { key: "oauth", title: "Use a subscription", detail: "ChatGPT Plus/Pro, Claude Pro/Max, or GitHub Copilot", run: () => { this.onChooseMethod?.("oauth"); } },
-          { key: "api_key", title: "Use provider credentials", detail: "Configure an API key or provider-specific credentials in the active Pi-compatible profile's auth.json", run: () => { this.onChooseMethod?.("api_key"); } },
-        ];
-      case "providers":
-        return state.providers.map((provider) => ({
-          key: provider.id,
-          title: html`${provider.name}${provider.status.source !== undefined ? html` <em>${statusLabel(provider)}</em>` : null}`,
-          detail: `${provider.id} · ${authTypeLabel(provider.authType)}`,
-          run: () => { this.onSelectProvider?.(provider.id, provider.authType); },
-        }));
-      case "logout":
-        return state.providers.map((provider) => ({
-          key: provider.id,
-          title: provider.name,
-          detail: `${provider.id} · ${authTypeLabel(provider.authType)}`,
-          run: () => { this.onLogoutProvider?.(provider.id); },
-        }));
-      case "oauth":
-        return undefined;
-    }
-  }
-
   private renderOAuth(state: Extract<AuthDialogState, { step: "oauth" }>) {
     const flow = state.flow;
-    const prompt = flow.prompt;
-    const select = flow.select;
+    const isMcp = flow.target === "mcp";
+    const running = flow.status === "running";
+    const prompt = running && flow.cancelRequested !== true ? flow.prompt : undefined;
+    const select = running && flow.cancelRequested !== true ? flow.select : undefined;
+    const showAuthorization = flow.auth !== undefined && (!isMcp || (running && flow.cancelRequested !== true));
     const promptInputType = prompt === undefined ? undefined : oauthPromptInputType(prompt.promptType);
-    // Only a manual-code prompt accepts a pasted redirect URL, so the note stays out of
-    // device-code and browser-callback flows that offer the user nothing to paste.
-    const showPasteNote = isBrowserRemoteOAuthMachine(state.machineId, window.location.hostname)
+    // Pi's MCP bridge uses a text input for its redirect fallback; provider
+    // flows identify this interaction explicitly with manual_code.
+    const showPasteNote = (isMcp || isBrowserRemoteOAuthMachine(state.machineId, window.location.hostname))
       && flow.status === "running"
-      && prompt?.promptType === "manual_code";
+      && (isMcp ? prompt !== undefined && flow.auth !== undefined : prompt?.promptType === "manual_code");
     return html`
-      <div class="form">
-        ${flow.auth !== undefined ? html`
-          <p>Open this authorization link:</p>
-          <p><a href=${flow.auth.url} target="_blank" rel="noreferrer">${flow.auth.url}</a></p>
+      <div class="form ui-dialog-body ui-form-body">
+        ${showAuthorization && flow.auth !== undefined ? html`
+          <p>${isMcp ? messages.t("approveBrowser") : messages.t("authorizationLink")}</p>
+          <p><a class=${isMcp ? "ui-button ui-button--action" : nothing} href=${flow.auth.url} target="_blank" rel="noopener noreferrer">${isMcp ? messages.t("authorizationPage") : html`<bdi dir="ltr">${flow.auth.url}</bdi>`}</a></p>
           ${flow.auth.deviceCode !== undefined ? html`
-            <p class="warning">Enter code: <code>${flow.auth.deviceCode.userCode}</code></p>
+            <p class="warning">${messages.rich("enterCode", { codeTag: (chunks) => html`<code dir="ltr">${chunks}</code>`, code: flow.auth.deviceCode.userCode })}</p>
           ` : flow.auth.instructions !== undefined ? html`<p class="warning">${flow.auth.instructions}</p>` : null}
-        ` : html`<p>Starting login flow…</p>`}
-        ${showPasteNote ? html`<p class="warning">After you approve, the redirect page will probably fail to load — that is expected. Copy the full URL from your browser's address bar and paste it below.</p>` : null}
-        ${flow.progress.length > 0 ? html`<ul class="progress">${flow.progress.map((line) => html`<li>${line}</li>`)}</ul>` : null}
+        ` : isMcp ? select !== undefined ? null : html`<p role="status">${flow.cancelRequested === true && running ? messages.t("cancellationRequested") : !running ? messages.t("finished") : messages.t("waiting")}</p>` : html`<p>${messages.t("startingLogin")}</p>`}
+        ${isMcp && flow.mcpMode === "logout" ? html`<p class="warning">${messages.t("logoutWarning")}</p>` : null}
+        ${isMcp && flow.mcpMode === "login" && flow.status === "complete" && flow.auth === undefined && flow.cancelRequested !== true ? html`<p>${messages.t("reusedCredentials")}</p>` : null}
+        ${isMcp && flow.cancelRequested === true ? html`<p class="warning">${messages.t("cancelWarning")}</p>` : null}
+        ${showPasteNote ? html`<p class="warning">${isMcp ? messages.t("mcpPasteNote") : messages.t("remotePasteNote")}</p>` : null}
+        ${flow.progress.length > 0 ? html`<ul class="progress" aria-label=${messages.t("messages")}>${flow.progress.map((line) => html`<li dir="auto">${line}</li>`)}</ul>` : null}
         ${flow.info?.map((item) => item.links === undefined || item.links.length === 0 ? null : html`
-          <div class="info-links" aria-label="Related information">
+          <div class="info-links" aria-label=${messages.t("related")}>
             ${item.links.map((link) => html`<a href=${link.url} target="_blank" rel="noreferrer" title=${item.message}>${link.label ?? link.url}</a>`)}
           </div>
         `) ?? null}
         ${prompt !== undefined ? html`
-          <label>${prompt.message}</label>
-          <input type=${promptInputType} autocomplete=${promptInputType === "password" ? "off" : "on"} .value=${state.inputValue ?? ""} placeholder=${prompt.placeholder ?? ""} @input=${(event: Event) => { if (event.target instanceof HTMLInputElement) this.onOAuthInput?.(event.target.value); }}>
-          <div class="actions"><button @click=${() => { this.onOAuthCancel?.(); }}>Cancel</button><button class="primary" ?disabled=${state.responding === true} @click=${() => { this.onOAuthRespond?.(); }}>Submit</button></div>
+          <label class="ui-form-field" for="oauth-prompt">
+            <bdi>${prompt.message}</bdi>
+            <input class="ui-input" dir="auto" id="oauth-prompt" type=${promptInputType} autocomplete=${promptInputType === "password" ? "off" : "on"} .value=${state.inputValue ?? ""} placeholder=${prompt.placeholder ?? ""} @input=${(event: Event) => { if (event.target instanceof HTMLInputElement) this.onOAuthInput?.(event.target.value); }}>
+          </label>
+          <div class="actions ui-form-actions"><button class="ui-button" @click=${() => { this.onOAuthCancel?.(); }}>${messages.t("cancel")}</button><button class="ui-button ui-button--primary" ?disabled=${state.responding === true} @click=${() => { this.onOAuthRespond?.(); }}>${messages.t("submit")}</button></div>
         ` : null}
         ${select !== undefined ? html`
           <p>${select.message}</p>
-          <div class="inline-options">${select.options.map((option) => html`
-            <button @click=${() => { this.onOAuthRespond?.(option.value); }}>
-              <span>${option.label}</span>
-              ${option.description === undefined ? null : html`<small>${option.description}</small>`}
+          <div class="inline-options ui-selection-list">${select.options.map((option) => html`
+            <button class="ui-button ui-selection-option" ?disabled=${state.responding === true} @click=${() => { this.onOAuthRespond?.(option.value); }}>
+              <span><bdi>${option.label}</bdi></span>
+              ${option.description === undefined ? null : html`<small class="ui-selection-detail">${option.description}</small>`}
             </button>
           `)}</div>
         ` : null}
-        ${state.error !== undefined && state.error !== "" ? html`<div class="error-text">${state.error}</div>` : null}
-        ${flow.status === "error" || flow.status === "cancelled" ? html`<div class="error-text">${flow.error ?? flow.status}</div><div class="actions"><button @click=${() => { this.cancel(); }}>Close</button></div>` : null}
-        ${prompt === undefined && select === undefined && flow.status === "running" ? html`<div class="actions"><button @click=${() => { this.onOAuthCancel?.(); }}>Cancel</button></div>` : null}
+        ${state.error !== undefined && state.error !== "" ? html`<div class="error-text ui-form-error">${state.error}</div>` : null}
+        ${flow.status === "error" || flow.status === "cancelled" ? html`<div class="error-text ui-form-error" role="alert">${flow.error ?? messages.t(flow.status === "error" ? "failed" : "cancelled")}</div>` : null}
+        ${!running ? html`<div class="actions ui-form-actions"><button class="ui-button" @click=${() => { this.cancel(); }}>${messages.t("close")}</button></div>` : null}
+        ${prompt === undefined && (select === undefined || isMcp) && running ? html`<div class="actions ui-form-actions"><button class="ui-button" @click=${() => { if (flow.cancelRequested === true) this.onCancel?.(); else this.onOAuthCancel?.(); }}>${messages.t(flow.cancelRequested === true ? "close" : "cancel")}</button></div>` : null}
       </div>
     `;
   }
@@ -186,8 +263,8 @@ export class AuthDialog extends LitElement {
     const state = this.state;
     if (state === undefined || keyboardEventOriginatesFromNativeActivationControl(event)) return;
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-      const options = this.optionsFor(state);
-      if (options === undefined || options.length === 0) return;
+      const options = this.visibleOptions(state);
+      if (options.length === 0) return;
       event.preventDefault();
       const delta = event.key === "ArrowDown" ? 1 : -1;
       this.selectedIndex = (this.selectedIndex + delta + options.length) % options.length;
@@ -200,7 +277,7 @@ export class AuthDialog extends LitElement {
       this.onOAuthRespond?.();
       return;
     }
-    const option = this.optionsFor(state)?.[this.selectedIndex];
+    const option = this.visibleOptions(state)[this.selectedIndex];
     if (option === undefined) return;
     event.preventDefault();
     option.run();
@@ -208,40 +285,17 @@ export class AuthDialog extends LitElement {
 
   private cancel(): void {
     const state = this.state;
-    if (state?.step === "oauth") this.onOAuthCancel?.();
+    if (state?.step === "oauth" && state.flow.cancelRequested !== true) this.onOAuthCancel?.();
     else this.onCancel?.();
   }
 
-  static override styles = [css`
-    :host { position: fixed; inset: 0; z-index: 10; color: var(--pi-text); font: 14px system-ui, sans-serif; }
-    modal-surface { --modal-surface-width: min(720px, calc(100vw - 40px)); --modal-surface-max-height: min(640px, calc(100vh - 40px)); }
-    header { display: flex; align-items: center; justify-content: space-between; padding: 12px; border-bottom: 1px solid var(--pi-border); }
-    .options { min-height: 0; overflow: auto; outline: none; }
-    button { border: 0; background: transparent; color: var(--pi-text); cursor: pointer; }
-    header button { font-size: 20px; color: var(--pi-muted); }
-    input { margin: 10px 12px; border: 1px solid var(--pi-border); border-radius: 8px; background: var(--pi-bg); color: var(--pi-text); font: var(--pi-control-font-size, 16px) var(--pi-control-font-family, system-ui, sans-serif); padding: 8px 10px; outline: none; }
-    input:focus { border-color: var(--pi-accent); }
-    .options button { display: block; width: 100%; padding: 10px 12px; border-bottom: 1px solid var(--pi-border-muted); text-align: left; }
-    .options button.selected, .options button:hover { background: var(--pi-selection-bg); }
-    small { display: block; margin-top: 4px; color: var(--pi-muted); }
-    .empty { padding: 24px; color: var(--pi-muted); text-align: center; }
-  `, css`
-    .form { display: grid; gap: 12px; padding: 14px; overflow: auto; }
+  static override styles = [uiDialogStyles, uiFormStyles, uiSelectionStyles, css`
     .form p { margin: 0; color: var(--pi-text-secondary); overflow-wrap: anywhere; }
     .form a { color: var(--pi-accent); overflow-wrap: anywhere; }
     .form code { border: 1px solid var(--pi-border); border-radius: 4px; background: var(--pi-surface); padding: 1px 4px; }
-    label { color: var(--pi-muted); }
-    .actions { display: flex; justify-content: flex-end; gap: 8px; }
-    .actions button, .inline-options button { border: 1px solid var(--pi-border); border-radius: 8px; background: var(--pi-surface); color: var(--pi-text); padding: 7px 9px; }
-    .actions button.primary { border-color: var(--pi-success-border); background: var(--pi-success-surface); color: var(--pi-success); }
-    .actions button:disabled { opacity: .6; cursor: wait; }
     .warning { color: var(--pi-warning); }
-    .error-text { color: var(--pi-danger); }
-    .progress { margin: 0; padding-left: 18px; color: var(--pi-muted); }
+    .progress { margin: 0; padding-inline-start: 18px; color: var(--pi-muted); }
     .info-links { display: flex; flex-wrap: wrap; gap: 8px 12px; }
-    .inline-options { display: grid; gap: 8px; }
-    .inline-options button { display: grid; gap: 2px; text-align: left; }
-    .inline-options small { color: var(--pi-muted); }
     em { color: var(--pi-success); font-style: normal; font-size: 12px; }
   `];
 }
@@ -269,7 +323,7 @@ export function isBrowserRemoteOAuthMachine(machineId: string, hostname: string)
 }
 
 function authTypeLabel(authType: "oauth" | "api_key"): string {
-  return authType === "oauth" ? "subscription" : "credentials";
+  return messages.t(authType === "oauth" ? "typeSubscription" : "typeCredentials");
 }
 
 /**
@@ -303,6 +357,7 @@ function authDialogStateStep(value: unknown): AuthDialogState["step"] | undefine
   if (typeof value !== "object" || value === null || !("step" in value)) return undefined;
   switch (value.step) {
     case "method":
+    case "starting":
     case "providers":
     case "oauth":
     case "logout":
@@ -315,12 +370,12 @@ function authDialogStateStep(value: unknown): AuthDialogState["step"] | undefine
 function statusLabel(provider: AuthProviderOption): string {
   if (provider.status.source === undefined) return "";
   switch (provider.status.source) {
-    case "stored": return "✓ configured";
-    case "environment": return `✓ env${provider.status.label === undefined ? "" : `: ${provider.status.label}`}`;
-    case "runtime": return "✓ runtime";
-    case "fallback": return "✓ custom key";
-    case "models_json_key": return "✓ models.json key";
-    case "models_json_command": return "✓ models.json command";
+    case "stored": return messages.t("configured");
+    case "environment": return provider.status.label === undefined ? messages.t("environment") : messages.t("environmentLabel", { label: provider.status.label });
+    case "runtime": return messages.t("runtime");
+    case "fallback": return messages.t("customKey");
+    case "models_json_key": return messages.t("modelsKey");
+    case "models_json_command": return messages.t("modelsCommand");
     default: return "";
   }
 }

@@ -1,21 +1,47 @@
-import type { PiWebPlugin } from "@jmfederico/pi-web/plugin-api";
+import type { StylesheetIntegrationCapabilityV1, PiWebPlugin, PluginCapability } from "@jmfederico/pi-web/plugin-api";
+import { createTasksLocalization } from "./tasksLocalization.js";
 import { TASKS_CONFIG_PATH } from "./config.js";
 import { defineTasksPanelElement, tasksPanelBadge } from "./tasksPanelElement.js";
 
-const plugin: PiWebPlugin = {
-  apiVersion: 2,
+const stylesheetIntegrationCapability: PluginCapability<StylesheetIntegrationCapabilityV1, 1> = {
+  pluginId: "pi-web", id: "stylesheet-integration", version: 1,
+  parse(value) {
+    if (!isStylesheetIntegration(value)) {
+      throw new Error("Stylesheet integration capability v1 requires registerRoot and createController");
+    }
+    return value;
+  },
+};
+
+function isStylesheetIntegration(value: unknown): value is StylesheetIntegrationCapabilityV1 {
+  return typeof value === "object" && value !== null
+    && "registerRoot" in value && typeof value.registerRoot === "function"
+    && "createController" in value && typeof value.createController === "function"
+    && "subscribe" in value && typeof value.subscribe === "function";
+}
+
+const plugin = {
+  apiVersion: 4,
   name: "Workspace Tasks",
-  activate: ({ runtimePluginId, html, svg }) => {
+  requires: [stylesheetIntegrationCapability],
+  activate: ({ runtimePluginId, html, svg, localization }) => {
+    if (localization === undefined) throw new Error("The Workspace Tasks plugin requires a localization-capable PI WEB host");
+    const translations = createTasksLocalization(localization);
+    const { messages } = translations;
     defineTasksPanelElement();
+    let stylesheetIntegration: StylesheetIntegrationCapabilityV1 | undefined;
 
     return {
+      start({ capabilities }) {
+        stylesheetIntegration = capabilities.resolve(stylesheetIntegrationCapability);
+      },
       contributions: {
         actions: [
           {
             id: "workspace.open-tasks",
-            title: "Open Workspace Tasks",
-            description: `Open the workspace Tasks tab. Configure tasks in ${TASKS_CONFIG_PATH}.`,
-            group: "Workspace",
+            get title() { return messages.t("openTasks"); },
+            get description() { return messages.t("openDescription", { path: TASKS_CONFIG_PATH }); },
+            get group() { return messages.t("workspace"); },
             enabled: (context) => context.state.selectedWorkspace !== undefined,
             run: (context) => {
               if (context.state.selectedWorkspace === undefined) return;
@@ -26,7 +52,7 @@ const plugin: PiWebPlugin = {
         workspacePanels: [
           {
             id: "workspace.tasks",
-            title: "Tasks",
+            get title() { return messages.t("tasks"); },
             icon: svg`
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M9 6h11"></path>
@@ -39,12 +65,12 @@ const plugin: PiWebPlugin = {
             `,
             order: 40,
             badge: (context) => tasksPanelBadge(context),
-            render: (context) => html`<pi-web-workspace-tasks-panel .context=${context}></pi-web-workspace-tasks-panel>`,
+            render: (context) => html`<pi-web-workspace-tasks-panel .translations=${translations} .stylesheetIntegration=${stylesheetIntegration} .context=${context}></pi-web-workspace-tasks-panel>`,
           },
         ],
       },
     };
   },
-};
+} satisfies PiWebPlugin;
 
 export default plugin;

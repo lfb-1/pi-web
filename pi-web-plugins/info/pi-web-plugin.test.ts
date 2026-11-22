@@ -1,7 +1,11 @@
+/// <reference types="vite/client" />
+// The host localization adapter uses Vite's import.meta.env contract.
 import { html, svg } from "lit";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PluginRuntimeContext } from "@jmfederico/pi-web/plugin-api";
 import plugin from "./pi-web-plugin.js";
+import { LocalizationService } from "../../src/client/src/localization/service.js";
+import { createPluginLocalization } from "../../src/client/src/plugins/localization.js";
 
 describe("Info plugin copy-diagnostics action", () => {
   afterEach(() => {
@@ -23,7 +27,7 @@ describe("Info plugin copy-diagnostics action", () => {
           isMain: true,
           provider: {
             pluginId: "git",
-            capabilities: { request: true, remove: true },
+            capabilities: { remove: true },
             metadata: { branch: "main" },
           },
         },
@@ -37,12 +41,23 @@ describe("Info plugin copy-diagnostics action", () => {
     expect(summary).toContain("PI WEB diagnostics");
     expect(summary).toContain("Status: unavailable");
     expect(summary).toContain("Machine: devbox (local machine)");
-    expect(summary).toContain("Workspace: pi-web — /srv/dev/pi-web (provider: git, main workspace)");
+    expect(summary).toContain("Workspace: pi-web — /srv/dev/pi-web (provider: git and main workspace)");
   });
 });
 
 function findCopyDiagnosticsAction() {
-  const action = plugin.activate({ apiVersion: 2, pluginId: "info", runtimePluginId: "info", html, svg }).contributions.actions?.find((candidate) => candidate.id === "copy-diagnostics");
+  const lifetime = new AbortController();
+  const service = new LocalizationService({ preferences: { language: "en", formatLocale: "en-US" } });
+  const action = plugin.activate({
+    localization: createPluginLocalization(service, "info", "info", lifetime.signal),
+    apiVersion: 4,
+    pluginId: "info",
+    runtimePluginId: "info",
+    html,
+    svg,
+    signal: new AbortController().signal,
+    lifetimeSignal: new AbortController().signal,
+  }).contributions.actions.find((candidate) => candidate.id === "copy-diagnostics");
   if (action === undefined) throw new Error("Expected copy-diagnostics action");
   return action;
 }
@@ -50,6 +65,7 @@ function findCopyDiagnosticsAction() {
 function runtimeContext(patch: Partial<PluginRuntimeContext> = {}): PluginRuntimeContext {
   const noop = () => undefined;
   return {
+    navigate: () => Promise.resolve(),
     state: {},
     prompt: { insertText: noop, getText: () => "", getSelection: () => null },
     openActionPalette: noop,

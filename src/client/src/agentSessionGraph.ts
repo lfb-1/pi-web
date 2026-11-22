@@ -1,5 +1,5 @@
 import type { SessionInfo } from "./api";
-import type { ChatLine, ChatPart } from "./components/shared";
+import type { ChatLine, ChatPart } from "./chatTypes";
 import { normalizeSessionPath } from "./sessionPaths";
 
 const SUBAGENT_SESSION_PREFIX = "subagent-";
@@ -97,8 +97,20 @@ export function isAgentChildSession(session: SessionInfo): boolean {
   return session.parentSessionPath !== undefined;
 }
 
-export function mainAgentSessions(sessions: readonly SessionInfo[]): SessionInfo[] {
-  return sessions.filter((session) => !isAgentChildSession(session));
+const mainAgentSessionCache = new WeakMap<readonly SessionInfo[], readonly SessionInfo[]>();
+
+/**
+ * Sessions shown in navigation: subagent children live in the agent graph.
+ * Memoized by input identity so unchanged lists keep their identity across
+ * renders (navigation components compare list identity to skip work).
+ */
+export function mainAgentSessions(sessions: readonly SessionInfo[]): readonly SessionInfo[] {
+  const cached = mainAgentSessionCache.get(sessions);
+  if (cached !== undefined) return cached;
+  const filtered = sessions.filter((session) => !isAgentChildSession(session));
+  const result = filtered.length === sessions.length ? sessions : filtered;
+  mainAgentSessionCache.set(sessions, result);
+  return result;
 }
 
 /** Return the nearest visible main session that owns a selected subagent. */

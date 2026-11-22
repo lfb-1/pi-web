@@ -1,8 +1,33 @@
 import { describe, expect, it } from "vitest";
-import { ASK_USER_TEXT_MAX_LENGTH, EXTENSION_DIALOG_TEXT_MAX_LENGTH, SESSION_NOTIFICATION_LIMIT, SESSION_NOTIFICATION_MESSAGE_BYTES, SESSION_UNREAD_CATALOG_ID_MAX_LENGTH } from "../../../shared/apiTypes";
-import { parseAskUserCloseResponse, parseAuthProvidersResponse, parseCommandResult, parseExtensionDialogCloseResponse, parseFileContentResponse, parseFileSuggestion, parseMachineRuntime, parseMessagePage, parseOAuthFlowState, parsePiPackageMutationResponse, parsePiPackagesResponse, parsePiWebConfigResponse, parsePiWebPluginsResponse, parsePiWebRuntimeResponse, parsePiWebStatusResponse, parseSessionBulkArchiveResponse, parseSessionBulkDeleteArchivedResponse, parseSessionCleanupExecuteResponse, parseSessionCleanupPreviewResponse, parseSessionInfo, parseSessionNotificationInboxEvent, parseSessionNotificationInboxSnapshot, parseSessionStartupProgressEvent, parseSessionStatus, parseSessionStreamSnapshot, parseSessionTreeForkResult, parseSessionTreeNavigateResult, parseSessionTreeSnapshot, parseSessionUnreadCatalogSnapshot, parseSessionUnreadEvent, parseSlashCommand, parseTerminalCommandRun, parseTerminalInfo, parseWorkspace, parseWorkspaceProviderResolution } from "./parsers";
+import { ASK_USER_COMMENT_MAX_LENGTH, ASK_USER_TEXT_MAX_LENGTH, EXTENSION_DIALOG_TEXT_MAX_LENGTH, SESSION_NOTIFICATION_LIMIT, SESSION_NOTIFICATION_MESSAGE_BYTES, SESSION_UNREAD_CATALOG_ID_MAX_LENGTH } from "../../../shared/apiTypes";
+import { parseAskUserRequest, parseAskUserOutcome, parseAuthProvidersResponse, parseCommandResult, parseExtensionDialogCloseResponse, parseFileContentResponse, parseFileSuggestion, parseMachine, parseMachineRuntime, parseMessagePage, parseMcpAuthServersResponse, parseOAuthFlowState, parsePiPackageMutationResponse, parsePiPackagesResponse, parsePiWebConfigResponse, parsePiWebPluginsResponse, parsePiWebRuntimeResponse, parsePiWebStatusResponse, parseRealtimeStreamEvent, parseSessionBulkArchiveResponse, parseSessionBulkDeleteArchivedResponse, parseSessionCleanupExecuteResponse, parseSessionCleanupPreviewResponse, parseSessionInfo, parseSessionModelCatalogResponse, parseSessionNotificationInboxEvent, parseSessionNotificationInboxSnapshot, parseSessionStartupProgressEvent, parseSessionStatus, parseSessionStreamEvent, parseSessionStreamSnapshot, parseSessionTreeForkResult, parseSessionTreeNavigateResult, parseSessionTreeSnapshot, parseSessionUnreadCatalogSnapshot, parseSessionUnreadEvent, parseSlashCommand, parseWorkspace, parseWorkspaceProviderResolution } from "./parsers";
+
+const legacyActivityWarning = {
+  severity: "info", source: "PI-WEB",
+  message: "Recently active in another PI-WEB instance. Avoid working on this session in both instances at once.",
+};
 
 describe("API parsers", () => {
+  it("preserves optional intervention state and validates live transitions", () => {
+    const info = { id: "s", path: "/s.jsonl", cwd: "/repo", created: "now", modified: "now", messageCount: 1, firstMessage: "hi" };
+    for (const interventionRequired of [true, false]) {
+      expect(parseSessionInfo({ ...info, interventionRequired }).interventionRequired).toBe(interventionRequired);
+      expect(parseSessionStatus({ ...statusWire(), interventionRequired }).interventionRequired).toBe(interventionRequired);
+      const event = parseRealtimeStreamEvent({ type: "status.update", status: { ...statusWire(), interventionRequired } });
+      expect(event.type === "status.update" && event.status.interventionRequired).toBe(interventionRequired);
+    }
+    expect(parseSessionInfo(info).interventionRequired).toBeUndefined();
+    expect(parseSessionStatus(statusWire()).interventionRequired).toBeUndefined();
+    expect(() => parseSessionInfo({ ...info, interventionRequired: "yes" })).toThrow("interventionRequired");
+    expect(() => parseSessionStatus({ ...statusWire(), interventionRequired: 1 })).toThrow("interventionRequired");
+  });
+
+  it("preserves remote naming metadata and supports older machine responses", () => {
+    const machine = { id: "remote", name: "Alias", kind: "remote", createdAt: "now", updatedAt: "now" };
+    expect(parseMachine(machine)).toEqual(machine);
+    expect(parseMachine({ ...machine, nameOverride: "Alias", reportedName: "Build lab" })).toMatchObject({ nameOverride: "Alias", reportedName: "Build lab" });
+    expect(() => parseMachine({ ...machine, nameOverride: 42 })).toThrow();
+  });
   it("preserves interactive API-key flow hints and defaults providers without one", () => {
     const base = { id: "openai", name: "OpenAI", authType: "api_key", status: { configured: false } };
 
@@ -35,6 +60,22 @@ describe("API parsers", () => {
     });
   });
 
+  it("preserves SDK MCP server descriptions without interpreting them as authentication status", () => {
+    const response = { servers: [{ name: "Budgeter", description: "connected" }, { name: "other" }] };
+    expect(parseMcpAuthServersResponse(response)).toEqual(response);
+    expect(() => parseMcpAuthServersResponse({ servers: [{ description: "missing name" }] })).toThrow();
+    const flow = { flowId: "mcp", providerId: "mcp", providerName: "Budgeter", target: "mcp", mcpMode: "logout", status: "running", progress: [] };
+    expect(parseOAuthFlowState(flow)).toEqual(flow);
+    expect(() => parseOAuthFlowState({ ...flow, mcpMode: "disconnect" })).toThrow("Invalid MCP authentication mode");
+  });
+
+  it("preserves MCP operation and cancellation state without treating completion as authentication", () => {
+    const flow = { flowId: "mcp-flow", providerId: "mcp", providerName: "MCP server", status: "complete", progress: ["Pi finished"], target: "mcp", cancelRequested: true };
+    expect(parseOAuthFlowState(flow)).toEqual(flow);
+    expect(() => parseOAuthFlowState({ ...flow, target: "unknown" })).toThrow("Invalid login flow target");
+    expect(() => parseOAuthFlowState({ ...flow, cancelRequested: "yes" })).toThrow();
+  });
+
   it("requires semantic prompt types on OAuth wire prompts", () => {
     const flow = {
       flowId: "flow-1",
@@ -48,20 +89,136 @@ describe("API parsers", () => {
     expect(() => parseOAuthFlowState({ ...flow, prompt: { requestId: "text", message: "Value", promptType: "kind" } })).toThrow("Invalid OAuth prompt type");
   });
 
+  it("retains deployment defaults and setting source metadata, rejecting malformed metadata", () => {
+    const response = { path: "config.json", exists: true, config: {}, effectiveConfig: {}, envOverrides: { host: false, port: false, allowedHosts: false, spawnSessions: false, subsessions: false, sessionMessages: false, askUser: false }, defaultsConfig: { basePaths: [], environmentFacts: false, extensionDialogsTimeoutMs: 0 }, defaultsPath: "defaults.json", enforcedSettings: { "/quietMode": "PI_WEB_QUIET_MODE" }, configSources: { "/basePaths": "defaults" } };
+    expect(parsePiWebConfigResponse(response)).toEqual(response);
+    expect(() => parsePiWebConfigResponse({ ...response, enforcedSettings: { "/quietMode": true } })).toThrow("configuration source");
+    expect(() => parsePiWebConfigResponse({ ...response, defaultsConfig: { basePaths: [42] } })).toThrow();
+  });
+
+  it("preserves explicit Host decisions and active runtime state without inventing choices for older servers", () => {
+    const response = { path: "config.json", exists: true, config: {}, effectiveConfig: {}, envOverrides: { host: false, port: false, allowedHosts: false, spawnSessions: false, subsessions: false, sessionMessages: false, askUser: false } };
+    expect(parsePiWebConfigResponse(response)).not.toHaveProperty("activeHostAccess");
+    expect(parsePiWebConfigResponse({ ...response, activeHostAccess: null }).activeHostAccess).toBeNull();
+    for (const hostAccess of [{ mode: "restricted", hosts: [] }, { mode: "restricted", hosts: ["gateway.local"] }, { mode: "any" }]) {
+      for (const field of ["config", "effectiveConfig", "defaultsConfig"] as const) {
+        expect(parsePiWebConfigResponse({ ...response, [field]: { hostAccess, allowedHosts: true } })[field]).toEqual({ hostAccess, allowedHosts: true });
+      }
+      expect(parsePiWebConfigResponse({ ...response, activeHostAccess: hostAccess }).activeHostAccess).toEqual(hostAccess);
+    }
+    // The shared validator owns the schema matrix; prove each response boundary uses it.
+    for (const field of ["config", "effectiveConfig", "defaultsConfig"] as const) {
+      expect(() => parsePiWebConfigResponse({ ...response, [field]: { hostAccess: null } })).toThrow("hostAccess");
+      expect(() => parsePiWebConfigResponse({ ...response, [field]: { hostAccess: { mode: "restricted" } } })).toThrow("hostAccess");
+    }
+    expect(() => parsePiWebConfigResponse({ ...response, activeHostAccess: { mode: "any", hosts: [] } })).toThrow("activeHostAccess");
+  });
+
+  it("parses and validates installation identity in config responses", () => {
+    const response = { path: "config.json", exists: true, config: { installationName: " Build lab " }, effectiveConfig: {}, envOverrides: { host: false, port: false, allowedHosts: false, maxUploadBytes: false, spawnSessions: false, subsessions: false, sessionMessages: false, askUser: false } };
+    expect(parsePiWebConfigResponse(response).config.installationName).toBe("Build lab");
+    expect(() => parsePiWebConfigResponse({ ...response, config: { installationName: 42 } })).toThrow("installationName");
+  });
+
   it("parses PI WEB config responses", () => {
     expect(parsePiWebConfigResponse({
       path: "/tmp/config.json",
       exists: true,
-      config: { host: "0.0.0.0", port: 8504, allowedHosts: ["example.local"], shortcuts: { "core:view.chat": "mod+1", "core:session.stop": null }, plugins: { info: { enabled: false, settings: { compact: true } } }, pathAccess: { allowedPaths: ["/tmp"] }, uploads: { defaultFolder: "manual/uploads" }, maxUploadBytes: 1234, agent: { command: "agent-lab", dir: "~/agent-profiles/lab" } },
-      effectiveConfig: { host: "127.0.0.1", port: 8504, allowedHosts: true, pathAccess: { allowedPaths: ["/tmp"] }, uploads: { defaultFolder: ".pi-web/uploads" }, agent: { command: "agent-lab", dir: "/Users/dev/agent-profiles/lab" } },
-      envOverrides: { host: true, port: false, allowedHosts: false, spawnSessions: false, subsessions: false, askUser: false },
+      config: { host: "0.0.0.0", port: 8504, allowedHosts: ["example.local"], shortcuts: { "core:view.chat": "mod+1", "core:session.stop": null }, plugins: { info: { enabled: false, settings: { compact: true } } }, pathAccess: { allowedPaths: ["/tmp"] }, uploads: { defaultFolder: "manual/uploads" }, attachments: { defaultFolder: "saved/attachments" }, maxUploadBytes: 1234, agent: { command: "agent-lab", dir: "~/agent-profiles/lab" } },
+      effectiveConfig: { host: "127.0.0.1", port: 8504, allowedHosts: true, pathAccess: { allowedPaths: ["/tmp"] }, uploads: { defaultFolder: ".pi-web/uploads" }, attachments: { defaultFolder: ".pi-web/attachments" }, agent: { command: "agent-lab", dir: "/Users/dev/agent-profiles/lab" } },
+      envOverrides: { host: true, port: false, allowedHosts: false, spawnSessions: false, subsessions: false, sessionMessages: false, askUser: false },
     })).toEqual({
       path: "/tmp/config.json",
       exists: true,
-      config: { host: "0.0.0.0", port: 8504, allowedHosts: ["example.local"], shortcuts: { "core:view.chat": "mod+1", "core:session.stop": null }, plugins: { info: { enabled: false, settings: { compact: true } } }, pathAccess: { allowedPaths: ["/tmp"] }, uploads: { defaultFolder: "manual/uploads" }, maxUploadBytes: 1234, agent: { command: "agent-lab", dir: "~/agent-profiles/lab" } },
-      effectiveConfig: { host: "127.0.0.1", port: 8504, allowedHosts: true, pathAccess: { allowedPaths: ["/tmp"] }, uploads: { defaultFolder: ".pi-web/uploads" }, agent: { command: "agent-lab", dir: "/Users/dev/agent-profiles/lab" } },
-      envOverrides: { host: true, port: false, allowedHosts: false, spawnSessions: false, subsessions: false, askUser: false },
+      config: { host: "0.0.0.0", port: 8504, allowedHosts: ["example.local"], shortcuts: { "core:view.chat": "mod+1", "core:session.stop": null }, plugins: { info: { enabled: false, settings: { compact: true } } }, pathAccess: { allowedPaths: ["/tmp"] }, uploads: { defaultFolder: "manual/uploads" }, attachments: { defaultFolder: "saved/attachments" }, maxUploadBytes: 1234, agent: { command: "agent-lab", dir: "~/agent-profiles/lab" } },
+      effectiveConfig: { host: "127.0.0.1", port: 8504, allowedHosts: true, pathAccess: { allowedPaths: ["/tmp"] }, uploads: { defaultFolder: ".pi-web/uploads" }, attachments: { defaultFolder: ".pi-web/attachments" }, agent: { command: "agent-lab", dir: "/Users/dev/agent-profiles/lab" } },
+      envOverrides: { host: true, port: false, allowedHosts: false, spawnSessions: false, subsessions: false, sessionMessages: false, askUser: false },
     });
+  });
+
+  it("preserves archive destinations for config round-trips without a UI control", () => {
+    const sessionArchive = { directory: "/external/archives" };
+    const response = { path: "/tmp/config.json", exists: true, config: { sessionArchive }, effectiveConfig: { sessionArchive }, envOverrides: { host: false, port: false, allowedHosts: false, spawnSessions: false, subsessions: false, sessionMessages: false, askUser: false } };
+    expect(parsePiWebConfigResponse(response)).toMatchObject({ config: { sessionArchive }, effectiveConfig: { sessionArchive } });
+  });
+
+  it("preserves and validates gateway localization defaults in both response fields", () => {
+    const defaultLocalization = { language: "fr", formatLocale: "de-DE", timeZone: "UTC", hourCycle: "h23" };
+    const response = { path: "/tmp/config.json", exists: true, config: {}, effectiveConfig: {},
+      envOverrides: { host: false, port: false, allowedHosts: false, spawnSessions: false, subsessions: false, sessionMessages: false, askUser: false } };
+    for (const field of ["config", "effectiveConfig"] as const) {
+      expect(parsePiWebConfigResponse({ ...response, [field]: { defaultLocalization } })[field]).toEqual({ defaultLocalization });
+      expect(() => parsePiWebConfigResponse({ ...response, [field]: { defaultLocalization: { timeZone: "Invalid/Zone" } } })).toThrow("PI WEB config defaultLocalization");
+    }
+  });
+
+  it("preserves theme defaults and rejects malformed theme data", () => {
+    const defaultTheme = { themeId: "themes:pi-web-light", auto: false };
+    const response = {
+      path: "/tmp/config.json", exists: true,
+      config: { defaultTheme }, effectiveConfig: { defaultTheme },
+      envOverrides: { host: false, port: false, allowedHosts: false, spawnSessions: false, subsessions: false, sessionMessages: false, askUser: false },
+    };
+    expect(parsePiWebConfigResponse(response)).toMatchObject({ config: { defaultTheme }, effectiveConfig: { defaultTheme } });
+    expect(() => parsePiWebConfigResponse({ ...response, config: { defaultTheme: "dark" } })).toThrow("PI WEB config defaultTheme");
+  });
+
+  it("preserves optional streaming defaults and rejects invalid values in both config fields", () => {
+    const response = {
+      path: "/tmp/config.json", exists: true, config: {}, effectiveConfig: {},
+      envOverrides: { host: false, port: false, allowedHosts: false, spawnSessions: false, subsessions: false, sessionMessages: false, askUser: false },
+    };
+    expect(parsePiWebConfigResponse(response)).toMatchObject({ config: {}, effectiveConfig: {} });
+    for (const field of ["config", "effectiveConfig"] as const) {
+      expect(parsePiWebConfigResponse(response)[field]).not.toHaveProperty("defaultStreamingBehavior");
+      for (const defaultStreamingBehavior of ["steer", "followUp"]) {
+        expect(parsePiWebConfigResponse({ ...response, [field]: { defaultStreamingBehavior } })[field]).toEqual({ defaultStreamingBehavior });
+      }
+      for (const defaultStreamingBehavior of ["", "followup", "queue", null, false, 42, {}, []]) {
+        expect(() => parsePiWebConfigResponse({ ...response, [field]: { defaultStreamingBehavior } })).toThrow("PI WEB config defaultStreamingBehavior");
+      }
+    }
+  });
+
+  it("preserves quiet mode and rejects invalid values in both config fields", () => {
+    const response = {
+      path: "/tmp/config.json", exists: true, config: {}, effectiveConfig: {},
+      envOverrides: { host: false, port: false, allowedHosts: false, spawnSessions: false, subsessions: false, sessionMessages: false, askUser: false },
+    };
+    for (const field of ["config", "effectiveConfig"] as const) {
+      expect(parsePiWebConfigResponse(response)[field]).not.toHaveProperty("quietMode");
+      for (const quietMode of [true, false]) {
+        expect(parsePiWebConfigResponse({ ...response, [field]: { quietMode } })[field]).toEqual({ quietMode });
+      }
+      for (const quietMode of ["true", 1, null, {}, []]) {
+        expect(() => parsePiWebConfigResponse({ ...response, [field]: { quietMode } })).toThrow("quietMode");
+      }
+    }
+  });
+
+  it("rejects the retired sessionNaming key in every config response layer", () => {
+    const response = {
+      path: "/tmp/config.json", exists: true, config: {}, effectiveConfig: {},
+      envOverrides: { host: false, port: false, allowedHosts: false, spawnSessions: false, subsessions: false, sessionMessages: false, askUser: false },
+    };
+    for (const field of ["config", "effectiveConfig", "defaultsConfig"] as const) {
+      for (const sessionNaming of [{ model: "openai/gpt-5" }, {}, null, undefined]) {
+        expect(() => parsePiWebConfigResponse({ ...response, [field]: { sessionNaming } })).toThrow("Retired PI WEB sessionNaming config field");
+      }
+    }
+  });
+
+  it("rejects malformed PI WEB attachments config fields", () => {
+    const response = {
+      path: "/tmp/config.json",
+      exists: true,
+      config: {},
+      effectiveConfig: {},
+      envOverrides: { host: false, port: false, allowedHosts: false, spawnSessions: false, subsessions: false, sessionMessages: false, askUser: false },
+    };
+
+    expect(() => parsePiWebConfigResponse({ ...response, config: { attachments: "saved/attachments" } })).toThrow("Invalid PI WEB attachments field");
+    expect(() => parsePiWebConfigResponse({ ...response, effectiveConfig: { attachments: [] } })).toThrow("Invalid PI WEB attachments field");
   });
 
   it("parses PI WEB runtime responses and ignores the daemon-reported active agent profile", () => {
@@ -154,8 +311,24 @@ describe("API parsers", () => {
       .toThrow("Invalid PI WEB deprecated agent inputs");
   });
 
+  it.each(["sessionMessages", "crossProjectSessionMessages"])("parses %s in every configuration layer and rejects non-booleans", (key) => {
+    const response = { path: "config.json", exists: true, config: { [key]: false }, effectiveConfig: { [key]: true }, defaultsConfig: { [key]: true }, envOverrides: { host: false, port: false, allowedHosts: false, spawnSessions: false, subsessions: false, sessionMessages: true, askUser: false } };
+    expect(parsePiWebConfigResponse(response)).toEqual(response);
+    for (const layer of ["config", "effectiveConfig", "defaultsConfig"] as const) {
+      expect(() => parsePiWebConfigResponse({ ...response, [layer]: { [key]: "false" } })).toThrow();
+    }
+  });
+
+  it("accepts legacy config responses without the messaging override flag but rejects malformed supplied values", () => {
+    const response = { path: "config.json", exists: true, config: {}, effectiveConfig: {}, envOverrides: { host: false, port: false, allowedHosts: false, spawnSessions: false, subsessions: false, askUser: false } };
+    expect(parsePiWebConfigResponse(response)).toEqual({ ...response, envOverrides: { ...response.envOverrides, sessionMessages: false } });
+    for (const sessionMessages of ["false", 0, null]) {
+      expect(() => parsePiWebConfigResponse({ ...response, envOverrides: { ...response.envOverrides, sessionMessages } })).toThrow();
+    }
+  });
+
   it("rejects config responses missing a required override flag", () => {
-    const envOverrides = { host: false, port: false, allowedHosts: false, spawnSessions: false, subsessions: false, askUser: false };
+    const envOverrides = { host: false, port: false, allowedHosts: false, spawnSessions: false, subsessions: false, sessionMessages: false, askUser: false };
     for (const flag of ["host", "port", "allowedHosts", "spawnSessions", "subsessions", "askUser"] as const) {
       const incomplete = Object.fromEntries(Object.entries(envOverrides).filter(([key]) => key !== flag));
       expect(() => parsePiWebConfigResponse({
@@ -190,13 +363,29 @@ describe("API parsers", () => {
     expect(() => parsePiPackagesResponse({ packages: [{ source: "npm:@acme/tools", scope: "user", filtered: "no" }] })).toThrow("Expected boolean field: filtered");
   });
 
+  it("parses installable known package suggestions when present and omits the field when absent", () => {
+    const installableKnownPackages = [{ id: "@jmfederico/pi-relay", label: "Relays", description: "Relay method prompts and skill.", source: "/pi-web/dist/pi-packages/relays" }];
+
+    expect(parsePiPackagesResponse({ packages: [], installableKnownPackages })).toEqual({ packages: [], installableKnownPackages });
+    expect(parsePiPackagesResponse({ packages: [] })).toEqual({ packages: [] });
+    expect(parsePiPackageMutationResponse({ action: "install", packages: [], installableKnownPackages })).toEqual({
+      action: "install",
+      packages: [],
+      installableKnownPackages,
+    });
+  });
+
+  it("rejects malformed installable known package suggestions", () => {
+    expect(() => parsePiPackagesResponse({ packages: [], installableKnownPackages: [{ id: "@acme/known", label: "Known", description: "desc" }] })).toThrow("Expected string field: source");
+  });
+
   it("parses Docker PI WEB installation metadata", () => {
     const response = {
       packageName: "@jmfederico/pi-web",
       generatedAt: "now",
       components: {
-        web: { component: "web", label: "Web/UI", runtimeVersion: "1.0.0", available: true, stale: false, installation: { kind: "docker", path: "/srv/pi-web-docker", dockerMode: "runtime" } },
-        sessiond: { component: "sessiond", label: "Session daemon", runtimeVersion: "1.0.0", available: true, stale: false, installation: { kind: "docker", dockerMode: "dev" } },
+        web: { component: "web", label: "Web/UI", runtimeVersion: "1.0.0", piVersion: "0.84.1", available: true, stale: false, installation: { kind: "docker", path: "/srv/pi-web-docker", dockerMode: "runtime" } },
+        sessiond: { component: "sessiond", label: "Session daemon", runtimeVersion: "1.0.0", piVersion: "0.83.0", available: true, stale: false, installation: { kind: "docker", dockerMode: "dev" } },
       },
       release: { packageName: "@jmfederico/pi-web", updateAvailable: false },
       commands: { restart: "pi-web-docker restart", status: "pi-web-docker status" },
@@ -207,6 +396,8 @@ describe("API parsers", () => {
 
     expect(parsed.components.web.installation).toEqual({ kind: "docker", path: "/srv/pi-web-docker", dockerMode: "runtime" });
     expect(parsed.components.sessiond.installation).toEqual({ kind: "docker", dockerMode: "dev" });
+    expect(parsed.components.web.piVersion).toBe("0.84.1");
+    expect(parsed.components.sessiond.piVersion).toBe("0.83.0");
     expect(parsed.commands).toEqual({ restart: "pi-web-docker restart", status: "pi-web-docker status" });
     expect(() => parsePiWebStatusResponse({
       ...response,
@@ -225,7 +416,7 @@ describe("API parsers", () => {
       clearSafeStart: "pi-web plugins safe-start clear --restart",
     };
     const response = {
-      lifecycleVersion: 1,
+      lifecycleVersion: 2,
       plugins: [
         {
           id: "info",
@@ -249,7 +440,7 @@ describe("API parsers", () => {
         { id: "workspace-provider", source: "local", scope: "user", enabled: true, discovered: false, conflict: false },
       ],
       diagnostics: [{ kind: "conflict", snapshot: "desired", source: "local", message: "Duplicate id", pluginId: "info" }],
-      serverRuntime: { status: "available", safeStart: "bundled-only", desiredSafeStart: "off", restartRequired: true, recovery },
+      serverRuntime: { status: "available", terminalMode: "required", safeStart: "bundled-only", desiredSafeStart: "off", restartRequired: true, recovery },
     };
 
     expect(parsePiWebPluginsResponse(response)).toEqual({
@@ -264,19 +455,20 @@ describe("API parsers", () => {
     });
 
     expect(parsed.plugins).toEqual([expect.objectContaining({ id: "info", enabled: true, discovered: true, conflict: false })]);
-    expect(parsed.serverRuntime).toMatchObject({ status: "incompatible", restartRequired: false });
+    expect(parsed.serverRuntime).toMatchObject({ status: "incompatible", terminalMode: "required", restartRequired: false });
     expect(parsed.serverRuntime.message).toContain("Update and restart PI WEB");
   });
 
   it("rejects malformed plugin lifecycle versions and recovery state", () => {
-    expect(() => parsePiWebPluginsResponse({ lifecycleVersion: 2, plugins: [], diagnostics: [], serverRuntime: {} }))
+    expect(() => parsePiWebPluginsResponse({ lifecycleVersion: 3, plugins: [], diagnostics: [], serverRuntime: {} }))
       .toThrow("Unsupported PI WEB plugin lifecycle version");
     expect(() => parsePiWebPluginsResponse({
-      lifecycleVersion: 1,
+      lifecycleVersion: 2,
       plugins: [],
       diagnostics: [],
       serverRuntime: {
         status: "available",
+        terminalMode: "required",
         desiredSafeStart: "future",
         restartRequired: false,
         recovery: {
@@ -288,11 +480,12 @@ describe("API parsers", () => {
       },
     })).toThrow("Invalid desired PI WEB server-plugin safe-start state");
     expect(() => parsePiWebPluginsResponse({
-      lifecycleVersion: 1,
+      lifecycleVersion: 2,
       plugins: [],
       diagnostics: [],
       serverRuntime: {
         status: "available",
+        terminalMode: "required",
         restartRequired: false,
         recovery: {
           showSafeStart: "pi-web plugins safe-start show --token secret",
@@ -302,6 +495,22 @@ describe("API parsers", () => {
         },
       },
     })).toThrow("Invalid PI WEB server plugin recovery commands");
+    expect(() => parsePiWebPluginsResponse({
+      lifecycleVersion: 2,
+      plugins: [],
+      diagnostics: [],
+      serverRuntime: {
+        status: "unavailable",
+        terminalMode: "recovery-disabled",
+        restartRequired: false,
+        recovery: {
+          showSafeStart: "pi-web plugins safe-start show",
+          bundledOnly: "pi-web plugins safe-start set bundled-only --restart",
+          noServerPlugins: "pi-web plugins safe-start set none --restart",
+          clearSafeStart: "pi-web plugins safe-start clear --restart",
+        },
+      },
+    })).toThrow("Unavailable PI WEB runtime cannot declare Terminal recovery mode");
   });
 
   it("parses paged message responses and rejects legacy array message pages", () => {
@@ -410,6 +619,22 @@ describe("API parsers", () => {
     });
   });
 
+  it("preserves known presentation metadata across startup, session and global wire boundaries", () => {
+    const base = { sessionId: "test", phase: "active", label: "raw fallback", detail: "raw detail", at: "now" };
+    const startup = { ...base, startupPresentation: { intent: "create", stage: "extensions", catalogRefreshing: true } };
+    expect(parseSessionStartupProgressEvent({ type: "session.startup", activity: startup })).toEqual({ type: "session.startup", activity: startup });
+    for (const runtimePresentation of [{ kind: "runningTool" }, { kind: "model", value: "raw-model" }, { kind: "compactionFailed", detailKind: "compactionFailed" }]) {
+      const activity = { ...base, runtimePresentation };
+      const event = { type: "activity.update", activity };
+      expect(parseSessionStreamEvent(event)).toEqual(event);
+      expect(parseRealtimeStreamEvent(event)).toEqual(event);
+    }
+    for (const runtimePresentation of [null, "invalid", { kind: "future" }, { kind: "model", value: 3 }, { kind: "runningTool", detailKind: "future" }]) {
+      expect(parseSessionStreamEvent({ type: "activity.update", activity: { ...base, runtimePresentation } })).toEqual({ type: "activity.update", activity: base });
+    }
+    expect(parseSessionStartupProgressEvent({ type: "session.startup", activity: { ...base, startupPresentation: { intent: "create", stage: "future", catalogRefreshing: true } } })).toEqual({ type: "session.startup", activity: base });
+  });
+
   it("carries the startup marker so an opening session is not mistaken for a working one", () => {
     const activity = { sessionId: "session-1", phase: "active", label: "Opening session", detail: "Starting the Pi session", at: "2026-07-20T00:00:01.000Z", startup: true };
 
@@ -445,6 +670,7 @@ describe("API parsers", () => {
       ],
       totals: { archiveCount: 2, deleteCount: 4 },
       skippedBusySessionIds: ["busy-1"],
+      skippedPinnedSessionIds: ["pinned-1"],
     };
 
     expect(parseSessionCleanupPreviewResponse(preview)).toEqual(preview);
@@ -511,6 +737,94 @@ describe("API parsers", () => {
     expect(() => parseSessionInfo({ id: "s1", path: "", cwd: "/repo", parentSessionRelation: "branch", created: "now", modified: "now", messageCount: 0, firstMessage: "" })).toThrow("Invalid parentSessionRelation field");
   });
 
+  it("preserves only positive agent subsession signals and rejects malformed flags", () => {
+    const session = { id: "s1", path: "", cwd: "/repo", created: "now", modified: "now", messageCount: 0, firstMessage: "" };
+    expect(parseSessionInfo({ ...session, agentSubsession: true }).agentSubsession).toBe(true);
+    expect(parseSessionInfo(session)).not.toHaveProperty("agentSubsession");
+    expect(parseSessionInfo({ ...session, agentSubsession: false })).not.toHaveProperty("agentSubsession");
+    expect(() => parseSessionInfo({ ...session, agentSubsession: "true" })).toThrow("Expected optional boolean field: agentSubsession");
+  });
+
+  describe("session UI metadata", () => {
+    const session = {
+      id: "s1", path: "/sessions/s1.jsonl", cwd: "/repo", name: "Relay X leg 3",
+      created: "now", modified: "now", messageCount: 13, firstMessage: "Continue Relay X",
+    };
+    const metadata = {
+      "@jmfederico/pi-relay": { version: 1, packetPath: ".pi-web/relays/X", relayName: "X", leg: "3" },
+      workflow: { labels: ["review", null, true, 2], nested: { complete: false } },
+    };
+
+    it("preserves a detached namespaced JSON snapshot for session-list plugins", () => {
+      const parsed = parseSessionInfo({ ...session, metadata });
+      expect(parsed).toEqual({ ...session, metadata });
+      expect(parsed.metadata).not.toBe(metadata);
+      expect(parsed.metadata?.["workflow"]).not.toBe(metadata.workflow);
+      expect(parsed.metadata?.["workflow"]?.["labels"]).not.toBe(metadata.workflow.labels);
+      expect(parsed.metadata?.["workflow"]?.["nested"]).not.toBe(metadata.workflow.nested);
+    });
+
+    it("supports older responses without metadata and explicit empty snapshots", () => {
+      expect(parseSessionInfo(session)).not.toHaveProperty("metadata");
+      expect(parseSessionInfo({ ...session, metadata: {} }).metadata).toEqual({});
+    });
+
+    it.each([parseSessionStreamEvent, parseRealtimeStreamEvent])("preserves metadata on session.created events (%#)", (parse) => {
+      expect(parse({ type: "session.created", session: { ...session, metadata } })).toEqual({
+        type: "session.created", session: { ...session, metadata },
+      });
+    });
+
+    it.each([
+      { label: "null", value: null },
+      { label: "array", value: [] },
+      { label: "string", value: "metadata" },
+      { label: "null namespace", value: { workflow: null } },
+      { label: "array namespace", value: { workflow: [] } },
+      { label: "primitive namespace", value: { workflow: "private" } },
+      { label: "non-JSON value", value: { workflow: { value: undefined } } },
+      { label: "non-finite number", value: { workflow: { value: Number.NaN } } },
+    ])("rejects malformed metadata instead of passing it to plugins: $label", ({ value }) => {
+      expect(() => parseSessionInfo({ ...session, metadata: value })).toThrow("Invalid session metadata");
+    });
+  });
+
+  it("parses the model catalog with enabled state and natural catalog positions", () => {
+    expect(parseSessionModelCatalogResponse({
+      models: [
+        { provider: "anthropic", id: "claude-opus-4-6", name: "Claude Opus", contextWindow: 200_000, reasoning: { effort: "high" }, enabled: true, catalogIndex: 1 },
+        { provider: "anthropic", id: "claude-sonnet-4-5", enabled: false, editable: false, catalogIndex: 0 },
+      ],
+    })).toEqual({
+      models: [
+        { provider: "anthropic", id: "claude-opus-4-6", name: "Claude Opus", contextWindow: 200_000, reasoning: { effort: "high" }, enabled: true, catalogIndex: 1 },
+        { provider: "anthropic", id: "claude-sonnet-4-5", enabled: false, editable: false, catalogIndex: 0 },
+      ],
+    });
+  });
+
+  it.each(["all", "manual"] as const)("preserves the catalog's explicit %s scope independently of row membership", (scope) => {
+    const models = [{ provider: "p", id: "m", enabled: true }];
+    expect(parseSessionModelCatalogResponse({ models, scope })).toEqual({ models, scope });
+    expect(parseSessionModelCatalogResponse({ models: [], scope })).toEqual({ models: [], scope });
+  });
+
+  it("leaves an older server's availability mode unknown instead of inferring it from checked rows", () => {
+    const models = [{ provider: "p", id: "m", enabled: true }];
+    expect(parseSessionModelCatalogResponse({ models })).toEqual({ models });
+  });
+
+  it("rejects malformed model catalog entries", () => {
+    expect(() => parseSessionModelCatalogResponse({ models: [], scope: true })).toThrow("Invalid model catalog scope");
+    expect(() => parseSessionModelCatalogResponse({ models: [{ id: "m", enabled: true }] })).toThrow("Expected string field: provider");
+    expect(() => parseSessionModelCatalogResponse({ models: [{ provider: "p", enabled: true }] })).toThrow("Expected string field: id");
+    expect(() => parseSessionModelCatalogResponse({ models: [{ provider: "p", id: "m", enabled: "yes" }] })).toThrow("Expected boolean field: enabled");
+    expect(() => parseSessionModelCatalogResponse({ models: [{ provider: "p", id: "m", name: 4, enabled: true }] })).toThrow("Expected optional string field: name");
+    expect(() => parseSessionModelCatalogResponse({ models: [{ provider: "p", id: "m", enabled: true, editable: "yes" }] })).toThrow("Invalid PI WEB editable field");
+    expect(() => parseSessionModelCatalogResponse({ models: [{ provider: "p", id: "m", enabled: true, catalogIndex: -1 }] })).toThrow("Expected non-negative safe integer field: catalogIndex");
+    expect(() => parseSessionModelCatalogResponse({})).toThrow("Expected array response");
+  });
+
   it("validates session status including optional model and nullable context usage", () => {
     expect(parseSessionStatus({
       sessionId: "s1",
@@ -529,6 +843,7 @@ describe("API parsers", () => {
     })).toEqual({
       sessionId: "s1",
       persisted: true,
+      recentlyActiveElsewhere: false,
       isStreaming: false,
       isCompacting: true,
       isBashRunning: false,
@@ -541,6 +856,73 @@ describe("API parsers", () => {
       contextUsage: { tokens: null, contextWindow: 100, percent: 0.5 },
       thinkingLevel: "medium",
     });
+  });
+
+  it("preserves optional attachment metadata on queued messages", () => {
+    const queuedMessages = [{ kind: "steer", text: "image", hasAttachments: true, attachmentCount: 3 }, { kind: "followUp", text: "plain", hasAttachments: false, attachmentCount: 0 }, { kind: "followUp", text: "legacy" }];
+    expect(parseSessionStatus({ ...statusWire(), queuedMessages }).queuedMessages).toEqual(queuedMessages);
+    expect(() => parseSessionStatus({ ...statusWire(), queuedMessages: [{ kind: "steer", text: "invalid", hasAttachments: "yes" }] })).toThrow("Invalid PI WEB hasAttachments field");
+    for (const attachmentCount of [-1, 1.5, "2", Infinity]) {
+      expect(() => parseSessionStatus({ ...statusWire(), queuedMessages: [{ kind: "steer", text: "invalid", attachmentCount }] })).toThrow();
+    }
+  });
+
+  it("preserves the optional queue compatibility reason and accepts older statuses", () => {
+    expect(parseSessionStatus(statusWire())).not.toHaveProperty("queueMessageActionsUnavailable");
+    for (const queueMessageActionsUnavailable of ["SDK queue layout is incompatible", ""]) {
+      expect(parseSessionStatus({ ...statusWire(), queueMessageActionsUnavailable }).queueMessageActionsUnavailable).toBe(queueMessageActionsUnavailable);
+    }
+    for (const queueMessageActionsUnavailable of [42, null, false, {}]) {
+      expect(() => parseSessionStatus({ ...statusWire(), queueMessageActionsUnavailable })).toThrow("Expected optional string field: queueMessageActionsUnavailable");
+    }
+  });
+
+  it("parses optional suggested input verbatim, including empty input", () => {
+    expect(parseSessionStatus(statusWire()).suggestedInput).toBeUndefined();
+    for (const suggestedInput of ["suggestion\nwith whitespace  ", ""]) {
+      expect(parseSessionStatus({ ...statusWire(), suggestedInput }).suggestedInput).toBe(suggestedInput);
+    }
+    expect(() => parseSessionStatus({ ...statusWire(), suggestedInput: 42 })).toThrow("Expected optional string field: suggestedInput");
+  });
+
+  it("rebuilds a payload-free tree invalidation and rejects retired tree result events", () => {
+    expect(parseSessionStreamEvent({ type: "session.tree.changed", result: { editorText: "ignored" } })).toEqual({ type: "session.tree.changed" });
+    for (const type of ["session.tree.navigated", "session.tree.forked"]) {
+      expect(() => parseSessionStreamEvent({ type, result: { cancelled: true } })).toThrow("Unsupported session stream event type");
+    }
+  });
+
+  it.each([true, false])("preserves recentlyActiveElsewhere=%s independently of warnings", (recentlyActiveElsewhere) => {
+    const wire = { ...statusWire(), recentlyActiveElsewhere };
+    expect(parseSessionStatus(wire)).toMatchObject({ recentlyActiveElsewhere });
+    expect(parseRealtimeStreamEvent({ type: "status.update", status: wire })).toEqual({
+      type: "status.update", status: parseSessionStatus(wire),
+    });
+    expect(parseSessionStatus(wire).warnings).toBeUndefined();
+  });
+
+  it("normalizes older daemon activity warnings into status while retaining ordinary diagnostics", () => {
+    const skillWarning = { severity: "error", message: "bad skill", source: "skill" };
+    const extensionWarning = { ...legacyActivityWarning, source: "extension" };
+    const parsed = parseSessionStatus({ ...statusWire(), warnings: [legacyActivityWarning, skillWarning, extensionWarning] });
+
+    expect(parsed.recentlyActiveElsewhere).toBe(true);
+    expect(parsed.warnings).toEqual([skillWarning, extensionWarning]);
+  });
+
+  it.each([true, false])("prefers explicit activity status %s over a legacy warning", (recentlyActiveElsewhere) => {
+    const parsed = parseSessionStatus({ ...statusWire(), recentlyActiveElsewhere, warnings: [legacyActivityWarning] });
+    expect(parsed.recentlyActiveElsewhere).toBe(recentlyActiveElsewhere);
+    expect(parsed.warnings).toEqual([]);
+  });
+
+  it("normalizes older snapshots without an activity warning to false", () => {
+    expect(parseSessionStatus(statusWire()).recentlyActiveElsewhere).toBe(false);
+    expect(parseSessionStatus({ ...statusWire(), warnings: [{ ...legacyActivityWarning, source: "extension" }] }).recentlyActiveElsewhere).toBe(false);
+  });
+
+  it.each(["true", 1, null])("rejects malformed recentlyActiveElsewhere: %s", (value) => {
+    expect(() => parseSessionStatus({ ...statusWire(), recentlyActiveElsewhere: value })).toThrow("Expected optional boolean field: recentlyActiveElsewhere");
   });
 
   it("parses live session warnings including optional source and path", () => {
@@ -564,6 +946,16 @@ describe("API parsers", () => {
       { severity: "error", message: "bad skill", source: "skill", path: "/skills/a.md" },
       { severity: "warning", message: "subscription active", source: "anthropic", dismiss: { id: "anthropicExtraUsage" } },
       { severity: "info", message: "heads up", source: "runtime" },
+    ]);
+  });
+
+  it("keeps known warning provenance and ignores malformed or future cosmetic metadata", () => {
+    const warning = { severity: "warning", message: "English fallback", dismiss: { id: "opaque-id" } };
+    const presentations = [{ kind: "anthropicSubscriptionAuth" }, { kind: "future" }, null, [], "invalid", { kind: 1 }];
+    const parsed = parseSessionStatus({ ...statusWire(), warnings: presentations.map((presentation) => ({ ...warning, presentation })) });
+    expect(parsed.warnings).toEqual([
+      { ...warning, presentation: { kind: "anthropicSubscriptionAuth" } },
+      ...presentations.slice(1).map(() => warning),
     ]);
   });
 
@@ -596,7 +988,7 @@ describe("API parsers", () => {
     })).toThrow("Invalid session warning severity");
   });
 
-  it("parses workspace effective upload config without retaining the removed top-level branch alias", () => {
+  it("parses workspace effective upload and attachments config without retaining the removed top-level branch alias", () => {
     const workspace = parseWorkspace({
       id: "w1",
       projectId: "p1",
@@ -604,7 +996,7 @@ describe("API parsers", () => {
       label: "main",
       branch: "legacy-wire-alias",
       isMain: true,
-      effectiveConfig: { uploads: { defaultFolder: "manual/uploads" } },
+      effectiveConfig: { uploads: { defaultFolder: "manual/uploads" }, attachments: { defaultFolder: "saved/attachments" } },
     });
 
     expect(workspace).toEqual({
@@ -613,7 +1005,7 @@ describe("API parsers", () => {
       path: "/repo",
       label: "main",
       isMain: true,
-      effectiveConfig: { uploads: { defaultFolder: "manual/uploads" } },
+      effectiveConfig: { uploads: { defaultFolder: "manual/uploads" }, attachments: { defaultFolder: "saved/attachments" } },
     });
     expect(workspace).not.toHaveProperty("branch");
   });
@@ -627,7 +1019,7 @@ describe("API parsers", () => {
       isMain: false,
       provider: {
         pluginId: "workspace-provider",
-        capabilities: { request: true, remove: true },
+        capabilities: { remove: true },
         metadata: { changeId: "abc", nested: [1, true, null] },
       },
       removal: { actionLabel: "Remove workspace", confirmation: "Remove secondary?", precondition: "v1.confirmed" },
@@ -640,12 +1032,31 @@ describe("API parsers", () => {
       isMain: false,
       provider: {
         pluginId: "workspace-provider",
-        capabilities: { request: true, remove: true },
+        capabilities: { remove: true },
         metadata: { changeId: "abc", nested: [1, true, null] },
       },
       removal: { actionLabel: "Remove workspace", confirmation: "Remove secondary?", precondition: "v1.confirmed" },
       effectiveConfig: {},
     });
+  });
+
+  it.each([
+    { kind: "gitWorktree", label: "review", path: "/repo/review" },
+    { kind: "future" },
+    { kind: "gitWorktree", label: 42, path: "/repo/review" },
+    null,
+  ])("retains valid optional removal localization and ignores unknown cosmetics: %j", (localization) => {
+    const removal = parseWorkspace({
+      id: "w1", projectId: "p1", path: "/repo/review", label: "review", isMain: false,
+      removal: { actionLabel: "Delete workspace", confirmation: "Raw confirmation", precondition: "v1.token", localization },
+      effectiveConfig: {},
+    }).removal;
+    expect(removal?.confirmation).toBe("Raw confirmation");
+    expect(removal?.precondition).toBe("v1.token");
+    if (localization?.kind === "gitWorktree" && typeof localization.label === "string") {
+      expect(removal?.localization).toEqual(localization);
+      expect(Object.isFrozen(removal?.localization)).toBe(true);
+    } else expect(removal).not.toHaveProperty("localization");
   });
 
   it("freezes host-owned workspace snapshots recursively", () => {
@@ -657,11 +1068,11 @@ describe("API parsers", () => {
       isMain: false,
       provider: {
         pluginId: "workspace-provider",
-        capabilities: { request: true, remove: true },
+        capabilities: { remove: true },
         metadata: { nested: [{ ready: true }] },
       },
       removal: { actionLabel: "Remove workspace", confirmation: "Remove secondary?", precondition: "v1.confirmed" },
-      effectiveConfig: { uploads: { defaultFolder: "manual/uploads" } },
+      effectiveConfig: { uploads: { defaultFolder: "manual/uploads" }, attachments: { defaultFolder: "saved/attachments" } },
     });
     const nested = workspace.provider?.metadata?.["nested"];
     if (!Array.isArray(nested)) throw new Error("Expected nested workspace metadata fixture");
@@ -675,6 +1086,7 @@ describe("API parsers", () => {
     expect(Object.isFrozen(workspace.removal)).toBe(true);
     expect(Object.isFrozen(workspace.effectiveConfig)).toBe(true);
     expect(Object.isFrozen(workspace.effectiveConfig.uploads)).toBe(true);
+    expect(Object.isFrozen(workspace.effectiveConfig.attachments)).toBe(true);
   });
 
   it("parses provider-neutral workspace resolution ownership and diagnostics", () => {
@@ -774,7 +1186,7 @@ describe("API parsers", () => {
       isMain: true,
       provider: {
         pluginId: "workspace-provider",
-        capabilities: { request: false, remove: false },
+        capabilities: { remove: false },
         metadata: { invalid: undefined },
       },
       effectiveConfig: {},
@@ -794,6 +1206,17 @@ describe("API parsers", () => {
   it("rejects invalid enum-like fields", () => {
     expect(() => parseSlashCommand({ name: "bad", source: "remote" })).toThrow("Invalid command source");
     expect(() => parseFileSuggestion({ path: "a", kind: "deleted" })).toThrow("Invalid file kind");
+  });
+
+  it("parses slash command argument hints and rejects malformed ones", () => {
+    expect(parseSlashCommand({ name: "pr", source: "prompt", description: "Review PRs from URLs", argumentHint: "<PR-URL>" })).toEqual({
+      name: "pr",
+      source: "prompt",
+      description: "Review PRs from URLs",
+      argumentHint: "<PR-URL>",
+    });
+    expect(parseSlashCommand({ name: "tree", source: "builtin" })).toEqual({ name: "tree", source: "builtin" });
+    expect(() => parseSlashCommand({ name: "pr", source: "prompt", argumentHint: 7 })).toThrow("Expected optional string field: argumentHint");
   });
 
   it("validates file content responses", () => {
@@ -816,61 +1239,6 @@ describe("API parsers", () => {
 
     expect(() => parseFileContentResponse({ encoding: "base64" })).toThrow("Invalid file encoding");
     expect(() => parseFileContentResponse({ ...textFile, mediaType: "video" })).toThrow("Invalid file media type");
-  });
-
-  it("parses terminal info with optional command-run ownership", () => {
-    expect(parseTerminalInfo({
-      id: "t1",
-      cwd: "/repo",
-      name: "Build",
-      createdAt: "now",
-      exited: false,
-      commandRunId: "run1",
-    })).toMatchObject({ id: "t1", commandRunId: "run1" });
-  });
-
-  it("parses terminal command runs", () => {
-    expect(parseTerminalCommandRun({
-      id: "run1",
-      origin: "core",
-      projectId: "p1",
-      workspaceId: "w1",
-      terminalId: "t1",
-      title: "Build",
-      command: "npm run build",
-      status: "succeeded",
-      exitCode: 0,
-      createdAt: "now",
-      startedAt: "then",
-      completedAt: "later",
-      metadata: { "pi.operation": "test" },
-    })).toEqual({
-      id: "run1",
-      origin: "core",
-      projectId: "p1",
-      workspaceId: "w1",
-      terminalId: "t1",
-      title: "Build",
-      command: "npm run build",
-      status: "succeeded",
-      exitCode: 0,
-      createdAt: "now",
-      startedAt: "then",
-      completedAt: "later",
-      metadata: { "pi.operation": "test" },
-    });
-    expect(() => parseTerminalCommandRun({
-      id: "run1",
-      origin: "core",
-      projectId: "p1",
-      workspaceId: "w1",
-      terminalId: "t1",
-      title: "Build",
-      command: "npm run build",
-      status: "done",
-      createdAt: "now",
-      metadata: {},
-    })).toThrow("Invalid terminal command run status");
   });
 
   it("parses command result variants", () => {
@@ -935,6 +1303,27 @@ describe("API parsers", () => {
     expect(() => parseSessionTreeForkResult({ session })).toThrow("cancelled");
   });
 
+  it.each([
+    { kind: "compactionCancelled" }, { kind: "automaticCompactionCancelled" }, { kind: "compactionFailed" },
+    { kind: "future" }, { kind: 42 }, null, [], "compactionFailed",
+  ].map((presentation) => ({ presentation })))("preserves known notification provenance and ignores cosmetic future/malformed metadata $presentation", ({ presentation }) => {
+    const inbox = notificationInboxWire();
+    const notification = { ...notificationWire(1), presentation };
+    const expected = presentation !== null && !Array.isArray(presentation) && typeof presentation === "object"
+      && typeof presentation.kind === "string" && ["compactionCancelled", "automaticCompactionCancelled", "compactionFailed"].includes(presentation.kind)
+      ? presentation : undefined;
+    expect(parseSessionNotificationInboxSnapshot({ ...inbox, notifications: [notification] }).notifications[0]?.presentation).toEqual(expected);
+    const event = {
+      type: "notifications.inbox", daemonInstanceId: "daemon-a", catalogRevision: 2,
+      summary: inbox.summary, dismissThrough: inbox.dismissThrough,
+      delta: { kind: "added", notification },
+    };
+    const parsed = parseSessionNotificationInboxEvent(event);
+    if (parsed.delta.kind !== "added") throw new Error("Expected added notification");
+    expect(parsed.delta.notification.presentation).toEqual(expected);
+    expect(parsed.delta.notification.message).toBe(notification.message);
+  });
+
   it("strictly parses selected notification snapshots and realtime events", () => {
     const inbox = notificationInboxWire();
 
@@ -947,6 +1336,25 @@ describe("API parsers", () => {
       dismissThrough: { order: 2, overflowWatermark: 0 },
       delta: { kind: "added", notification: notificationWire(2, "warning") },
     })).toMatchObject({ type: "notifications.inbox", delta: { kind: "added", notification: { severity: "warning" } } });
+    expect(parseRealtimeStreamEvent({ type: "models.changed", revision: 3 })).toEqual({ type: "models.changed", revision: 3 });
+    expect(() => parseRealtimeStreamEvent({ type: "models.changed", revision: -1 })).toThrow("safe integer");
+  });
+
+  it("validates scoped pin invalidations without trusting extra wire fields", () => {
+    const event = { type: "session-pins.changed", projectId: "p", workspaceId: "w", revision: 2 };
+    expect(parseRealtimeStreamEvent({ ...event, ids: ["untrusted"] })).toEqual(event);
+    for (const malformed of [{ projectId: "" }, { workspaceId: null }, { revision: -1 }]) {
+      expect(() => parseRealtimeStreamEvent({ ...event, ...malformed })).toThrow();
+    }
+  });
+
+  it("rebuilds global workspace invalidations from the validated project id", () => {
+    expect(parseRealtimeStreamEvent({ type: "workspaces.changed", projectId: "project-1", workspaces: [], seq: 3 }))
+      .toEqual({ type: "workspaces.changed", projectId: "project-1" });
+  });
+
+  it.each([undefined, null, "", 7, true, {}, []])("rejects a workspace invalidation with projectId %j", (projectId) => {
+    expect(() => parseRealtimeStreamEvent({ type: "workspaces.changed", projectId })).toThrow("string field: projectId");
   });
 
   it("rejects malformed, unsafe, over-cap, and oversized notification payloads", () => {
@@ -978,10 +1386,8 @@ describe("API parsers", () => {
     })).toThrow("Invalid notification clear reason");
   });
 
-  it("parses an open ask", () => {
-    const parsed = parseSessionStatus({ ...statusWire(), pendingAsk: pendingAskWire() });
-
-    expect(parsed.pendingAsk).toEqual({
+  it("parses a durable question request", () => {
+    expect(parseAskUserRequest(askRequestWire())).toEqual({
       askId: "ask-1",
       askedAt: "2026-07-20T00:00:00.000Z",
       questions: [
@@ -991,64 +1397,54 @@ describe("API parsers", () => {
     });
   });
 
-  it("omits the pending ask entirely when the field is absent", () => {
-    expect(parseSessionStatus(statusWire()).pendingAsk).toBeUndefined();
+  it("does not adopt legacy pending-question status as conversation state", () => {
+    expect(parseSessionStatus({ ...statusWire(), pendingAsk: askRequestWire() })).not.toHaveProperty("pendingAsk");
   });
 
-  it("validates an ask before rendering it", () => {
-    const ask = pendingAskWire();
+  it("validates a question payload before rendering it", () => {
+    const ask = askRequestWire();
     const first = ask.questions[0];
-    expect(() => parseSessionStatus({ ...statusWire(), pendingAsk: { ...ask, questions: [] } })).toThrow("Pending ask has no questions");
-    expect(() => parseSessionStatus({ ...statusWire(), pendingAsk: { ...ask, questions: [first, first] } })).toThrow("Duplicate ask question id");
-    expect(() => parseSessionStatus({ ...statusWire(), pendingAsk: { ...ask, askId: "" } })).toThrow("Expected non-empty string field: askId");
-    expect(parseSessionStatus({ ...statusWire(), pendingAsk: { ...ask, questions: [{ id: "q1", question: "Anything?", options: [] }] } }).pendingAsk?.questions[0])
+    expect(() => parseAskUserRequest({ ...ask, questions: [] })).toThrow("Ask has no questions");
+    expect(() => parseAskUserRequest({ ...ask, questions: [first, first] })).toThrow("Duplicate ask question id");
+    expect(() => parseAskUserRequest({ ...ask, askId: "" })).toThrow("Expected non-empty string field: askId");
+    expect(parseAskUserRequest({ ...ask, questions: [{ id: "q1", question: "Anything?", options: [] }] }).questions[0])
       .toEqual({ id: "q1", question: "Anything?", options: [] });
-    expect(() => parseSessionStatus({ ...statusWire(), pendingAsk: { ...ask, questions: [{ id: "q1", question: "Which?", options: [{ value: "a", label: "A" }, { value: "a", label: "Also A" }] }] } })).toThrow("Duplicate ask option value");
-    expect(() => parseSessionStatus({ ...statusWire(), pendingAsk: { ...ask, questions: [{ id: "q1", question: "x".repeat(ASK_USER_TEXT_MAX_LENGTH + 1), options: [{ value: "a", label: "A" }] }] } })).toThrow("String field exceeds limit: question");
+    expect(() => parseAskUserRequest({ ...ask, questions: [{ id: "q1", question: "Which?", options: [{ value: "a", label: "A" }, { value: "a", label: "Also A" }] }] })).toThrow("Duplicate ask option value");
+    expect(() => parseAskUserRequest({ ...ask, questions: [{ id: "q1", question: "x".repeat(ASK_USER_TEXT_MAX_LENGTH + 1), options: [] }] })).toThrow("String field exceeds limit: question");
   });
 
-  it("parses a closed ask response carrying the outcome and recomputed status", () => {
-    const response = parseAskUserCloseResponse({
-      result: "closed",
-      outcome: askOutcomeWire(),
-      sessionStatus: statusWire(),
+  it("parses the recorded human response", () => {
+    const outcome = parseAskUserOutcome(askOutcomeWire());
+    expect(outcome).toMatchObject({
+      askId: "ask-1", reason: "submitted", answeredCount: 1, unansweredIds: ["q2"], summary: "Answered 1 of 2; unanswered: q2",
     });
+    expect(outcome.questions[0]).toMatchObject({ answered: true, values: ["pg"] });
+  });
 
-    expect(response.result).toBe("closed");
-    expect(response.outcome).toMatchObject({
-      askId: "ask-1",
-      reason: "submitted",
-      answeredCount: 1,
-      unansweredIds: ["q2"],
-      summary: "Answered 1 of 2; unanswered: q2",
+  it("preserves comments when parsing the recorded response", () => {
+    const outcome = parseAskUserOutcome({
+      ...askOutcomeWire(),
+      questions: [{ ...askAnsweredRecordWire(), comment: "Use the existing cluster." }, askUnansweredRecordWire()],
     });
-    expect(response.outcome?.questions[0]).toMatchObject({ answered: true, values: ["pg"] });
-    expect(response.sessionStatus.sessionId).toBe("s1");
+    expect(outcome.questions[0]).toMatchObject({ answered: true, values: ["pg"], comment: "Use the existing cluster." });
   });
 
-  it("parses a stale close as an ordinary race with no outcome", () => {
-    const response = parseAskUserCloseResponse({ result: "stale", sessionStatus: statusWire() });
-
-    expect(response).toEqual({ result: "stale", sessionStatus: parseSessionStatus(statusWire()) });
+  it.each([7, "", "x".repeat(ASK_USER_COMMENT_MAX_LENGTH + 1)])("rejects malformed recorded comments (case %#)", (comment) => {
+    expect(() => parseAskUserOutcome({
+      ...askOutcomeWire(),
+      questions: [{ ...askAnsweredRecordWire(), comment }, askUnansweredRecordWire()],
+    })).toThrow();
   });
 
-  it("rejects close responses whose outcome contradicts itself", () => {
+  it("rejects answer records that contradict their payload", () => {
     const outcome = askOutcomeWire();
-    expect(() => parseAskUserCloseResponse({ result: "closed", sessionStatus: statusWire() })).toThrow("Ask close response outcome mismatch");
-    expect(() => parseAskUserCloseResponse({ result: "stale", outcome, sessionStatus: statusWire() })).toThrow("Ask close response outcome mismatch");
-    expect(() => parseAskUserCloseResponse({ result: "closed", outcome: { ...outcome, answeredCount: 2 }, sessionStatus: statusWire() })).toThrow("Ask outcome answered count mismatch");
-    expect(() => parseAskUserCloseResponse({ result: "closed", outcome: { ...outcome, unansweredIds: [] }, sessionStatus: statusWire() })).toThrow("Ask outcome unanswered ids mismatch");
-    expect(() => parseAskUserCloseResponse({ result: "closed", outcome: { ...outcome, reason: "ignored" }, sessionStatus: statusWire() })).toThrow("Invalid ask close reason");
-    expect(() => parseAskUserCloseResponse({
-      result: "closed",
-      outcome: { ...outcome, questions: [{ ...askAnsweredRecordWire(), answered: false }, askUnansweredRecordWire()] },
-      sessionStatus: statusWire(),
-    })).toThrow("Ask answer contradicts its answered flag");
-    expect(() => parseAskUserCloseResponse({
-      result: "closed",
-      outcome: { ...outcome, questions: [{ ...askAnsweredRecordWire(), values: ["mysql"] }, askUnansweredRecordWire()] },
-      sessionStatus: statusWire(),
-    })).toThrow("Ask answer selected an option the question never offered");
+    expect(() => parseAskUserOutcome({ ...outcome, answeredCount: 2 })).toThrow("Ask outcome answered count mismatch");
+    expect(() => parseAskUserOutcome({ ...outcome, unansweredIds: [] })).toThrow("Ask outcome unanswered ids mismatch");
+    expect(() => parseAskUserOutcome({ ...outcome, reason: "ignored" })).toThrow("Invalid ask close reason");
+    expect(() => parseAskUserOutcome({ ...outcome, questions: [{ ...askAnsweredRecordWire(), answered: false }, askUnansweredRecordWire()] }))
+      .toThrow("Ask answer contradicts its answered flag");
+    expect(() => parseAskUserOutcome({ ...outcome, questions: [{ ...askAnsweredRecordWire(), values: ["mysql"] }, askUnansweredRecordWire()] }))
+      .toThrow("Ask answer selected an option the question never offered");
   });
 
   it("parses open extension dialogs on the session status, oldest first", () => {
@@ -1137,7 +1533,7 @@ function statusWire() {
   };
 }
 
-function pendingAskWire() {
+function askRequestWire() {
   return {
     askId: "ask-1",
     askedAt: "2026-07-20T00:00:00.000Z",
@@ -1149,12 +1545,12 @@ function pendingAskWire() {
 }
 
 function askAnsweredRecordWire() {
-  const ask = pendingAskWire();
+  const ask = askRequestWire();
   return { question: ask.questions[0], answered: true, values: ["pg"] };
 }
 
 function askUnansweredRecordWire() {
-  const ask = pendingAskWire();
+  const ask = askRequestWire();
   return { question: ask.questions[1], answered: false, values: [] };
 }
 

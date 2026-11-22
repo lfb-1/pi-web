@@ -1,6 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RealtimeSocket, SessionSocket, parseRealtimeSocketEvent, parseSessionSocketEvent } from "./sessionSocket";
 
+it("validates optional command-output provenance without inferring it from English messages", () => {
+  const base = { type: "command.output", level: "error", message: "Authentication for raw/model was removed. Use /model to select another model." };
+  for (const presentation of [
+    { kind: "modelAuthRemoved", provider: "raw", model: "<model>" },
+    { kind: "sessionNamingFailed", detail: "<raw diagnostic>" },
+  ]) {
+    expect(parseSessionSocketEvent({ ...base, presentation })).toEqual({ ...base, presentation });
+  }
+  expect(parseSessionSocketEvent(base)).toEqual(base);
+  for (const presentation of [null, [], { kind: "future" }, { kind: "modelAuthRemoved", provider: 3, model: "id" }, { kind: "sessionNamingFailed" }]) {
+    expect(parseSessionSocketEvent({ ...base, presentation })).toEqual(base);
+  }
+});
+
 function notification(order = 1) {
   return {
     id: `daemon-a:${String(order)}`,
@@ -114,20 +128,16 @@ describe("notification socket guards", () => {
     expect(parseSessionSocketEvent({ type: "session.startup", activity })).toBeUndefined();
   });
 
-  it("accepts validated ask frames and drops malformed ones", () => {
+  it("carries question payloads in transcript frames rather than lifecycle frames", () => {
     const ask = {
       askId: "ask-1",
       askedAt: "2026-07-20T00:00:00.000Z",
       questions: [{ id: "q1", question: "Which database?", options: [{ value: "pg", label: "Postgres" }] }],
     };
-
-    expect(parseSessionSocketEvent({ type: "ask.opened", ask })).toEqual({ type: "ask.opened", ask });
-    expect(parseSessionSocketEvent({ type: "ask.closed", askId: "ask-1", reason: "superseded" }))
-      .toEqual({ type: "ask.closed", askId: "ask-1", reason: "superseded" });
-    expect(parseSessionSocketEvent({ type: "ask.opened", ask: { ...ask, questions: [] } })).toBeUndefined();
-    expect(parseSessionSocketEvent({ type: "ask.opened" })).toBeUndefined();
-    expect(parseSessionSocketEvent({ type: "ask.closed", askId: "ask-1", reason: "ignored" })).toBeUndefined();
-    // Ask frames are per-session only, so they must not be accepted globally.
+    const event = { type: "tool.end", toolName: "ask_user", toolCallId: "call-1", text: "Posted questions", isError: false, details: { ask }, seq: 9 };
+    expect(parseSessionSocketEvent(event)).toEqual(event);
+    expect(parseSessionSocketEvent({ type: "ask.opened", ask })).toBeUndefined();
+    expect(parseSessionSocketEvent({ type: "ask.closed", askId: "ask-1", reason: "submitted" })).toBeUndefined();
     expect(parseRealtimeSocketEvent({ type: "ask.opened", ask })).toBeUndefined();
   });
 
@@ -162,6 +172,7 @@ describe("notification socket guards", () => {
 function statusWire() {
   return {
     sessionId: "session-1",
+    recentlyActiveElsewhere: false,
     isStreaming: true,
     isCompacting: false,
     isBashRunning: false,
@@ -188,10 +199,6 @@ function sessionInfoWire() {
   };
 }
 
-function terminalInfoWire() {
-  return { id: "terminal-1", cwd: "/repo", name: "bash", createdAt: "2026-07-20T00:00:00.000Z", exited: false };
-}
-
 function machineStatusWire() {
   return {
     epochId: "epoch-1",
@@ -208,6 +215,9 @@ describe("socket stream validation", () => {
   it("accepts the full session stream vocabulary with valid payloads", () => {
     const validFrames = [
       { type: "message.append", message: { role: "user", content: [] } },
+      { type: "assistant.start", message: { role: "assistant", streamId: "stream-1", content: [] } },
+      { type: "assistant.delta", text: "hello", streamId: "stream-1" },
+      { type: "assistant.thinking.delta", text: "plan", streamId: "stream-1" },
       { type: "assistant.delta", text: "hello" },
       { type: "assistant.thinking.delta", text: "thinking" },
       { type: "tool.start", toolName: "read", toolCallId: "call-1", summary: "read file", args: { path: "/a" } },
@@ -225,15 +235,27 @@ describe("socket stream validation", () => {
       { type: "activity.update", activity: activityWire() },
       { type: "command.output", level: "success", message: "done" },
       { type: "session.error", message: "boom" },
+      { type: "session.diagnostic", message: "Provider returned HTTP 400" },
       { type: "session.name", sessionId: "session-1", name: "rename" },
       { type: "session.created", session: sessionInfoWire() },
+      { type: "session.tree.changed" },
       { type: "pi.event", eventType: "turn_start" },
     ];
     for (const frame of validFrames) expect(parseSessionSocketEvent(frame)).toEqual(frame);
   });
 
+  it("accepts factual tree invalidation without payload, retains seq, and rejects retired result events", () => {
+    const changed = { type: "session.tree.changed", seq: 41 };
+    expect(parseSessionSocketEvent({ ...changed, result: { editorText: "do not apply" }, session: sessionInfoWire(), stray: true })).toEqual(changed);
+    expect(parseRealtimeSocketEvent(changed)).toBeUndefined();
+    expect(parseSessionSocketEvent({ type: "session.tree.navigated", result: { cancelled: false, editorText: "old result" } })).toBeUndefined();
+    expect(parseSessionSocketEvent({ type: "session.tree.forked", result: { cancelled: false, session: sessionInfoWire(), promptDraft: "old draft" } })).toBeUndefined();
+  });
+
   it("drops malformed session stream frames instead of accepting them on type alone", () => {
     expect(parseSessionSocketEvent({ type: "message.append" })).toBeUndefined();
+    expect(parseSessionSocketEvent({ type: "assistant.start" })).toBeUndefined();
+    expect(parseSessionSocketEvent({ type: "assistant.delta", text: "hello", streamId: 7 })).toBeUndefined();
     expect(parseSessionSocketEvent({ type: "assistant.delta" })).toBeUndefined();
     expect(parseSessionSocketEvent({ type: "assistant.delta", text: 7 })).toBeUndefined();
     expect(parseSessionSocketEvent({ type: "assistant.thinking.delta", text: true })).toBeUndefined();
@@ -247,6 +269,8 @@ describe("socket stream validation", () => {
     expect(parseSessionSocketEvent({ type: "command.output", level: "verbose", message: "x" })).toBeUndefined();
     expect(parseSessionSocketEvent({ type: "command.output", level: "info" })).toBeUndefined();
     expect(parseSessionSocketEvent({ type: "session.error" })).toBeUndefined();
+    expect(parseSessionSocketEvent({ type: "session.diagnostic" })).toBeUndefined();
+    expect(parseSessionSocketEvent({ type: "session.diagnostic", message: {} })).toBeUndefined();
     expect(parseSessionSocketEvent({ type: "session.name", name: "rename" })).toBeUndefined();
     expect(parseSessionSocketEvent({ type: "session.name", sessionId: "" })).toBeUndefined();
     expect(parseSessionSocketEvent({ type: "session.created", session: { id: "session-1" } })).toBeUndefined();
@@ -254,7 +278,7 @@ describe("socket stream validation", () => {
     expect(parseSessionSocketEvent({ type: "status.update", status: { sessionId: "session-1" } })).toBeUndefined();
     expect(parseSessionSocketEvent({ type: "activity.update", activity: { ...activityWire(), phase: "waiting" } })).toBeUndefined();
     expect(parseSessionSocketEvent({ type: "session.startup", activity: activityWire() })).toBeUndefined();
-    expect(parseSessionSocketEvent({ type: "terminal.created", terminal: terminalInfoWire() })).toBeUndefined();
+    expect(parseSessionSocketEvent({ type: "terminal.created", terminal: { id: "terminal-1" } })).toBeUndefined();
     expect(parseSessionSocketEvent({ type: "totally.unknown" })).toBeUndefined();
   });
 
@@ -275,12 +299,15 @@ describe("socket stream validation", () => {
       { type: "activity.update", activity: activityWire() },
       { type: "session.name", sessionId: "session-1", name: "rename" },
       { type: "session.created", session: sessionInfoWire() },
-      { type: "terminal.created", terminal: terminalInfoWire() },
-      { type: "terminal.exited", terminal: { ...terminalInfoWire(), exited: true, exitCode: 0 } },
-      { type: "terminal.closed", terminalId: "terminal-1", cwd: "/repo" },
       { type: "machine.status", status: machineStatusWire() },
     ];
     for (const frame of validFrames) expect(parseRealtimeSocketEvent(frame)).toEqual(frame);
+  });
+
+  it("accepts workspace invalidations only on the global realtime socket", () => {
+    const event = { type: "workspaces.changed", projectId: "project-1" };
+    expect(parseRealtimeSocketEvent(event)).toEqual(event);
+    expect(parseSessionSocketEvent(event)).toBeUndefined();
   });
 
   it("keeps unrecognised status flags so a newer daemon's tree still arrives", () => {
@@ -331,6 +358,91 @@ class FakeWebSocket {
   }
 }
 
+describe("socket reconnect lifecycle", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    FakeWebSocket.instances.length = 0;
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    vi.stubGlobal("document", { baseURI: "https://pi.example.test/" });
+    vi.stubGlobal("window", { setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout });
+  });
+
+  afterEach(() => {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  function connection(): FakeWebSocket {
+    const socket = FakeWebSocket.instances.at(-1);
+    if (socket === undefined) throw new Error("expected socket");
+    return socket;
+  }
+
+  it("reports browser transport state and uses only the existing reconnect backoff", () => {
+    const socket = new SessionSocket();
+    const states = vi.fn();
+    const initial = vi.fn();
+    const reconnect = vi.fn();
+    socket.connect({ id: "session-1", cwd: "/repo" }, vi.fn(), reconnect, "local", initial, states);
+    expect(states).toHaveBeenLastCalledWith("connecting");
+    expect(vi.getTimerCount()).toBe(0);
+    connection().onopen?.();
+    expect(states).toHaveBeenLastCalledWith("open");
+    expect(initial).toHaveBeenCalledOnce();
+    vi.advanceTimersByTime(60000);
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    expect(vi.getTimerCount()).toBe(0);
+
+    connection().onclose?.();
+    expect(states).toHaveBeenLastCalledWith("connecting");
+    vi.advanceTimersByTime(499);
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    vi.advanceTimersByTime(1);
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    connection().onclose?.();
+    vi.advanceTimersByTime(799);
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    vi.advanceTimersByTime(1);
+    expect(FakeWebSocket.instances).toHaveLength(3);
+    connection().onopen?.();
+    expect(reconnect).toHaveBeenCalledOnce();
+    expect(states.mock.calls).toEqual([["connecting"], ["open"], ["connecting"], ["connecting"], ["connecting"], ["connecting"], ["open"]]);
+
+    connection().onclose?.();
+    vi.advanceTimersByTime(500);
+    expect(FakeWebSocket.instances).toHaveLength(4);
+    socket.close();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("cancels pending retries on resume and close for both socket types", () => {
+    const session = new SessionSocket();
+    const realtime = new RealtimeSocket();
+    session.connect({ id: "session-1", cwd: "/repo" }, vi.fn());
+    const sessionTransport = connection();
+    realtime.connect(vi.fn());
+    const realtimeTransport = connection();
+    sessionTransport.onclose?.();
+    realtimeTransport.onclose?.();
+    expect(vi.getTimerCount()).toBe(2);
+    session.reconnect();
+    realtime.reconnect();
+    expect(vi.getTimerCount()).toBe(0);
+    expect(FakeWebSocket.instances).toHaveLength(4);
+    vi.advanceTimersByTime(5000);
+    expect(FakeWebSocket.instances).toHaveLength(4);
+    FakeWebSocket.instances[2]?.onclose?.();
+    FakeWebSocket.instances[3]?.onclose?.();
+    expect(vi.getTimerCount()).toBe(2);
+    session.close();
+    realtime.close();
+    expect(vi.getTimerCount()).toBe(0);
+    vi.advanceTimersByTime(5000);
+    expect(FakeWebSocket.instances).toHaveLength(4);
+  });
+});
+
 describe("socket instance isolation", () => {
   const setTimeoutSpy = vi.fn(() => 1);
 
@@ -344,6 +456,114 @@ describe("socket instance isolation", () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it("replaces a silently stale OPEN socket and resynchronizes on browser open", async () => {
+    const socket = new SessionSocket();
+    const onEvent = vi.fn();
+    const onReconnect = vi.fn();
+    const onInitialOpen = vi.fn();
+    const states = vi.fn();
+    socket.connect({ id: "session-1", cwd: "/repo" }, onEvent, onReconnect, "machine-a", onInitialOpen, states);
+    const previous = FakeWebSocket.instances[0];
+    if (previous === undefined) throw new Error("expected initial socket");
+    previous.onopen?.();
+    const staleOpen = previous.onopen;
+    const staleClose = previous.onclose;
+    previous.onmessage?.({ data: JSON.stringify(inboxEvent()) });
+
+    socket.reconnect();
+    staleOpen?.();
+    staleClose?.();
+    await Promise.resolve();
+    await Promise.resolve();
+    const replacement = FakeWebSocket.instances[1];
+    if (replacement === undefined) throw new Error("expected replacement socket");
+    expect(previous.readyState).toBe(3);
+    expect(replacement.url).toBe(previous.url);
+    expect(onEvent).not.toHaveBeenCalled();
+    expect(setTimeoutSpy).not.toHaveBeenCalled();
+    replacement.onopen?.();
+    expect(onInitialOpen).toHaveBeenCalledOnce();
+    expect(onReconnect).toHaveBeenCalledOnce();
+    expect(states.mock.calls).toEqual([["connecting"], ["open"], ["connecting"], ["open"]]);
+    replacement.onmessage?.({ data: JSON.stringify(inboxEvent()) });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(onEvent).toHaveBeenCalledOnce();
+    socket.close();
+  });
+
+  it("does not reopen closed sockets when the browser resumes", () => {
+    for (const socket of [new SessionSocket(), new RealtimeSocket()]) {
+      socket.reconnect();
+    }
+    expect(FakeWebSocket.instances).toHaveLength(0);
+    const session = new SessionSocket();
+    const realtime = new RealtimeSocket();
+    session.connect({ id: "session-1", cwd: "/repo" }, vi.fn());
+    realtime.connect(vi.fn());
+    session.close();
+    realtime.close();
+    session.reconnect();
+    realtime.reconnect();
+    expect(FakeWebSocket.instances).toHaveLength(2);
+  });
+
+  it("replaces realtime transport on resume without forwarding stale frames or lifecycle callbacks", async () => {
+    const socket = new RealtimeSocket();
+    const onEvent = vi.fn();
+    const onOpen = vi.fn();
+    socket.connect(onEvent, onOpen, "machine-a");
+    const previous = FakeWebSocket.instances[0];
+    if (previous === undefined) throw new Error("expected realtime socket");
+    previous.onopen?.();
+    const staleOpen = previous.onopen;
+    const staleClose = previous.onclose;
+    previous.onmessage?.({ data: JSON.stringify({ type: "machine.status", status: machineStatusWire() }) });
+    socket.reconnect();
+    staleOpen?.();
+    staleClose?.();
+    await Promise.resolve();
+    await Promise.resolve();
+    const replacement = FakeWebSocket.instances[1];
+    if (replacement === undefined) throw new Error("expected replacement socket");
+    expect(previous.readyState).toBe(3);
+    expect(replacement.url).toBe(previous.url);
+    expect(onEvent).not.toHaveBeenCalled();
+    expect(setTimeoutSpy).not.toHaveBeenCalled();
+    replacement.onopen?.();
+    expect(onOpen).toHaveBeenCalledTimes(2);
+    socket.close();
+  });
+
+  it("logs diagnostics with session context without forwarding them to chat state", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const socket = new SessionSocket();
+    try {
+      const onEvent = vi.fn();
+      const target = { id: "session-1", cwd: "/repo" };
+      socket.connect(target, onEvent, undefined, "machine-a");
+      const connection = FakeWebSocket.instances[0];
+      if (connection === undefined) throw new Error("expected session socket");
+      connection.onmessage?.({ data: JSON.stringify({ type: "session.diagnostic", message: "Compaction failed: HTTP 400", seq: 1 }) });
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(error).toHaveBeenCalledExactlyOnceWith("[PI WEB] Session diagnostic", {
+        machineId: "machine-a", sessionId: target.id, cwd: target.cwd, message: "Compaction failed: HTTP 400",
+      });
+      expect(onEvent).not.toHaveBeenCalled();
+
+      // A frame queued on the old socket must not be logged for its replacement.
+      connection.onmessage?.({ data: JSON.stringify({ type: "session.diagnostic", message: "Stale failure" }) });
+      socket.connect(target, onEvent, undefined, "machine-b");
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(error).toHaveBeenCalledTimes(1);
+    } finally {
+      socket.close();
+      error.mockRestore();
+    }
   });
 
   it("drops queued session frames and close callbacks from a replaced machine socket", async () => {
@@ -375,6 +595,35 @@ describe("socket instance isolation", () => {
     await Promise.resolve();
     await Promise.resolve();
     expect(newHandler).toHaveBeenCalledOnce();
+  });
+
+  it("drops malformed workspace frames in transport without losing later valid notifications", async () => {
+    const realtime = new RealtimeSocket();
+    const session = new SessionSocket();
+    const onRealtimeEvent = vi.fn();
+    const onSessionEvent = vi.fn();
+    const changed = { type: "workspaces.changed", projectId: "project-1" };
+    realtime.connect(onRealtimeEvent);
+    session.connect({ id: "session-1", cwd: "/repo" }, onSessionEvent);
+    const globalSocket = FakeWebSocket.instances[0];
+    const sessionSocket = FakeWebSocket.instances[1];
+    if (globalSocket === undefined || sessionSocket === undefined) throw new Error("expected both sockets");
+
+    for (const data of ["{", "null", JSON.stringify({ type: "workspaces.changed" }), JSON.stringify({ ...changed, projectId: false })]) {
+      globalSocket.onmessage?.({ data });
+    }
+    sessionSocket.onmessage?.({ data: JSON.stringify(changed) });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(onRealtimeEvent).not.toHaveBeenCalled();
+    expect(onSessionEvent).not.toHaveBeenCalled();
+
+    globalSocket.onmessage?.({ data: JSON.stringify(changed) });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(onRealtimeEvent).toHaveBeenCalledExactlyOnceWith(changed);
+    realtime.close();
+    session.close();
   });
 
   it("does not attribute a queued global frame to a replacement machine", async () => {

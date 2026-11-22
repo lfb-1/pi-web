@@ -5,10 +5,23 @@ import { tmpdir } from "node:os";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ActiveAgentProfileAccessError } from "./activeAgentProfileProvider.js";
 import { computePiWebPluginPackageRevision } from "./piWebPluginCatalog.js";
-import { PiWebPluginCatalog, PiWebPluginService, type PiPackageProvider } from "./piWebPluginService.js";
+import {
+  PiWebPluginCatalog,
+  PiWebPluginService as RuntimePiWebPluginService,
+  type PiPackageProvider,
+  type PiWebPluginServiceOptions,
+} from "./piWebPluginService.js";
 import { createWorkspaceProviderRuntimeSnapshot, WorkspaceCatalogProtocolError, type WorkspaceProviderRuntimeReader } from "./workspaces/workspaceCatalog.js";
 
 let tempDir: string;
+
+// Catalog/asset tests use an explicit active safe-start-none snapshot; tests
+// that exercise unavailable runtime state instantiate RuntimePiWebPluginService.
+class PiWebPluginService extends RuntimePiWebPluginService {
+  constructor(options: PiWebPluginServiceOptions = {}) {
+    super({ ...options, runtimeProvider: options.runtimeProvider ?? recoveryRuntimeProvider() });
+  }
+}
 
 const originalDockerRuntime = process.env["PI_WEB_DOCKER_RUNTIME"];
 const originalDockerMode = process.env["PI_WEB_DOCKER_MODE"];
@@ -32,13 +45,14 @@ describe("PiWebPluginService", () => {
     const pluginDir = join(tempDir, "plugins", "info");
     await writePlugin(pluginDir, {
       packageJson: { piWeb: { plugins: [{ id: "info", browserRoot: ".", module: "pi-web-plugin.js" }] } },
-      files: { "pi-web-plugin.js": "export default { apiVersion: 2, name: 'Info', activate: () => ({ contributions: {} }) };" },
+      files: { "pi-web-plugin.js": "export default { apiVersion: 4, name: 'Info', activate: () => ({ contributions: {} }) };" },
     });
 
     const service = new PiWebPluginService({ roots: [{ path: join(tempDir, "plugins"), source: "test", scope: "local" }], packageProvider: false });
 
     await expect(service.manifest()).resolves.toEqual({
-      lifecycleVersion: 1,
+      lifecycleVersion: 2,
+      terminalMode: "recovery-disabled",
       plugins: [expect.objectContaining({ id: "info", source: "test", scope: "local", machineSpecific: false })],
     });
     const manifest = await service.manifest();
@@ -214,10 +228,10 @@ describe("PiWebPluginService", () => {
       packageProvider: false,
       configProvider: () => ({ plugins: { "server-only": { enabled: false } } }),
     });
-    const service = new PiWebPluginService({ catalog, runtimeProvider: activeRuntimeProvider(catalog) });
+    const service = new PiWebPluginService({ catalog, runtimeProvider: activeRuntimeProvider(catalog, ["dual"], ["dual"]) });
 
     const manifest = await service.manifest();
-    expect(manifest).toMatchObject({ plugins: [{ id: "dual", machineSpecific: true }] });
+    expect(manifest).toMatchObject({ plugins: [{ id: "dual", machineSpecific: true, pairedRequestVersion: 1, pairedChannelVersion: 1 }] });
     expect(manifest.plugins[0]?.backendRevision).toMatch(/^sha256:[a-f\d]{64}$/u);
     const plugins = await service.plugins();
     expect(plugins.plugins[0]).toMatchObject({ id: "dual", enabled: true, machineSpecific: true });
@@ -233,6 +247,23 @@ describe("PiWebPluginService", () => {
     });
     await expect(service.readAsset("server-only", "server.js")).resolves.toBeUndefined();
     await expect(service.readAsset("dual", "browser.js")).resolves.toBeDefined();
+  });
+
+  it("publishes a resource-only paired package without inventing request or channel support", async () => {
+    await writePlugin(join(tempDir, "plugins", "resource-only"), {
+      packageJson: { piWeb: { plugins: [{ id: "resource-only", browserRoot: ".", module: "browser.js", serverModule: "server.js" }] } },
+      files: { "browser.js": "export default {};", "server.js": "throw new Error('must not execute');" },
+    });
+    const catalog = new PiWebPluginCatalog({
+      roots: [{ path: join(tempDir, "plugins"), source: "test", scope: "local" }],
+      packageProvider: false,
+    });
+    const service = new PiWebPluginService({ catalog, runtimeProvider: activeRuntimeProvider(catalog, [], [], ["resource-only"]) });
+    const manifest = await service.manifest();
+    expect(manifest.plugins[0]).toMatchObject({ id: "resource-only", pairedResourceVersion: 1 });
+    expect(manifest.plugins[0]?.backendRevision).toMatch(/^sha256:[a-f\d]{64}$/u);
+    expect(manifest.plugins[0]).not.toHaveProperty("pairedRequestVersion");
+    expect(manifest.plugins[0]).not.toHaveProperty("pairedChannelVersion");
   });
 
   it("rejects an excluded metadata alias before an equal-revision server entry change can be paired", async () => {
@@ -260,7 +291,8 @@ describe("PiWebPluginService", () => {
       configProvider: () => ({}),
       warningSink: () => undefined,
     });
-    const activeRuntime = createWorkspaceProviderRuntimeSnapshot(
+    const activeRuntime = {
+      ...createWorkspaceProviderRuntimeSnapshot(
       [{
         pluginId,
         source: "test",
@@ -273,13 +305,15 @@ describe("PiWebPluginService", () => {
         name: pluginId,
       }],
       [{ pluginId, health: { status: "healthy" } }],
-    );
+    ),
+      terminalMode: "recovery-disabled" as const,
+    };
     const service = new PiWebPluginService({
       catalog,
       runtimeProvider: { providerRuntime: () => Promise.resolve(activeRuntime) },
     });
 
-    await expect(service.manifest()).resolves.toEqual({ lifecycleVersion: 1, plugins: [] });
+    await expect(service.manifest()).resolves.toEqual({ lifecycleVersion: 2, terminalMode: "recovery-disabled", plugins: [] });
     const lifecycle = await service.plugins();
     expect(lifecycle).toMatchObject({
       plugins: [{
@@ -321,14 +355,70 @@ describe("PiWebPluginService", () => {
     });
     const service = new PiWebPluginService({ catalog, runtimeProvider: activeRuntimeProvider(catalog) });
 
-    await expect(service.manifest()).resolves.toMatchObject({ plugins: [{ id: "dual-assets" }] });
+    const module = (await service.manifest()).plugins[0]?.module;
+    const activeRevision = new URL(module ?? "", "http://pi-web.local").searchParams.get("v");
+    if (activeRevision === null) throw new Error("Expected active browser revision");
     await expect(service.readAsset("dual-assets", "chunk.js")).resolves.toBeDefined();
 
     await writeFile(chunkPath, "export const value = 'desired-update';");
 
-    await expect(service.manifest()).resolves.toEqual({ lifecycleVersion: 1, plugins: [] });
+    await expect(service.manifest()).resolves.toEqual({ lifecycleVersion: 2, terminalMode: "recovery-disabled", plugins: [] });
     const pinnedChunk = await service.readAsset("dual-assets", "chunk.js");
     expect(pinnedChunk?.content.toString("utf8")).toBe("export const value = 'active';");
+    const desiredRevision = (await catalog.snapshot()).plugins[0]?.browserModule?.revision;
+    if (desiredRevision === undefined) throw new Error("Expected desired browser revision");
+    expect(desiredRevision).not.toBe(activeRevision);
+    await expect(service.readAsset("dual-assets", "browser.js", desiredRevision)).resolves.toBeUndefined();
+    await expect(service.readAsset("dual-assets", "browser.js", activeRevision)).resolves.toBeDefined();
+  });
+
+  it("serves rebuilt development assets while retaining the running backend revision and mismatch diagnostics", async () => {
+    const pluginDir = join(tempDir, "plugins", "dev-dual");
+    await writePlugin(pluginDir, {
+      packageJson: { piWeb: { plugins: [{ id: "dev-dual", browserRoot: ".", module: "browser.js", serverModule: "server.js" }] } },
+      files: { "browser.js": "export const value = 'old';", "server.js": "export default {};" },
+    });
+    const catalog = new PiWebPluginCatalog({
+      roots: [{ path: join(tempDir, "plugins"), source: "test", scope: "local" }],
+      packageProvider: false,
+    });
+    const activeRuntime = activeRuntimeProvider(catalog, ["dev-dual"]);
+    let unhealthy = false;
+    const service = new PiWebPluginService({
+      catalog,
+      relaxBrowserPairing: true,
+      runtimeProvider: {
+        providerRuntime: async () => {
+          const snapshot = await activeRuntime.providerRuntime();
+          return unhealthy ? { ...snapshot, health: [{ pluginId: "dev-dual", health: { status: "unhealthy" } }] } : snapshot;
+        },
+      },
+    });
+    const initial = (await service.manifest()).plugins[0];
+    expect(initial?.backendRevision).toBeDefined();
+
+    await writeFile(join(pluginDir, "browser.js"), "export const value = 'new';");
+    const desiredRevision = (await catalog.snapshot()).plugins[0]?.browserModule?.revision;
+    if (desiredRevision === undefined) throw new Error("Expected rebuilt revision");
+    // The advertised new URL must refresh an already-cached asset even before
+    // another manifest request (for example after a plugin status refresh).
+    const refreshed = await service.readAsset("dev-dual", "browser.js", desiredRevision);
+    expect(refreshed?.content.toString()).toBe("export const value = 'new';");
+    const updated = (await service.manifest()).plugins[0];
+    expect(updated).toMatchObject({ backendRevision: initial?.backendRevision, pairedRequestVersion: 1 });
+    expect(updated?.module).not.toBe(initial?.module);
+    await expect(service.plugins()).resolves.toMatchObject({
+      plugins: [{ server: { state: "active", staleRevision: true, restartRequired: true } }],
+    });
+
+    await writeFile(join(pluginDir, "server.js"), "export default { changed: true };");
+    const afterBackendEdit = (await service.manifest()).plugins[0];
+    expect(afterBackendEdit?.backendRevision).toBe(initial?.backendRevision);
+    expect(afterBackendEdit?.module).not.toBe(updated?.module);
+
+    unhealthy = true;
+    expect((await service.manifest()).plugins).toEqual([]);
+    await expect(service.readAsset("dev-dual", "browser.js")).resolves.toBeUndefined();
   });
 
   it("withholds server-backed browser modules and reports an incompatible sessiond protocol", async () => {
@@ -344,10 +434,30 @@ describe("PiWebPluginService", () => {
       },
     });
 
-    await expect(service.manifest()).resolves.toEqual({ lifecycleVersion: 1, plugins: [] });
+    await expect(service.manifest()).rejects.toThrow(
+      "Required Terminal plugin runtime is incompatible: unsupported provider runtime protocol",
+    );
     await expect(service.plugins()).resolves.toMatchObject({
       plugins: [{ id: "dual", server: { state: "unknown" } }],
-      serverRuntime: { status: "incompatible", message: "unsupported provider runtime protocol" },
+      serverRuntime: { status: "incompatible", terminalMode: "required", message: "unsupported provider runtime protocol" },
+    });
+  });
+
+  it("withholds browser-only modules when sessiond is unavailable instead of synthesizing recovery", async () => {
+    await writePlugin(join(tempDir, "plugins", "browser-only"), {
+      packageJson: { piWeb: { plugins: [{ id: "browser-only", browserRoot: ".", module: "browser.js" }] } },
+      files: { "browser.js": "export default {};" },
+    });
+    const service = new RuntimePiWebPluginService({
+      roots: [{ path: join(tempDir, "plugins"), source: "test", scope: "local" }],
+      packageProvider: false,
+    });
+
+    await expect(service.manifest()).rejects.toThrow(
+      "Required Terminal plugin runtime is unavailable: Session daemon server-plugin runtime is unavailable",
+    );
+    await expect(service.plugins()).resolves.toMatchObject({
+      serverRuntime: { status: "unavailable", terminalMode: "required" },
     });
   });
 
@@ -360,7 +470,7 @@ describe("PiWebPluginService", () => {
       roots: [{ path: join(tempDir, "plugins"), source: "test", scope: "local" }],
       packageProvider: false,
       runtimeProvider: {
-        providerRuntime: () => Promise.resolve({ protocolVersion: 1, records: [], health: [], diagnostics: [] }),
+        providerRuntime: () => Promise.resolve({ protocolVersion: 2, terminalMode: "recovery-disabled", records: [], health: [], diagnostics: [] }),
       },
       recoveryProvider: () => ({ safeStart }),
     });
@@ -402,6 +512,54 @@ describe("PiWebPluginService", () => {
     expect(pinned?.content.toString("utf8")).toBe("export default {};");
     await expect(service.manifest()).resolves.toMatchObject({ plugins: [{ id: "changing" }] });
     await expect(service.readAsset("changing", "browser.js", revision)).resolves.toBeUndefined();
+  });
+
+  it("refreshes browser-only artifacts for a newly advertised entry revision without a manifest reload", async () => {
+    const pluginDir = join(tempDir, "plugins", "refreshing");
+    await writePlugin(pluginDir, {
+      packageJson: { piWeb: { plugins: [{ id: "refreshing", browserRoot: ".", module: "browser.js" }] } },
+      files: {
+        "browser.js": "export default { version: 1 };",
+        "chunk.js": "export const value = 1;",
+      },
+    });
+    const service = new PiWebPluginService({ roots: [{ path: join(tempDir, "plugins"), source: "test", scope: "local" }], packageProvider: false });
+    const oldModule = (await service.manifest()).plugins[0]?.module;
+    const oldRevision = new URL(oldModule ?? "", "http://pi-web.local").searchParams.get("v");
+    if (oldRevision === null) throw new Error("Expected browser manifest revision");
+
+    await writeFile(join(pluginDir, "browser.js"), "export default { version: 2 };");
+    await writeFile(join(pluginDir, "chunk.js"), "export const value = 2;");
+    const newModule = (await service.plugins()).plugins.find(({ id }) => id === "refreshing")?.module;
+    const newRevision = new URL(newModule ?? "", "http://pi-web.local").searchParams.get("v");
+    if (newRevision === null) throw new Error("Expected browser catalog revision");
+    expect(newRevision).not.toBe(oldRevision);
+
+    const pinned = await service.readAsset("refreshing", "browser.js");
+    expect(pinned?.content.toString("utf8")).toBe("export default { version: 1 };");
+    const refreshed = await service.readAsset("refreshing", "browser.js", newRevision);
+    expect(refreshed?.content.toString("utf8")).toBe("export default { version: 2 };");
+    const chunk = await service.readAsset("refreshing", "chunk.js");
+    expect(chunk?.content.toString("utf8")).toBe("export const value = 2;");
+    await expect(service.readAsset("refreshing", "browser.js", oldRevision)).resolves.toBeUndefined();
+    await expect(service.readAsset("refreshing", "browser.js", "sha256:nonexistent")).resolves.toBeUndefined();
+
+    await writeFile(join(pluginDir, "package.json"), JSON.stringify({
+      piWeb: { plugins: [{ id: "refreshing", browserRoot: ".", module: "renamed.js" }] },
+    }));
+    await rm(join(pluginDir, "browser.js"));
+    await writeFile(join(pluginDir, "renamed.js"), "export default { version: 3 };");
+    const renamedModule = (await service.plugins()).plugins.find(({ id }) => id === "refreshing")?.module;
+    const renamedRevision = new URL(renamedModule ?? "", "http://pi-web.local").searchParams.get("v");
+    if (renamedRevision === null) throw new Error("Expected renamed browser revision");
+    const renamed = await service.readAsset("refreshing", "renamed.js", renamedRevision);
+    expect(renamed?.content.toString("utf8")).toBe("export default { version: 3 };");
+    await expect(service.readAsset("refreshing", "browser.js", renamedRevision)).resolves.toBeUndefined();
+    await expect(service.readAsset("refreshing", "renamed.js", newRevision)).resolves.toBeUndefined();
+    await expect(service.readAsset("refreshing", "chunk.js", newRevision)).resolves.toBeUndefined();
+
+    await rm(pluginDir, { recursive: true });
+    await expect(service.readAsset("refreshing", "renamed.js", "sha256:missing")).resolves.toBeUndefined();
   });
 
   it("binds equal-revision artifact reuse to browser-root and module identity", async () => {
@@ -476,7 +634,7 @@ describe("PiWebPluginService", () => {
     const packageDir = join(tempDir, "pkg");
     await writePlugin(packageDir, {
       packageJson: { piWeb: { plugins: [{ id: "review", browserRoot: "dist", module: "dist/review.js" }] } },
-      files: { "dist/review.js": "export default { apiVersion: 2, name: 'Review', activate: () => ({ contributions: {} }) };" },
+      files: { "dist/review.js": "export default { apiVersion: 4, name: 'Review', activate: () => ({ contributions: {} }) };" },
     });
     const packageProvider: PiPackageProvider = {
       listPackages: () => [{ source: "npm:@acme/review", scope: "user", installedPath: packageDir }],
@@ -505,7 +663,7 @@ describe("PiWebPluginService", () => {
     await writeFile(join(updatedAgentDir, "settings.json"), `${JSON.stringify({ packages: [packageDir] }, null, 2)}\n`, "utf8");
     const service = new PiWebPluginService({ roots: [], cwd: tempDir, agentDirProvider: () => activeAgentDir });
 
-    await expect(service.manifest()).resolves.toEqual({ lifecycleVersion: 1, plugins: [] });
+    await expect(service.manifest()).resolves.toEqual({ lifecycleVersion: 2, terminalMode: "recovery-disabled", plugins: [] });
 
     activeAgentDir = updatedAgentDir;
 
@@ -556,7 +714,7 @@ describe("PiWebPluginService", () => {
     await writeFile(join(tempDir, "src", "server", "index.ts"), "export {};\n");
     await writePlugin(join(tempDir, "plugins", "source-dev"), {
       packageJson: { piWeb: { plugins: [{ id: "source-dev", browserRoot: "dist", module: "dist/pi-web-plugin.js" }] } },
-      files: { "dist/pi-web-plugin.js": "export default { apiVersion: 2, name: 'Source Dev', activate: () => ({ contributions: {} }) };" },
+      files: { "dist/pi-web-plugin.js": "export default { apiVersion: 4, name: 'Source Dev', activate: () => ({ contributions: {} }) };" },
     });
 
     const service = new PiWebPluginService({ cwd: tempDir, packageProvider: false });
@@ -572,7 +730,7 @@ describe("PiWebPluginService", () => {
     const pluginDir = join(tempDir, "dev-plugin");
     await writePlugin(pluginDir, {
       packageJson: { piWeb: { plugins: [{ id: "dev", browserRoot: ".", module: "pi-web-plugin.js" }] } },
-      files: { "pi-web-plugin.js": "export default { apiVersion: 2, name: 'Dev', activate: () => ({ contributions: {} }) };" },
+      files: { "pi-web-plugin.js": "export default { apiVersion: 4, name: 'Dev', activate: () => ({ contributions: {} }) };" },
     });
     await mkdir(join(tempDir, "plugins"), { recursive: true });
     await symlink(pluginDir, join(tempDir, "plugins", "dev"), process.platform === "win32" ? "junction" : "dir");
@@ -602,6 +760,8 @@ describe("PiWebPluginService", () => {
     });
 
     await expect(service.manifest()).resolves.toMatchObject({ plugins: [{ id: "enabled" }] });
+    await expect(service.readAsset("enabled", "pi-web-plugin.js")).resolves.toBeDefined();
+    await expect(service.readAsset("disabled", "pi-web-plugin.js")).resolves.toBeUndefined();
     await expect(service.plugins()).resolves.toMatchObject({
       plugins: [
         { id: "disabled", enabled: false },
@@ -610,34 +770,8 @@ describe("PiWebPluginService", () => {
     });
   });
 
-  it("skips duplicate plugin ids", async () => {
-    const firstRoot = join(tempDir, "first-root");
-    const secondRoot = join(tempDir, "second-root");
-    await writePlugin(join(firstRoot, "duplicate"), {
-      packageJson: { piWeb: { plugins: [{ id: "duplicate", browserRoot: ".", module: "first.js" }] } },
-      files: { "first.js": "export default {};" },
-    });
-    await writePlugin(join(secondRoot, "duplicate"), {
-      packageJson: { piWeb: { plugins: [{ id: "duplicate", browserRoot: ".", module: "second.js", machineSpecific: true }] } },
-      files: { "second.js": "export default {};" },
-    });
-
-    const service = new PiWebPluginService({
-      roots: [
-        { path: firstRoot, source: "first", scope: "local" },
-        { path: secondRoot, source: "second", scope: "local" },
-      ],
-      packageProvider: false,
-    });
-
-    const manifest = await service.manifest();
-    expect(manifest.plugins).toEqual([
-      expect.objectContaining({ id: "duplicate", source: "first", machineSpecific: false }),
-    ]);
-    expect(manifest.plugins[0]?.module).toMatch(/^\/pi-web-plugins\/duplicate\/first\.js\?v=sha256%3A[a-f\d]{64}$/u);
-  });
-
   it("skips legacy metadata shortcuts and unsafe module paths", async () => {
+    const warnings: string[] = [];
     const legacyRoot = join(tempDir, "legacy-root");
     await writePlugin(join(legacyRoot, "legacy"), {
       packageJson: { piWeb: { id: "legacy", plugin: "pi-web-plugin.js" } },
@@ -649,24 +783,12 @@ describe("PiWebPluginService", () => {
       files: { "pi-web-plugin.js": "export default {};" },
     });
 
-    await expect(new PiWebPluginService({ roots: [{ path: legacyRoot, source: "test", scope: "local" }], packageProvider: false }).manifest()).resolves.toEqual({ lifecycleVersion: 1, plugins: [] });
-    await expect(new PiWebPluginService({ roots: [{ path: unsafeRoot, source: "test", scope: "local" }], packageProvider: false }).manifest()).resolves.toEqual({ lifecycleVersion: 1, plugins: [] });
-  });
-
-  it("continues discovering valid plugins when another local plugin is invalid", async () => {
-    await writePlugin(join(tempDir, "plugins", "valid"), {
-      packageJson: { piWeb: { plugins: [{ id: "valid", browserRoot: ".", module: "pi-web-plugin.js" }] } },
-      files: { "pi-web-plugin.js": "export default {};" },
-    });
-    await writePlugin(join(tempDir, "plugins", "legacy"), {
-      packageJson: { piWeb: { id: "legacy", plugin: "pi-web-plugin.js" } },
-      files: { "pi-web-plugin.js": "export default {};" },
-    });
-
-    const service = new PiWebPluginService({ roots: [{ path: join(tempDir, "plugins"), source: "test", scope: "local" }], packageProvider: false });
-
-    const manifest = await service.manifest();
-    expect(manifest.plugins.map((plugin) => plugin.id)).toEqual(["valid"]);
+    await expect(new PiWebPluginService({ roots: [{ path: legacyRoot, source: "test", scope: "local" }], packageProvider: false, warningSink: (message) => { warnings.push(message); } }).manifest()).resolves.toEqual({ lifecycleVersion: 2, terminalMode: "recovery-disabled", plugins: [] });
+    await expect(new PiWebPluginService({ roots: [{ path: unsafeRoot, source: "test", scope: "local" }], packageProvider: false, warningSink: (message) => { warnings.push(message); } }).manifest()).resolves.toEqual({ lifecycleVersion: 2, terminalMode: "recovery-disabled", plugins: [] });
+    expect(warnings).toEqual([
+      `Skipping PI WEB plugin from ${join(legacyRoot, "legacy")}: Unsupported PI WEB plugin metadata in ${join(legacyRoot, "legacy", "package.json")}: use piWeb.plugins with { id, module?, browserRoot?, serverModule?, machineSpecific?, defaultEnabled? } entries`,
+      `Skipping PI WEB plugin from ${join(unsafeRoot, "unsafe")}: Unsafe PI WEB plugin browser module path for unsafe: ../escape.js`,
+    ]);
   });
 
   it("rejects unsafe asset traversal", async () => {
@@ -700,7 +822,16 @@ async function writePlugin(root: string, options: { packageJson: unknown; files:
   }
 }
 
-function activeRuntimeProvider(catalog: PiWebPluginCatalog): WorkspaceProviderRuntimeReader {
+function recoveryRuntimeProvider(): WorkspaceProviderRuntimeReader {
+  return { providerRuntime: () => Promise.resolve(createWorkspaceProviderRuntimeSnapshot([], [], "none")) };
+}
+
+function activeRuntimeProvider(
+  catalog: PiWebPluginCatalog,
+  pairedRequestPluginIds: readonly string[] = [],
+  pairedChannelPluginIds: readonly string[] = [],
+  pairedResourcePluginIds: readonly string[] = [],
+): WorkspaceProviderRuntimeReader {
   const activeSnapshot = catalog.snapshot().then((snapshot) => {
     const records = snapshot.plugins.flatMap((plugin) => plugin.serverModule === undefined ? [] : [{
       pluginId: plugin.id,
@@ -710,11 +841,15 @@ function activeRuntimeProvider(catalog: PiWebPluginCatalog): WorkspaceProviderRu
       ...(plugin.browserModule === undefined ? {} : { browserRevision: plugin.browserModule.revision }),
       settingsRevision: plugin.settingsRevision,
       machineSpecific: plugin.machineSpecific,
+      ...(pairedRequestPluginIds.includes(plugin.id) ? { pairedRequestVersion: 1 as const } : {}),
+      ...(pairedChannelPluginIds.includes(plugin.id) ? { pairedChannelVersion: 1 as const } : {}),
+      ...(pairedResourcePluginIds.includes(plugin.id) ? { pairedResourceVersion: 1 as const } : {}),
       state: plugin.enabled ? "active" as const : "disabled" as const,
       ...(plugin.enabled ? { name: plugin.id } : { message: "disabled in PI WEB config" }),
     }]);
     return {
-      protocolVersion: 1 as const,
+      protocolVersion: 2 as const,
+      terminalMode: "recovery-disabled" as const,
       records,
       health: records.flatMap((record) => record.state === "active" ? [{ pluginId: record.pluginId, health: { status: "healthy" as const } }] : []),
       diagnostics: snapshot.diagnostics,

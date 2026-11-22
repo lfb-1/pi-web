@@ -3,9 +3,8 @@ import { realpath } from "node:fs/promises";
 import { isAbsolute, join, relative, sep } from "node:path";
 import type {
   JsonValue,
-  ProviderRequestContext,
-  ProviderResponse,
   ServerPluginActivationContext,
+  ServerPluginPeerRequestContext,
   ServerPluginExecFileResult,
 } from "@jmfederico/pi-web/server-plugin-api";
 import {
@@ -18,7 +17,7 @@ import {
 } from "./browser/git-contract.js";
 
 export { GIT_DIFF_OPERATION, GIT_STATUS_OPERATION } from "./browser/git-contract.js";
-export type { GitDiffResponse, GitFileState, GitStatusFile, GitStatusResponse } from "./browser/git-contract.js";
+export type { GitDiffResponse, GitStatusResponse } from "./browser/git-contract.js";
 
 const GIT_COMMAND_TIMEOUT_MS = 10_000;
 const GIT_LOCAL_ENV_VARS = Object.freeze([
@@ -46,18 +45,18 @@ interface ValidatedSubmodule {
   cwd: string;
 }
 
-/** Dispatch the Git-owned status/diff schema through the provider's public request seam. */
+/** Dispatch the Git status/diff schema through the package peer request seam. */
 export async function requestGitBackend(
   activationContext: ServerPluginActivationContext,
-  request: ProviderRequestContext,
-): Promise<ProviderResponse> {
+  request: ServerPluginPeerRequestContext,
+): Promise<JsonValue> {
   const runGit = createGitRunner(activationContext, request.signal);
   if (request.operation === GIT_STATUS_OPERATION) {
     requireStatusInput(request.input);
-    return statusProviderResponse(await gitStatusWithRunner(runGit, request.workspace.path));
+    return statusPeerResponse(await gitStatusWithRunner(runGit, request.workspace.path));
   }
   if (request.operation === GIT_DIFF_OPERATION) {
-    return diffProviderResponse(await gitDiffWithRunner(runGit, request.workspace.path, parseDiffInput(request.input)));
+    return diffPeerResponse(await gitDiffWithRunner(runGit, request.workspace.path, parseDiffInput(request.input)));
   }
   throw new Error(`Unsupported Git workspace backend operation: ${request.operation}`);
 }
@@ -101,7 +100,7 @@ async function gitStatusWithRunner(runGit: RunGit, cwd: string): Promise<GitStat
   const result = await runGit(cwd, ["status", "--porcelain=v2", "--branch", "--untracked-files=all", "-z"]);
   if (result.code !== 0) return { isGitRepo: false, hash: hash(result.stdout + result.stderr), files: [], submodules: [] };
   const parsed = parseStatus(result.stdout, { deferSubmodules: true });
-  return expandSubmodules(runGit, cwd, parsed, result.stdout);
+  return expandSubmodules(runGit, await gitWorktreeRoot(runGit, cwd), parsed, result.stdout);
 }
 
 /**
@@ -203,6 +202,9 @@ async function gitDiffWithRunner(runGit: RunGit, cwd: string, options: { path?: 
   let path: string | undefined;
   if (options.path !== undefined && options.path !== "") path = normalizeRelativePath(options.path);
 
+  // Status paths and every diff belong to the enclosing repository, not the
+  // registered project directory. Keep the session's cwd unchanged.
+  cwd = await gitWorktreeRoot(runGit, cwd);
   if (path !== undefined) {
     const owner = await submoduleForPath(runGit, cwd, path);
     if (owner !== undefined) return submoduleDiff(runGit, owner, path, staged);
@@ -244,6 +246,14 @@ async function submoduleDiff(runGit: RunGit, owner: ValidatedSubmodule, path: st
     return { path, staged, hash: hash(untracked.stdout), diff: untracked.stdout, truncated: untracked.truncated };
   }
   return { path, staged, hash: hash(result.stdout), diff: result.stdout, truncated: result.truncated };
+}
+
+async function gitWorktreeRoot(runGit: RunGit, cwd: string): Promise<string> {
+  const result = await runGit(cwd, ["rev-parse", "--show-toplevel"]);
+  if (result.code !== 0) throw new Error(result.stderr.trim() || "Cannot resolve Git worktree root");
+  const root = result.stdout.replace(/\r?\n$/u, "");
+  if (!isAbsolute(root)) throw new Error("Git returned an invalid worktree root");
+  return root;
 }
 
 async function isUntracked(runGit: RunGit, cwd: string, path: string): Promise<boolean> {
@@ -426,7 +436,7 @@ function hash(value: string): string {
   return createHash("sha1").update(value).digest("hex");
 }
 
-function statusProviderResponse(status: GitStatusResponse): ProviderResponse {
+function statusPeerResponse(status: GitStatusResponse): JsonValue {
   return {
     isGitRepo: status.isGitRepo,
     hash: status.hash,
@@ -446,7 +456,7 @@ function statusProviderResponse(status: GitStatusResponse): ProviderResponse {
   };
 }
 
-function diffProviderResponse(diff: GitDiffResponse): ProviderResponse {
+function diffPeerResponse(diff: GitDiffResponse): JsonValue {
   return {
     ...(diff.path === undefined ? {} : { path: diff.path }),
     staged: diff.staged,

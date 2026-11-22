@@ -1,17 +1,3 @@
-const animatedHomePage = document.querySelector(".home-page");
-
-if (animatedHomePage !== null) {
-  const skipIntroAnimation = () => {
-    animatedHomePage.classList.add("intro-skipped");
-  };
-
-  if (window.scrollY !== 0) {
-    skipIntroAnimation();
-  } else {
-    window.addEventListener("scroll", skipIntroAnimation, { passive: true, once: true });
-  }
-}
-
 const themeButtons = document.querySelectorAll("[data-theme-toggle]");
 const themeStorageKey = "pi-web-theme";
 const systemPrefersLight = window.matchMedia("(prefers-color-scheme: light)");
@@ -75,166 +61,73 @@ for (const button of themeButtons) {
   });
 }
 
-const screenshotCarousels = document.querySelectorAll("[data-demo-carousel]");
-const reducedMotionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
+function setupPageContentsNavigation() {
+  const contents = document.querySelector(".toc, .reference-nav");
+  if (contents === null || typeof window.HTMLDialogElement?.prototype.showModal !== "function") return;
 
-function setupScreenshotCarousel(carousel) {
-  const gallery = carousel.querySelector("[data-demo-gallery]");
-  const controls = carousel.querySelector("[data-demo-controls]");
-  const previousButton = carousel.querySelector("[data-demo-prev]");
-  const nextButton = carousel.querySelector("[data-demo-next]");
-  const dots = Array.from(carousel.querySelectorAll("[data-demo-dot]"));
-  const slides = Array.from(carousel.querySelectorAll("[data-demo-slide]"));
-  const lightbox = carousel.querySelector("[data-demo-lightbox]");
-  const lightboxImage = carousel.querySelector("[data-demo-lightbox-image]");
-  const lightboxCaption = carousel.querySelector("[data-demo-lightbox-caption]");
-  const lightboxCloseButton = carousel.querySelector("[data-demo-lightbox-close]");
-  const lightboxTriggers = Array.from(carousel.querySelectorAll("[data-demo-lightbox-trigger]"));
+  const compactLayout = window.matchMedia("(max-width: 1100px)");
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "docs-toc-toggle";
+  toggle.innerHTML = '<span aria-hidden="true">☷</span> On this page';
+  toggle.setAttribute("aria-haspopup", "dialog");
+  toggle.setAttribute("aria-controls", "docs-page-contents");
+  toggle.setAttribute("aria-expanded", "false");
 
-  if (gallery === null || slides.length === 0) return;
-
-  let updateQueued = false;
-
-  function galleryHasOverflow() {
-    return gallery.scrollWidth > gallery.clientWidth + 4;
-  }
-
-  function closestSlideIndex() {
-    const galleryRect = gallery.getBoundingClientRect();
-    const galleryCenter = galleryRect.left + galleryRect.width / 2;
-    let closestIndex = 0;
-    let closestDistance = Number.POSITIVE_INFINITY;
-
-    slides.forEach((slide, index) => {
-      const rect = slide.getBoundingClientRect();
-      const distance = Math.abs(rect.left + rect.width / 2 - galleryCenter);
-      if (distance < closestDistance) {
-        closestIndex = index;
-        closestDistance = distance;
+  const dialog = document.createElement("dialog");
+  dialog.id = "docs-page-contents";
+  dialog.className = "docs-toc-dialog";
+  dialog.setAttribute("aria-labelledby", "docs-page-contents-title");
+  dialog.innerHTML = '<div class="docs-toc-dialog-header"><strong id="docs-page-contents-title">On this page</strong><button type="button" aria-label="Close page contents" autofocus>✕</button></div>';
+  const closeButton = dialog.querySelector("button");
+  const nav = document.createElement("nav");
+  nav.setAttribute("aria-label", "Page sections");
+  // Derive the popup from the existing TOC so both navigation surfaces stay in sync.
+  for (const source of contents.querySelectorAll('a[href^="#"]')) {
+    const link = document.createElement("a");
+    link.setAttribute("href", source.getAttribute("href"));
+    link.textContent = source.textContent;
+    link.addEventListener("click", (event) => {
+      if (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+      dialog.close();
+      const target = document.getElementById(decodeURIComponent(link.hash.slice(1)));
+      if (target !== null) {
+        // Continue keyboard navigation at the destination, not back at the floating button.
+        if (!target.hasAttribute("tabindex")) target.setAttribute("tabindex", "-1");
+        target.focus({ preventScroll: true });
       }
+      // Keep native fragment navigation, history, and scroll-margin behavior.
     });
-
-    return closestIndex;
+    nav.append(link);
   }
+  dialog.append(nav);
+  document.body.append(toggle, dialog);
+  document.body.classList.add("docs-has-contents");
 
-  function scrollToSlide(index) {
-    const slide = slides[index];
-    if (slide === undefined) return;
-
-    slide.scrollIntoView({
-      behavior: reducedMotionQuery.matches ? "auto" : "smooth",
-      block: "nearest",
-      inline: "start",
-    });
-  }
-
-  function closeLightbox() {
-    if (lightbox === null) return;
-
-    if (typeof lightbox.close === "function" && lightbox.open) {
-      lightbox.close();
-    } else {
-      lightbox.removeAttribute("open");
+  toggle.addEventListener("click", () => {
+    if (!compactLayout.matches) return;
+    for (const link of nav.querySelectorAll("a")) {
+      if (link.hash === window.location.hash) link.setAttribute("aria-current", "location");
+      else link.removeAttribute("aria-current");
     }
-  }
-
-  function openLightbox(trigger) {
-    const image = trigger.querySelector("img");
-    if (image === null || lightbox === null || lightboxImage === null) return;
-
-    const figure = trigger.closest("figure");
-    const captionParts = Array.from(figure?.querySelectorAll("figcaption strong, figcaption span") ?? [])
-      .map((node) => node.textContent?.trim())
-      .filter(Boolean);
-    const caption = captionParts.length > 0 ? captionParts.join(" — ") : "PI WEB screenshot";
-
-    lightboxImage.src = image.currentSrc || image.src;
-    lightboxImage.alt = image.alt;
-    if (lightboxCaption !== null) lightboxCaption.textContent = caption;
-
-    if (typeof lightbox.showModal === "function") {
-      lightbox.showModal();
-    } else {
-      lightbox.setAttribute("open", "");
+    dialog.showModal();
+    toggle.setAttribute("aria-expanded", "true");
+  });
+  closeButton.addEventListener("click", () => dialog.close());
+  dialog.addEventListener("close", () => toggle.setAttribute("aria-expanded", "false"));
+  dialog.addEventListener("click", (event) => {
+    if (event.target !== dialog) return;
+    const bounds = dialog.getBoundingClientRect();
+    if (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom) {
+      dialog.close();
     }
-
-    lightboxCloseButton?.focus({ preventScroll: true });
-  }
-
-  function updateControls() {
-    const overflow = galleryHasOverflow();
-    const activeIndex = closestSlideIndex();
-    const atStart = gallery.scrollLeft <= 2;
-    const atEnd = gallery.scrollLeft + gallery.clientWidth >= gallery.scrollWidth - 2;
-
-    carousel.dataset.overflow = overflow ? "true" : "false";
-    gallery.tabIndex = overflow ? 0 : -1;
-    if (controls !== null) controls.hidden = !overflow;
-    if (previousButton !== null) previousButton.disabled = !overflow || atStart;
-    if (nextButton !== null) nextButton.disabled = !overflow || atEnd;
-
-    dots.forEach((dot, index) => {
-      dot.setAttribute("aria-current", index === activeIndex ? "true" : "false");
-    });
-  }
-
-  function queueUpdateControls() {
-    if (updateQueued) return;
-    updateQueued = true;
-    window.requestAnimationFrame(() => {
-      updateQueued = false;
-      updateControls();
-    });
-  }
-
-  previousButton?.addEventListener("click", () => {
-    scrollToSlide(Math.max(closestSlideIndex() - 1, 0));
   });
-
-  nextButton?.addEventListener("click", () => {
-    scrollToSlide(Math.min(closestSlideIndex() + 1, slides.length - 1));
+  compactLayout.addEventListener("change", () => {
+    if (!compactLayout.matches && dialog.open) dialog.close();
   });
-
-  dots.forEach((dot) => {
-    const targetIndex = Number.parseInt(dot.getAttribute("data-demo-dot") ?? "", 10);
-    if (Number.isNaN(targetIndex)) return;
-
-    dot.addEventListener("click", () => {
-      scrollToSlide(targetIndex);
-    });
-  });
-
-  lightboxTriggers.forEach((trigger) => {
-    trigger.addEventListener("click", () => {
-      openLightbox(trigger);
-    });
-  });
-
-  lightboxCloseButton?.addEventListener("click", closeLightbox);
-
-  lightbox?.addEventListener("click", (event) => {
-    if (event.target === lightbox) closeLightbox();
-  });
-
-  lightbox?.addEventListener("close", () => {
-    lightboxImage?.removeAttribute("src");
-  });
-
-  gallery.addEventListener("scroll", queueUpdateControls, { passive: true });
-  window.addEventListener("resize", queueUpdateControls);
-
-  if ("ResizeObserver" in window) {
-    const resizeObserver = new window.ResizeObserver(queueUpdateControls);
-    resizeObserver.observe(gallery);
-    slides.forEach((slide) => resizeObserver.observe(slide));
-  }
-
-  updateControls();
 }
 
-for (const carousel of screenshotCarousels) {
-  setupScreenshotCarousel(carousel);
-}
+setupPageContentsNavigation();
 
 const versionSwitchLinks = document.querySelectorAll(".version-switcher-option");
 

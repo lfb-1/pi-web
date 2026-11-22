@@ -1,9 +1,23 @@
-import { PI_WEB_PLUGIN_LIFECYCLE_VERSION, ASK_USER_ID_MAX_LENGTH, ASK_USER_OPTION_LIMIT, ASK_USER_OTHER_TEXT_MAX_LENGTH, ASK_USER_QUESTION_LIMIT, ASK_USER_TEXT_MAX_LENGTH, EXTENSION_DIALOG_ID_MAX_LENGTH, EXTENSION_DIALOG_INPUT_MAX_LENGTH, EXTENSION_DIALOG_OPTION_LIMIT, EXTENSION_DIALOG_TEXT_MAX_LENGTH, SESSION_NOTIFICATION_LIMIT, SESSION_NOTIFICATION_MESSAGE_BYTES, SESSION_UNREAD_CATALOG_ID_MAX_LENGTH, SESSION_UNREAD_COMPLETED_AT_MAX_LENGTH, SESSION_UNREAD_CWD_MAX_LENGTH, SESSION_UNREAD_LIMIT, SESSION_UNREAD_SESSION_ID_MAX_LENGTH, type ArchiveSessionsResponse, type AskUserCloseReason, type AskUserCloseResponse, type AskUserOutcome, type AskUserQuestion, type AskUserQuestionOption, type AskUserQuestionRecord, type PendingAskUser, type PendingExtensionDialog, type AuthProviderOption, type AuthProviderStatus, type AuthProvidersResponse, type AuthStatusSource, type AuthType, type CommandOption, type CommandResult, type DeleteWorkspaceFileResponse, type ExtensionDialogAnswer, type ExtensionDialogCloseReason, type ExtensionDialogCloseResponse, type ExtensionDialogKind, type ExtensionDialogOutcome, type FileContentResponse, type FileSuggestion, type FileTreeEntry, type FileTreeResponse, type GlobalSessionEvent, type Machine, type MachineHealth, type MachineKind, type MachineRuntime, type MachineStatus, type MessagePage, type ModelSelectionResponse, type MoveWorkspaceFileResponse, type OAuthFlowState, type PiWebCapability, type PiWebComponentStatus, type PiWebConfigEnvOverrides, type PiWebConfigResponse, type PiWebConfigValues, type PiWebDeprecatedAgentInput, type PiWebInstallationInfo, type PiWebPluginConfigMap, type PiWebPluginInfo, type PiWebPluginsResponse, type PiWebPluginScope, type PiWebReleaseStatus, type PiWebRuntimeComponent, type PiWebRuntimeResponse, type PiWebServiceComponent, type PiWebShortcutConfig, type PiWebStatusMessage, type PiWebStatusResponse, type PiWebStatusSeverity, type Project, type QueuedSessionMessage, type SavedPromptAttachment, type SessionBulkArchiveResponse, type SessionBulkDeleteArchivedResponse, type SessionBulkFailure, type SessionCleanupExecuteResponse, type SessionCleanupPreviewResponse, type SessionCleanupProjectSummary, type SessionCleanupThresholds, type SessionCleanupTotals, type SessionInfo, type SessionModel, type SessionNotification, type SessionNotificationClearReason, type SessionNotificationDismissThrough, type SessionNotificationInboxDelta, type SessionNotificationInboxEvent, type SessionNotificationInboxSnapshot, type SessionNotificationSeverity, type SessionNotificationSummary, type SessionStatus, type SessionStreamSnapshot, type SessionUiEvent, type SessionUnreadCatalogSnapshot, type SessionUnreadEvent, type SessionUnreadSummary, type SessionWarning, type SessionWarningSeverity, type SlashCommand, type TerminalCommandRun, type TerminalCommandRunStatus, type TerminalInfo, type TerminalUiEvent, type ThinkingLevelsResponse, type WriteWorkspaceFileResponse, type Workspace, type WorkspaceEffectiveConfig } from "../../../shared/apiTypes";
+import { PI_WEB_PLUGIN_LIFECYCLE_VERSION, ASK_USER_COMMENT_MAX_LENGTH, ASK_USER_ID_MAX_LENGTH, ASK_USER_OPTION_LIMIT, ASK_USER_OTHER_TEXT_MAX_LENGTH, ASK_USER_QUESTION_LIMIT, ASK_USER_TEXT_MAX_LENGTH, EXTENSION_DIALOG_ID_MAX_LENGTH, EXTENSION_DIALOG_INPUT_MAX_LENGTH, EXTENSION_DIALOG_OPTION_LIMIT, EXTENSION_DIALOG_TEXT_MAX_LENGTH, SESSION_NOTIFICATION_LIMIT, SESSION_NOTIFICATION_MESSAGE_BYTES, SESSION_UNREAD_CATALOG_ID_MAX_LENGTH, SESSION_UNREAD_COMPLETED_AT_MAX_LENGTH, SESSION_UNREAD_CWD_MAX_LENGTH, SESSION_UNREAD_LIMIT, SESSION_UNREAD_SESSION_ID_MAX_LENGTH, type ArchiveSessionsResponse, type AskUserCloseReason, type AskUserOutcome, type AskUserQuestion, type AskUserQuestionOption, type AskUserQuestionRecord, type AskUserRequest, type PendingExtensionDialog, type AuthProviderOption, type AuthProviderStatus, type AuthProvidersResponse, type AuthStatusSource, type AuthType, type CommandOption, type CommandResult, type DeleteWorkspaceFileResponse, type ExtensionDialogAnswer, type ExtensionDialogCloseReason, type ExtensionDialogCloseResponse, type ExtensionDialogKind, type ExtensionDialogOutcome, type FileContentResponse, type FileSuggestion, type FileTreeEntry, type FileTreeResponse, type GlobalSessionEvent, type Machine, type MachineHealth, type MachineKind, type MachineRuntime, type MachineStatus, type MessagePage, type McpAuthServersResponse, type ModelSelectionResponse, type MoveWorkspaceFileResponse, type OAuthFlowState, type PiWebCapability, type PiWebComponentStatus, type PiWebConfigEnvOverrides, type PiWebConfigResponse, type PiWebConfigValues, type PiWebDeprecatedAgentInput, type PiWebInstallationInfo, type PiWebPluginConfigMap, type PiWebPluginInfo, type PiWebPluginsResponse, type PiWebPluginScope, type PiWebReleaseStatus, type PiWebRuntimeComponent, type PiWebRuntimeResponse, type PiWebServiceComponent, type PiWebShortcutConfig, type PiWebStatusMessage, type PiWebStatusResponse, type PiWebStatusSeverity, type Project, type QueuedSessionMessage, type SavedPromptAttachment, type SessionBulkArchiveResponse, type SessionBulkDeleteArchivedResponse, type SessionBulkFailure, type SessionCleanupExecuteResponse, type SessionCleanupPreviewResponse, type SessionCleanupProjectSummary, type SessionCleanupThresholds, type SessionCleanupTotals, type SessionInfo, type SessionLocation, type SessionModel, type SessionModelCatalogEntry, type SessionModelCatalogResponse, type SessionNotification, type SessionNotificationClearReason, type SessionNotificationDismissThrough, type SessionNotificationInboxDelta, type SessionNotificationInboxEvent, type SessionNotificationInboxSnapshot, type SessionNotificationSeverity, type SessionNotificationSummary, type ServerNotice, type ServerNoticeEvent, type ServerNoticeSeverity, type ServerNoticeSnapshot, type SessionStatus, type SessionStreamSnapshot, type SessionTranscriptSnapshot, type SessionUiEvent, type SessionUnreadCatalogSnapshot, type SessionUnreadEvent, type SessionUnreadSummary, type SessionWarning, type SessionWarningSeverity, type SlashCommand, type ThinkingLevelsResponse, type WriteWorkspaceFileResponse, type Workspace, type WorkspaceEffectiveConfig, type WorkspaceTrustResponse } from "../../../shared/apiTypes";
 import { parseMachineStatusSnapshot, type MachineStatusSnapshot, type MachineStatusUiEvent } from "../../../shared/machineStatus";
-import type { JsonValue, PiPackageInfo, PiPackageMutationAction, PiPackageMutationResponse, PiPackageScope, PiPackagesResponse, SessionActivity, SessionStartupProgressEvent, SessionTreeForkResult, SessionTreeNavigateResult, SessionTreeNode, SessionTreeNodeKind, SessionTreeSnapshot, WorkspaceProviderDiagnostic, WorkspaceProviderDiagnosticCode, WorkspaceProviderResolution, WorkspaceProviderResolutionStatus, WorkspaceProviderTier } from "../../../shared/apiTypes";
+import type { JsonValue, PiPackageInfo, PiPackageInstallableSuggestion, PiPackageMutationAction, PiPackageMutationResponse, PiPackageScope, PiPackagesResponse, SessionActivity, SessionStartupProgressEvent, SessionTreeForkResult, SessionTreeNavigateResult, SessionTreeNode, SessionTreeNodeKind, SessionTreeSnapshot, WorkspaceProviderDiagnostic, WorkspaceProviderDiagnosticCode, WorkspaceProviderResolution, WorkspaceProviderResolutionStatus, WorkspaceProviderTier } from "../../../shared/apiTypes";
+
+import { parseServerNoticePresentation } from "../../../shared/serverNoticePresentation";
+import { parseWorkspaceRemovalLocalization } from "../../../shared/workspaceRemovalPresentation";
+import { parseCommandResultPresentation } from "../../../shared/commandResultPresentation";
+import { parseCommandOutputPresentation } from "../../../shared/commandOutputPresentation";
+import { parseSessionNotificationPresentation } from "../../../shared/sessionNotificationPresentation";
+import { parseSessionTreeSummaryPresentation } from "../../../shared/sessionTreeSummaryPresentation";
 import { parseKnownPiWebCapabilities } from "../../../shared/capabilities";
 import { parseDeprecatedAgentInputs } from "../../../shared/piWebStatusParsing";
 import { PI_WEB_PLUGIN_RECOVERY_COMMANDS, pluginDisableRecoveryCommand } from "../../../shared/pluginRecoveryCommands";
+import { parseServerNoticeScope } from "../../../shared/serverNoticeContract";
+import { requireDefaultThemePreference } from "../../../shared/themePreference";
+import { requireDefaultLocalization } from "../../../shared/defaultLocalization";
+import { requireDefaultStreamingBehavior } from "../../../shared/streamingBehavior";
+import { requireInstallationName } from "../../../shared/installationName";
+import { requireHostAccess } from "../../../shared/hostAccess";
+import { parseRuntimeActivityPresentation } from "../../../shared/sessionActivityPresentation";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -46,9 +60,16 @@ export function arrayOf<T>(parse: (value: unknown) => T): (value: unknown) => T[
   };
 }
 
-function parseUnknownArray(value: unknown): unknown[] {
+function parseTranscriptMessages(value: unknown): unknown[] {
   if (!Array.isArray(value)) throw new Error("Expected array response");
-  return value;
+  return value.map((message: unknown) => {
+    // SDK payloads remain opaque, but durable identity is part of our API contract.
+    if (typeof message === "object" && message !== null && "entryId" in message
+      && message.entryId !== undefined && typeof message.entryId !== "string") {
+      throw new Error("Expected string field: entryId");
+    }
+    return message;
+  });
 }
 
 function arrayOfString(value: unknown, key: string): string[] {
@@ -58,7 +79,7 @@ function arrayOfString(value: unknown, key: string): string[] {
 
 export function parseMessagePage(value: unknown): MessagePage {
   const record = requireRecord(value);
-  return { messages: parseUnknownArray(record["messages"]), start: requireNumber(record, "start"), total: requireNumber(record, "total") };
+  return { messages: parseTranscriptMessages(record["messages"]), start: requireNumber(record, "start"), total: requireNumber(record, "total") };
 }
 
 export function parseMachinesResponse(value: unknown): Machine[] {
@@ -75,6 +96,8 @@ export function parseMachine(value: unknown): Machine {
   return {
     id: requireString(record, "id"),
     name: requireString(record, "name"),
+    ...optionalField("nameOverride", optionalString(record, "nameOverride")),
+    ...optionalField("reportedName", optionalString(record, "reportedName")),
     kind,
     ...(baseUrl === undefined ? {} : { baseUrl }),
     createdAt: requireString(record, "createdAt"),
@@ -214,7 +237,6 @@ function optionalWorkspaceProviderMetadata(value: unknown): Workspace["provider"
   return Object.freeze({
     pluginId: requireString(value, "pluginId"),
     capabilities: Object.freeze({
-      request: requireBoolean(capabilities, "request"),
       remove: requireBoolean(capabilities, "remove"),
     }),
     ...optionalField("metadata", metadata === undefined ? undefined : parseJsonObject(metadata, "workspace provider metadata")),
@@ -228,6 +250,7 @@ function optionalWorkspaceRemovalPresentation(value: unknown): Workspace["remova
     actionLabel: requireNonEmptyString(value, "actionLabel"),
     confirmation: requireNonEmptyString(value, "confirmation"),
     precondition: requireNonEmptyString(value, "precondition"),
+    ...optionalField("localization", parseWorkspaceRemovalLocalization(value["localization"])),
   });
 }
 
@@ -249,15 +272,31 @@ function parseJsonValue(value: unknown, field: string): JsonValue {
 function requireWorkspaceEffectiveConfig(value: unknown): WorkspaceEffectiveConfig {
   if (!isRecord(value) || Array.isArray(value)) throw new Error("Expected workspace effectiveConfig field");
   const uploads = optionalUploads(value["uploads"]);
+  const attachments = optionalAttachments(value["attachments"]);
   return Object.freeze({
     ...optionalField("uploads", uploads === undefined ? undefined : Object.freeze({ ...uploads })),
+    ...optionalField("attachments", attachments === undefined ? undefined : Object.freeze({ ...attachments })),
   });
+}
+
+function parseSessionUiMetadata(value: unknown): NonNullable<SessionInfo["metadata"]> {
+  if (!isRecord(value) || Array.isArray(value)) throw new Error("Invalid session metadata field");
+  return Object.freeze(Object.fromEntries(
+    Object.entries(value).map(([namespace, data]) => [namespace, parseJsonObject(data, "session metadata namespace")]),
+  ));
+}
+
+export function parseSessionLocation(value: unknown): SessionLocation {
+  const record = requireRecord(value);
+  return { sessionId: requireString(record, "sessionId"), projectId: requireString(record, "projectId"), workspaceId: requireString(record, "workspaceId") };
 }
 
 export function parseSessionInfo(value: unknown): SessionInfo {
   const record = requireRecord(value);
   const name = optionalString(record, "name");
+  const metadata = record["metadata"] === undefined ? undefined : parseSessionUiMetadata(record["metadata"]);
   const persisted = parseOptionalBoolean(record["persisted"], "persisted");
+  const agentSubsession = parseOptionalBoolean(record["agentSubsession"], "agentSubsession");
   const parentSessionPath = optionalString(record, "parentSessionPath");
   const parentSessionRelation = parseOptionalSessionParentRelation(record["parentSessionRelation"]);
   const archivedAt = optionalString(record, "archivedAt");
@@ -266,7 +305,10 @@ export function parseSessionInfo(value: unknown): SessionInfo {
     path: requireString(record, "path"),
     cwd: requireString(record, "cwd"),
     ...(persisted === undefined ? {} : { persisted }),
+    ...optionalField("interventionRequired", parseOptionalBoolean(record["interventionRequired"], "interventionRequired")),
+    ...(agentSubsession === true ? { agentSubsession: true } : {}),
     ...(name === undefined ? {} : { name }),
+    ...(metadata === undefined ? {} : { metadata }),
     created: requireString(record, "created"),
     modified: requireString(record, "modified"),
     messageCount: requireNumber(record, "messageCount"),
@@ -301,15 +343,19 @@ function parseSessionWarning(value: unknown): SessionWarning {
   return {
     severity: parseSessionWarningSeverity(record["severity"]),
     message: requireString(record, "message"),
+    ...(isRecord(record["presentation"]) && record["presentation"]["kind"] === "anthropicSubscriptionAuth"
+      ? { presentation: { kind: "anthropicSubscriptionAuth" as const } } : {}),
     ...optionalField("source", optionalString(record, "source")),
     ...optionalField("path", optionalString(record, "path")),
     ...(dismiss === undefined ? {} : { dismiss }),
   };
 }
 
-function optionalWarnings(value: unknown): Pick<SessionStatus, "warnings"> | object {
-  if (value === undefined) return {};
-  return { warnings: arrayOf(parseSessionWarning)(value) };
+/** Rolling compatibility for daemons that encoded this status fact as a warning. */
+function isLegacyOtherInstanceActivityWarning(warning: SessionWarning): boolean {
+  return warning.severity === "info"
+    && warning.source === "PI-WEB"
+    && warning.message === "Recently active in another PI-WEB instance. Avoid working on this session in both instances at once.";
 }
 
 function parseAskUserQuestionOption(value: unknown): AskUserQuestionOption {
@@ -335,41 +381,16 @@ function parseAskUserQuestion(value: unknown): AskUserQuestion {
   };
 }
 
-/**
- * Validate the session's open question set. A malformed ask must be dropped
- * rather than rendered: the card asks the user to answer on the model's behalf,
- * so questions or options the daemon did not really send must never appear.
- */
-function parsePendingAskUser(value: unknown): PendingAskUser {
+/** Validate the durable question payload before offering its interactive renderer. */
+export function parseAskUserRequest(value: unknown): AskUserRequest {
   const record = requireRecord(value);
   const questions = boundedArrayOf(record["questions"], parseAskUserQuestion, ASK_USER_QUESTION_LIMIT, "questions");
-  if (questions.length === 0) throw new Error("Pending ask has no questions");
+  if (questions.length === 0) throw new Error("Ask has no questions");
   assertUniqueStrings(questions.map((question) => question.id), "ask question id");
   return {
     askId: requireBoundedNonEmptyString(record, "askId", ASK_USER_ID_MAX_LENGTH),
     askedAt: requireNonEmptyString(record, "askedAt"),
     questions,
-  };
-}
-
-function optionalPendingAsk(value: unknown): Pick<SessionStatus, "pendingAsk"> | object {
-  if (value === undefined) return {};
-  return { pendingAsk: parsePendingAskUser(value) };
-}
-
-export function parseSessionAskOpenedEvent(value: unknown): { type: "ask.opened"; ask: PendingAskUser } {
-  const record = requireRecord(value);
-  if (record["type"] !== "ask.opened") throw new Error("Invalid ask opened event type");
-  return { type: "ask.opened", ask: parsePendingAskUser(record["ask"]) };
-}
-
-export function parseSessionAskClosedEvent(value: unknown): { type: "ask.closed"; askId: string; reason: AskUserCloseReason } {
-  const record = requireRecord(value);
-  if (record["type"] !== "ask.closed") throw new Error("Invalid ask closed event type");
-  return {
-    type: "ask.closed",
-    askId: requireBoundedNonEmptyString(record, "askId", ASK_USER_ID_MAX_LENGTH),
-    reason: parseAskUserCloseReason(record["reason"]),
   };
 }
 
@@ -385,11 +406,12 @@ function parseAskUserQuestionRecord(value: unknown): AskUserQuestionRecord {
   const offered = new Set(question.options.map((option) => option.value));
   if (values.some((selected) => !offered.has(selected))) throw new Error("Ask answer selected an option the question never offered");
   const otherText = optionalBoundedNonEmptyString(record, "otherText", ASK_USER_OTHER_TEXT_MAX_LENGTH);
+  const comment = optionalBoundedNonEmptyString(record, "comment", ASK_USER_COMMENT_MAX_LENGTH);
   const answered = requireBoolean(record, "answered");
   // The record is the one thing both the model and the user read, so a flag that
   // disagrees with the answer it describes is rejected rather than displayed.
   if (answered !== (values.length > 0 || otherText !== undefined)) throw new Error("Ask answer contradicts its answered flag");
-  return { question, answered, values, ...(otherText === undefined ? {} : { otherText }) };
+  return { question, answered, values, ...(otherText === undefined ? {} : { otherText }), ...(comment === undefined ? {} : { comment }) };
 }
 
 export function parseAskUserOutcome(value: unknown): AskUserOutcome {
@@ -411,21 +433,6 @@ export function parseAskUserOutcome(value: unknown): AskUserOutcome {
     answeredCount,
     unansweredIds,
     summary: requireNonEmptyString(record, "summary"),
-  };
-}
-
-export function parseAskUserCloseResponse(value: unknown): AskUserCloseResponse {
-  const record = requireRecord(value);
-  const result = record["result"];
-  if (result !== "closed" && result !== "stale") throw new Error("Invalid ask close result");
-  const outcome = record["outcome"] === undefined ? undefined : parseAskUserOutcome(record["outcome"]);
-  // Only the call that actually closed the ask carries an outcome; a stale close
-  // reports none and is trusted for the session status alone.
-  if ((result === "closed") !== (outcome !== undefined)) throw new Error("Ask close response outcome mismatch");
-  return {
-    result,
-    ...(outcome === undefined ? {} : { outcome }),
-    sessionStatus: parseSessionStatus(record["sessionStatus"]),
   };
 }
 
@@ -553,23 +560,28 @@ function optionalNonEmptyString(record: Record<string, unknown>, key: string): s
 
 export function parseSessionStatus(value: unknown): SessionStatus {
   const record = requireRecord(value);
+  const warnings = record["warnings"] === undefined ? undefined : arrayOf(parseSessionWarning)(record["warnings"]);
+  const recentlyActiveElsewhere = parseOptionalBoolean(record["recentlyActiveElsewhere"], "recentlyActiveElsewhere");
   return {
     sessionId: requireString(record, "sessionId"),
     ...optionalField("persisted", parseOptionalBoolean(record["persisted"], "persisted")),
+    recentlyActiveElsewhere: recentlyActiveElsewhere ?? warnings?.some(isLegacyOtherInstanceActivityWarning) ?? false,
+    ...optionalField("interventionRequired", parseOptionalBoolean(record["interventionRequired"], "interventionRequired")),
     isStreaming: requireBoolean(record, "isStreaming"),
     isCompacting: requireBoolean(record, "isCompacting"),
     isBashRunning: requireBoolean(record, "isBashRunning"),
     pendingMessageCount: requireNumber(record, "pendingMessageCount"),
     queuedMessages: record["queuedMessages"] === undefined ? [] : arrayOf(parseQueuedSessionMessage)(record["queuedMessages"]),
+    ...optionalField("queueMessageActionsUnavailable", optionalString(record, "queueMessageActionsUnavailable")),
     ...optionalField("messageCount", optionalNumber(record, "messageCount")),
     tokens: parseTokens(record["tokens"]),
     cost: requireNumber(record, "cost"),
     ...optionalModel(record["model"]),
     ...optionalContextUsage(record["contextUsage"]),
     ...optionalField("thinkingLevel", optionalString(record, "thinkingLevel")),
-    ...optionalWarnings(record["warnings"]),
-    ...optionalPendingAsk(record["pendingAsk"]),
+    ...optionalField("warnings", warnings?.filter((warning) => !isLegacyOtherInstanceActivityWarning(warning))),
     ...optionalPendingDialogs(record["pendingDialogs"]),
+    ...optionalField("suggestedInput", optionalString(record, "suggestedInput")),
   };
 }
 
@@ -578,6 +590,17 @@ export function parseSessionStreamSnapshot(value: unknown): SessionStreamSnapsho
   return {
     seq: requireNumber(record, "seq"),
     partial: record["partial"] ?? null,
+  };
+}
+
+export function parseSessionTranscriptSnapshot(value: unknown): SessionTranscriptSnapshot {
+  const record = requireRecord(value);
+  if (record["partial"] === undefined) throw new Error("Expected field: partial");
+  return {
+    page: parseMessagePage(record["page"]),
+    status: parseSessionStatus(record["status"]),
+    seq: requireNonNegativeSafeInteger(record, "seq"),
+    partial: record["partial"],
   };
 }
 
@@ -649,7 +672,16 @@ function parseSessionActivity(value: unknown): SessionActivity {
     ...optionalField("detail", optionalString(record, "detail")),
     at: requireNonEmptyString(record, "at"),
     ...optionalField("startup", optionalActivityStartupMarker(record)),
+    ...optionalField("startupPresentation", parseStartupPresentation(record["startupPresentation"])),
+    ...optionalField("runtimePresentation", parseRuntimeActivityPresentation(record["runtimePresentation"])),
   };
+}
+
+function parseStartupPresentation(value: unknown): SessionActivity["startupPresentation"] {
+  if (!isRecord(value)) return undefined;
+  const { intent, stage, catalogRefreshing } = value;
+  if ((intent !== "create" && intent !== "open") || (stage !== "runtime" && stage !== "extensions") || typeof catalogRefreshing !== "boolean") return undefined;
+  return { intent, stage, catalogRefreshing };
 }
 
 /**
@@ -685,10 +717,12 @@ export function parseSessionStreamEvent(value: unknown): SessionUiEvent {
       // The message payload is a projected Pi message; only its presence is
       // guaranteed at this boundary.
       return { type: "message.append", message: requirePresent(record, "message") };
+    case "assistant.start":
+      return { type: "assistant.start", message: requirePresent(record, "message") };
     case "assistant.delta":
-      return { type: "assistant.delta", text: requireString(record, "text") };
+      return { type: "assistant.delta", text: requireString(record, "text"), ...optionalField("streamId", optionalString(record, "streamId")) };
     case "assistant.thinking.delta":
-      return { type: "assistant.thinking.delta", text: requireString(record, "text") };
+      return { type: "assistant.thinking.delta", text: requireString(record, "text"), ...optionalField("streamId", optionalString(record, "streamId")) };
     case "tool.start":
       return {
         type: "tool.start",
@@ -748,10 +782,14 @@ export function parseSessionStreamEvent(value: unknown): SessionUiEvent {
       return parseCommandOutputEvent(record);
     case "session.error":
       return { type: "session.error", message: requireString(record, "message") };
+    case "session.diagnostic":
+      return { type: "session.diagnostic", message: requireString(record, "message") };
     case "session.name":
       return parseSessionNameEvent(record);
     case "session.created":
       return { type: "session.created", session: parseSessionInfo(record["session"]) };
+    case "session.tree.changed":
+      return { type: "session.tree.changed" };
     case "pi.event":
       return { type: "pi.event", eventType: requireString(record, "eventType") };
     default:
@@ -760,8 +798,7 @@ export function parseSessionStreamEvent(value: unknown): SessionUiEvent {
 }
 
 type RealtimeStreamEvent =
-  | Extract<GlobalSessionEvent, { type: "status.update" | "activity.update" | "session.name" | "session.created" }>
-  | TerminalUiEvent
+  | Extract<GlobalSessionEvent, { type: "status.update" | "activity.update" | "session.name" | "session.created" | "models.changed" | "workspaces.changed" | "session-pins.changed" | "notices.updated" }>
   | MachineStatusUiEvent;
 
 export function parseRealtimeStreamEvent(value: unknown): RealtimeStreamEvent {
@@ -775,16 +812,19 @@ export function parseRealtimeStreamEvent(value: unknown): RealtimeStreamEvent {
       return parseSessionNameEvent(record);
     case "session.created":
       return { type: "session.created", session: parseSessionInfo(record["session"]) };
-    case "terminal.created":
-      return { type: "terminal.created", terminal: parseTerminalInfo(record["terminal"]) };
-    case "terminal.exited":
-      return { type: "terminal.exited", terminal: parseTerminalInfo(record["terminal"]) };
-    case "terminal.closed":
+    case "models.changed":
+      return { type: "models.changed", revision: requireNonNegativeSafeInteger(record, "revision") };
+    case "workspaces.changed":
+      return { type: "workspaces.changed", projectId: requireNonEmptyString(record, "projectId") };
+    case "session-pins.changed":
       return {
-        type: "terminal.closed",
-        terminalId: requireNonEmptyString(record, "terminalId"),
-        cwd: requireNonEmptyString(record, "cwd"),
+        type: "session-pins.changed",
+        projectId: requireNonEmptyString(record, "projectId"),
+        workspaceId: requireNonEmptyString(record, "workspaceId"),
+        revision: requireNonNegativeSafeInteger(record, "revision"),
       };
+    case "notices.updated":
+      return parseServerNoticeEvent(record);
     case "machine.status":
       return { type: "machine.status", status: requireMachineStatusSnapshot(record["status"]) };
     default:
@@ -813,6 +853,7 @@ function parseCommandOutputEvent(record: Record<string, unknown>): Extract<Sessi
     type: "command.output",
     level,
     message: requireString(record, "message"),
+    ...optionalField("presentation", parseCommandOutputPresentation(record["presentation"])),
   };
 }
 
@@ -822,6 +863,49 @@ function parseSessionNameEvent(record: Record<string, unknown>): Extract<Session
     sessionId: requireNonEmptyString(record, "sessionId"),
     ...optionalField("name", optionalString(record, "name")),
   };
+}
+
+export function parseServerNoticeSnapshot(value: unknown): ServerNoticeSnapshot {
+  const record = requireRecord(value);
+  const notices = arrayOf(parseServerNotice)(record["notices"]);
+  const ids = notices.map((notice) => notice.id);
+  if (new Set(ids).size !== ids.length) throw new Error("Duplicate server notice id");
+  return {
+    daemonInstanceId: requireNonEmptyString(record, "daemonInstanceId"),
+    revision: requireNonNegativeSafeInteger(record, "revision"),
+    notices,
+  };
+}
+
+export function parseServerNoticeEvent(value: unknown): ServerNoticeEvent {
+  const record = requireRecord(value);
+  if (record["type"] !== "notices.updated") throw new Error("Invalid server notice event type");
+  return { type: "notices.updated", snapshot: parseServerNoticeSnapshot(record["snapshot"]) };
+}
+
+function parseServerNotice(value: unknown): ServerNotice {
+  const record = requireRecord(value);
+  const presentation = parseServerNoticePresentation(record["presentation"]);
+  const createdAt = requireNonEmptyString(record, "createdAt");
+  if (!Number.isFinite(Date.parse(createdAt))) throw new Error("Invalid server notice creation time");
+  const source = optionalString(record, "source");
+  const scope = record["scope"] === undefined ? undefined : parseServerNoticeScope(record["scope"], "Server notice scope");
+  const context = record["context"] === undefined ? undefined : parseJsonObject(record["context"], "server notice context");
+  return {
+    id: requireNonEmptyString(record, "id"),
+    severity: parseServerNoticeSeverity(record["severity"]),
+    ...optionalField("presentation", presentation),
+    message: requireString(record, "message"),
+    createdAt,
+    ...optionalField("source", source),
+    ...optionalField("scope", scope),
+    ...optionalField("context", context),
+  };
+}
+
+function parseServerNoticeSeverity(value: unknown): ServerNoticeSeverity {
+  if (value !== "info" && value !== "warning" && value !== "error") throw new Error("Invalid server notice severity");
+  return value;
 }
 
 function parseSessionUnreadSummary(value: unknown): SessionUnreadSummary {
@@ -948,6 +1032,7 @@ function parseSessionNotification(value: unknown): SessionNotification {
   return {
     id: requireNonEmptyString(record, "id"),
     message,
+    ...optionalField("presentation", parseSessionNotificationPresentation(record["presentation"])),
     truncated: requireBoolean(record, "truncated"),
     severity: parseSessionNotificationSeverity(record["severity"]),
     receivedAt,
@@ -1066,12 +1151,14 @@ function highestNotificationSeverity(notifications: readonly SessionNotification
 export function parseSessionCleanupPreviewResponse(value: unknown): SessionCleanupPreviewResponse {
   const record = requireRecord(value);
   const skippedBusySessionIds = record["skippedBusySessionIds"] === undefined ? undefined : arrayOfString(record["skippedBusySessionIds"], "skippedBusySessionIds");
+  const skippedPinnedSessionIds = record["skippedPinnedSessionIds"] === undefined ? undefined : arrayOfString(record["skippedPinnedSessionIds"], "skippedPinnedSessionIds");
   return {
     generatedAt: requireString(record, "generatedAt"),
     thresholds: parseSessionCleanupThresholds(record["thresholds"]),
     projects: arrayOf(parseSessionCleanupProjectSummary)(record["projects"]),
     totals: parseSessionCleanupTotals(record["totals"]),
     ...(skippedBusySessionIds === undefined ? {} : { skippedBusySessionIds }),
+    ...(skippedPinnedSessionIds === undefined ? {} : { skippedPinnedSessionIds }),
   };
 }
 
@@ -1140,7 +1227,11 @@ function parseQueuedSessionMessage(value: unknown): QueuedSessionMessage {
   const record = requireRecord(value);
   const kind = requireString(record, "kind");
   if (kind !== "steer" && kind !== "followUp") throw new Error("Invalid queued message kind");
-  return { kind, text: requireString(record, "text") };
+  return {
+    kind, text: requireString(record, "text"),
+    ...optionalField("hasAttachments", optionalBoolean(record, "hasAttachments")),
+    ...optionalField("attachmentCount", record["attachmentCount"] === undefined ? undefined : requireNonNegativeSafeInteger(record, "attachmentCount")),
+  };
 }
 
 function parseTokens(value: unknown): SessionStatus["tokens"] {
@@ -1167,6 +1258,27 @@ function optionalModel(value: unknown): Pick<SessionStatus, "model"> | object {
 export function parseModelSelectionResponse(value: unknown): ModelSelectionResponse {
   const record = requireRecord(value);
   return { models: arrayOf(parseSessionModel)(record["models"]) };
+}
+
+function parseSessionModelCatalogEntry(value: unknown): SessionModelCatalogEntry {
+  const record = requireRecord(value);
+  return {
+    provider: requireString(record, "provider"),
+    id: requireString(record, "id"),
+    ...optionalField("name", optionalString(record, "name")),
+    ...optionalField("contextWindow", optionalNumber(record, "contextWindow")),
+    ...optionalField("reasoning", record["reasoning"]),
+    enabled: requireBoolean(record, "enabled"),
+    ...optionalField("editable", optionalBoolean(record, "editable")),
+    ...optionalField("catalogIndex", record["catalogIndex"] === undefined ? undefined : requireNonNegativeSafeInteger(record, "catalogIndex")),
+  };
+}
+
+export function parseSessionModelCatalogResponse(value: unknown): SessionModelCatalogResponse {
+  const record = requireRecord(value);
+  const scope = record["scope"];
+  if (scope !== undefined && scope !== "all" && scope !== "manual") throw new Error("Invalid model catalog scope");
+  return { models: arrayOf(parseSessionModelCatalogEntry)(record["models"]), ...optionalField("scope", scope) };
 }
 
 function parseThinkingLevel(value: unknown): string {
@@ -1215,12 +1327,27 @@ export function parseAuthProvidersResponse(value: unknown): AuthProvidersRespons
   return { providers: arrayOf(parseAuthProviderOption)(record["providers"]) };
 }
 
+export function parseMcpAuthServersResponse(value: unknown): McpAuthServersResponse {
+  const record = requireRecord(value);
+  return { servers: arrayOf((item) => {
+    const server = requireRecord(item);
+    return { name: requireString(server, "name"), ...optionalField("description", optionalString(server, "description")) };
+  })(record["servers"]) };
+}
+
 export function parseOAuthFlowState(value: unknown): OAuthFlowState {
   const record = requireRecord(value);
-  const flow = {
+  const target = record["target"];
+  if (target !== undefined && target !== "mcp") throw new Error("Invalid login flow target");
+  const mcpMode = record["mcpMode"];
+  if (mcpMode !== undefined && mcpMode !== "login" && mcpMode !== "logout") throw new Error("Invalid MCP authentication mode");
+  const flow: OAuthFlowState = {
     flowId: requireString(record, "flowId"),
     providerId: requireString(record, "providerId"),
     providerName: requireString(record, "providerName"),
+    ...(target === undefined ? {} : { target }),
+    ...(mcpMode === undefined ? {} : { mcpMode }),
+    ...optionalField("cancelRequested", optionalBoolean(record, "cancelRequested")),
     status: parseOAuthFlowStatus(record["status"]),
     progress: arrayOf((item) => {
       if (typeof item !== "string") throw new Error("Expected progress item string");
@@ -1309,7 +1436,12 @@ export function parseSlashCommand(value: unknown): SlashCommand {
   const record = requireRecord(value);
   const source = requireString(record, "source");
   if (source !== "extension" && source !== "prompt" && source !== "skill" && source !== "builtin") throw new Error("Invalid command source");
-  return { name: requireString(record, "name"), source, ...optionalField("description", optionalString(record, "description")) };
+  return {
+    name: requireString(record, "name"),
+    source,
+    ...optionalField("description", optionalString(record, "description")),
+    ...optionalField("argumentHint", optionalString(record, "argumentHint")),
+  };
 }
 
 export function parseFileSuggestion(value: unknown): FileSuggestion {
@@ -1372,41 +1504,11 @@ function optionalFileMediaType(value: unknown): FileContentResponse["mediaType"]
   return value;
 }
 
-export function parseTerminalInfo(value: unknown): TerminalInfo {
+export function parseWorkspaceTrustResponse(value: unknown): WorkspaceTrustResponse {
   const record = requireRecord(value);
-  return { id: requireString(record, "id"), cwd: requireString(record, "cwd"), name: requireString(record, "name"), createdAt: requireString(record, "createdAt"), exited: requireBoolean(record, "exited"), ...optionalField("exitCode", optionalNumber(record, "exitCode")), ...optionalField("commandRunId", optionalString(record, "commandRunId")) };
-}
-
-export function parseTerminalCommandRun(value: unknown): TerminalCommandRun {
-  const record = requireRecord(value);
-  return {
-    id: requireString(record, "id"),
-    origin: requireString(record, "origin"),
-    projectId: requireString(record, "projectId"),
-    workspaceId: requireString(record, "workspaceId"),
-    terminalId: requireString(record, "terminalId"),
-    title: requireString(record, "title"),
-    command: requireString(record, "command"),
-    status: parseTerminalCommandRunStatus(record["status"]),
-    ...optionalField("exitCode", optionalNumber(record, "exitCode")),
-    createdAt: requireString(record, "createdAt"),
-    ...optionalField("startedAt", optionalString(record, "startedAt")),
-    ...optionalField("completedAt", optionalString(record, "completedAt")),
-    metadata: parseStringRecord(record["metadata"], "metadata"),
-  };
-}
-
-function parseTerminalCommandRunStatus(value: unknown): TerminalCommandRunStatus {
-  if (value !== "queued" && value !== "running" && value !== "succeeded" && value !== "failed") throw new Error("Invalid terminal command run status");
-  return value;
-}
-
-function parseStringRecord(value: unknown, key: string): Record<string, string> {
-  const record = requireRecord(value);
-  return Object.fromEntries(Object.entries(record).map(([field, fieldValue]) => {
-    if (typeof fieldValue !== "string") throw new Error(`Expected string record field: ${key}.${field}`);
-    return [field, fieldValue];
-  }));
+  const decision = record["decision"];
+  if (decision !== true && decision !== false && decision !== null) throw new Error("Invalid workspace trust decision");
+  return { path: requireString(record, "path"), decision, trusted: requireBoolean(record, "trusted") };
 }
 
 /**
@@ -1428,25 +1530,60 @@ export function parsePiWebConfigResponse(value: unknown): PiWebConfigResponse {
     config: parsePiWebConfigValues(record["config"]),
     effectiveConfig: parsePiWebConfigValues(record["effectiveConfig"]),
     envOverrides: parsePiWebConfigEnvOverrides(record["envOverrides"]),
+    ...optionalField("activeHostAccess", record["activeHostAccess"] === undefined ? undefined : record["activeHostAccess"] === null ? null : requireHostAccess(record["activeHostAccess"], "response activeHostAccess")),
+    ...optionalField("enforcedSettings", optionalConfigSources(record["enforcedSettings"])),
+    ...optionalField("configSources", optionalConfigSources(record["configSources"])),
+    ...optionalField("defaultsConfig", record["defaultsConfig"] === undefined ? undefined : parsePiWebConfigValues(record["defaultsConfig"])),
+    ...optionalField("defaultsPath", optionalString(record, "defaultsPath")),
   };
+}
+
+function optionalConfigSources(value: unknown): Record<string, string> | undefined {
+  if (value === undefined) return undefined;
+  const record = requireRecord(value);
+  return Object.fromEntries(Object.entries(record).map(([key, source]) => {
+    if (typeof source !== "string") throw new Error(`Invalid configuration source for ${key}`);
+    return [key, source];
+  }));
 }
 
 function parsePiWebConfigValues(value: unknown): PiWebConfigValues {
   const record = requireRecord(value);
-  return {
+  if (Object.hasOwn(record, "sessionNaming")) throw new Error("Retired PI WEB sessionNaming config field");
+  const config: PiWebConfigValues = {
     ...optionalField("host", optionalString(record, "host")),
     ...optionalField("port", optionalNumber(record, "port")),
+    ...optionalField("installationName", record["installationName"] === undefined ? undefined : requireInstallationName(record["installationName"])),
     ...optionalField("allowedHosts", optionalAllowedHosts(record["allowedHosts"])),
+    ...optionalField("hostAccess", record["hostAccess"] === undefined ? undefined : requireHostAccess(record["hostAccess"], "response hostAccess")),
     ...optionalField("shortcuts", optionalShortcuts(record["shortcuts"])),
+    ...optionalField("defaultTheme", record["defaultTheme"] === undefined ? undefined : requireDefaultThemePreference(record["defaultTheme"], "response")),
+    ...optionalField("defaultStreamingBehavior", record["defaultStreamingBehavior"] === undefined ? undefined : requireDefaultStreamingBehavior(record["defaultStreamingBehavior"], "response")),
+    ...optionalField("defaultLocalization", record["defaultLocalization"] === undefined ? undefined : requireDefaultLocalization(record["defaultLocalization"], "response")),
+    ...optionalField("quietMode", optionalBoolean(record, "quietMode")),
     ...optionalField("plugins", optionalPlugins(record["plugins"])),
+    ...optionalField("basePaths", optionalStringArray(record["basePaths"], "basePaths")),
     ...optionalField("pathAccess", optionalPathAccess(record["pathAccess"])),
     ...optionalField("uploads", optionalUploads(record["uploads"])),
+    ...optionalField("attachments", optionalAttachments(record["attachments"])),
     ...optionalField("maxUploadBytes", optionalNumber(record, "maxUploadBytes")),
     ...optionalField("agent", optionalAgent(record["agent"])),
     ...optionalField("spawnSessions", optionalBoolean(record, "spawnSessions")),
     ...optionalField("subsessions", optionalBoolean(record, "subsessions")),
+    ...optionalField("sessionMessages", optionalBoolean(record, "sessionMessages")),
+    ...optionalField("crossProjectSessionMessages", optionalBoolean(record, "crossProjectSessionMessages")),
     ...optionalField("askUser", optionalBoolean(record, "askUser")),
+    ...optionalField("environmentFacts", optionalBoolean(record, "environmentFacts")),
+    ...optionalField("extensionDialogsTimeoutMs", optionalNumber(record, "extensionDialogsTimeoutMs")),
+    ...optionalField("sessionArchive", optionalSessionArchive(record["sessionArchive"])),
   };
+  return config;
+}
+
+function optionalSessionArchive(value: unknown): PiWebConfigValues["sessionArchive"] {
+  if (value === undefined) return undefined;
+  if (!isRecord(value) || Array.isArray(value)) throw new Error("Invalid PI WEB sessionArchive field");
+  return { ...optionalField("directory", optionalString(value, "directory")) };
 }
 
 function optionalAgent(value: unknown): PiWebConfigValues["agent"] | undefined {
@@ -1483,6 +1620,14 @@ function optionalStringArray(value: unknown, field: string): string[] | undefine
 function optionalUploads(value: unknown): PiWebConfigValues["uploads"] | undefined {
   if (value === undefined) return undefined;
   if (!isRecord(value) || Array.isArray(value)) throw new Error("Invalid PI WEB uploads field");
+  return {
+    ...optionalField("defaultFolder", optionalString(value, "defaultFolder")),
+  };
+}
+
+function optionalAttachments(value: unknown): PiWebConfigValues["attachments"] | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value) || Array.isArray(value)) throw new Error("Invalid PI WEB attachments field");
   return {
     ...optionalField("defaultFolder", optionalString(value, "defaultFolder")),
   };
@@ -1526,13 +1671,17 @@ function parsePiWebConfigEnvOverrides(value: unknown): PiWebConfigEnvOverrides {
     allowedHosts: requireBoolean(record, "allowedHosts"),
     spawnSessions: requireBoolean(record, "spawnSessions"),
     subsessions: requireBoolean(record, "subsessions"),
+    sessionMessages: optionalBoolean(record, "sessionMessages") ?? false,
     askUser: requireBoolean(record, "askUser"),
   };
 }
 
 export function parsePiPackagesResponse(value: unknown): PiPackagesResponse {
   const record = requireRecord(value);
-  return { packages: arrayOf(parsePiPackageInfo)(record["packages"]) };
+  return {
+    packages: arrayOf(parsePiPackageInfo)(record["packages"]),
+    ...optionalField("installableKnownPackages", optionalPiPackageInstallableSuggestions(record["installableKnownPackages"])),
+  };
 }
 
 export function parsePiPackageMutationResponse(value: unknown): PiPackageMutationResponse {
@@ -1546,6 +1695,7 @@ export function parsePiPackageMutationResponse(value: unknown): PiPackageMutatio
     ...optionalField("scope", scope),
     ...optionalField("removed", removed),
     packages: arrayOf(parsePiPackageInfo)(record["packages"]),
+    ...optionalField("installableKnownPackages", optionalPiPackageInstallableSuggestions(record["installableKnownPackages"])),
   };
 }
 
@@ -1556,6 +1706,20 @@ function parsePiPackageInfo(value: unknown): PiPackageInfo {
     scope: parsePiPackageScope(record["scope"]),
     filtered: requireBoolean(record, "filtered"),
     ...optionalField("installedPath", optionalString(record, "installedPath")),
+  };
+}
+
+function optionalPiPackageInstallableSuggestions(value: unknown): PiPackageInstallableSuggestion[] | undefined {
+  return value === undefined ? undefined : arrayOf(parsePiPackageInstallableSuggestion)(value);
+}
+
+function parsePiPackageInstallableSuggestion(value: unknown): PiPackageInstallableSuggestion {
+  const record = requireRecord(value);
+  return {
+    id: requireString(record, "id"),
+    label: requireString(record, "label"),
+    description: requireString(record, "description"),
+    source: requireString(record, "source"),
   };
 }
 
@@ -1579,6 +1743,7 @@ export function parsePiWebPluginsResponse(value: unknown): PiWebPluginsResponse 
       diagnostics: [],
       serverRuntime: {
         status: "incompatible",
+        terminalMode: "required",
         restartRequired: false,
         message: "PI WEB does not support plugin lifecycle diagnostics. Update and restart PI WEB, then try again.",
         recovery: legacyPluginRecoveryCommands(),
@@ -1598,8 +1763,11 @@ function parsePiWebPluginInfo(value: unknown): PiWebPluginInfo {
   const record = requireRecord(value);
   const id = requireString(record, "id");
   const server = record["server"] === undefined ? undefined : parsePiWebPluginServerInfo(record["server"], id);
+  const required = parseOptionalBoolean(record["required"], "required");
+  if (required === false) throw new Error("Invalid PI WEB required plugin marker");
   return {
     id,
+    ...(required === true ? { required: true as const } : {}),
     ...optionalField("module", optionalString(record, "module")),
     source: requireString(record, "source"),
     scope: parsePiWebPluginScope(record["scope"]),
@@ -1618,7 +1786,7 @@ function parsePiWebPluginServerInfo(value: unknown, pluginId: string): NonNullab
   if (state !== "active" && state !== "failed" && state !== "incompatible" && state !== "disabled" && state !== "missing" && state !== "unknown") {
     throw new Error("Invalid PI WEB server plugin state");
   }
-  if (phase !== undefined && phase !== "import" && phase !== "activate" && phase !== "validate" && phase !== "start" && phase !== "health" && phase !== "stop") {
+  if (phase !== undefined && phase !== "import" && phase !== "activate" && phase !== "validate" && phase !== "start" && phase !== "health" && phase !== "dispose") {
     throw new Error("Invalid PI WEB server plugin phase");
   }
   const health = record["health"] === undefined ? undefined : parsePiWebPluginHealth(record["health"]);
@@ -1662,15 +1830,24 @@ function parsePiWebPluginDiagnostic(value: unknown): PiWebPluginsResponse["diagn
 function parsePiWebPluginRuntimeInfo(value: unknown): PiWebPluginsResponse["serverRuntime"] {
   const record = requireRecord(value);
   const status = record["status"];
+  const terminalMode = record["terminalMode"];
   const safeStart = record["safeStart"];
   const desiredSafeStart = record["desiredSafeStart"];
   if (status !== "available" && status !== "unavailable" && status !== "incompatible") throw new Error("Invalid PI WEB server-plugin runtime status");
+  if (terminalMode !== "required" && terminalMode !== "recovery-disabled") throw new Error("Invalid PI WEB Terminal plugin mode");
   if (safeStart !== undefined && safeStart !== "bundled-only" && safeStart !== "none") throw new Error("Invalid PI WEB server-plugin safe-start state");
   if (desiredSafeStart !== undefined && desiredSafeStart !== "off" && desiredSafeStart !== "bundled-only" && desiredSafeStart !== "none") {
     throw new Error("Invalid desired PI WEB server-plugin safe-start state");
   }
+  if (status !== "available" && terminalMode === "recovery-disabled") {
+    throw new Error("Unavailable PI WEB runtime cannot declare Terminal recovery mode");
+  }
+  if ((safeStart === "none") !== (terminalMode === "recovery-disabled") && status === "available") {
+    throw new Error("PI WEB Terminal plugin mode does not match safe start");
+  }
   return {
     status,
+    terminalMode,
     ...(safeStart === undefined ? {} : { safeStart }),
     ...(desiredSafeStart === undefined ? {} : { desiredSafeStart }),
     restartRequired: requireBoolean(record, "restartRequired"),
@@ -1749,6 +1926,7 @@ function parsePiWebRuntimeComponent(value: unknown): PiWebRuntimeComponent {
     component: parsePiWebServiceComponent(record["component"]),
     label: requireString(record, "label"),
     ...optionalField("runtimeVersion", optionalString(record, "runtimeVersion")),
+    ...optionalField("piVersion", optionalString(record, "piVersion")),
     available: requireBoolean(record, "available"),
     capabilities: parsePiWebCapabilities(record["capabilities"]),
     ...optionalField("error", optionalString(record, "error")),
@@ -1762,6 +1940,7 @@ function parsePiWebComponentStatus(value: unknown): PiWebComponentStatus {
     label: requireString(record, "label"),
     ...optionalField("runtimeVersion", optionalString(record, "runtimeVersion")),
     ...optionalField("installedVersion", optionalString(record, "installedVersion")),
+    ...optionalField("piVersion", optionalString(record, "piVersion")),
     stale: requireBoolean(record, "stale"),
     available: requireBoolean(record, "available"),
     ...optionalField("installation", optionalPiWebInstallationInfo(record["installation"])),
@@ -1841,10 +2020,10 @@ function parsePiWebStatusSeverity(value: unknown): PiWebStatusSeverity {
 export function parseCommandResult(value: unknown): CommandResult {
   const record = requireRecord(value);
   const type = requireString(record, "type");
-  if (type === "unsupported") return { type, message: requireString(record, "message") };
-  if (type === "select") return { type, requestId: requireString(record, "requestId"), title: requireString(record, "title"), options: arrayOf(parseCommandOption)(record["options"]) };
+  if (type === "unsupported") return { type, ...optionalField("presentation", parseCommandResultPresentation(record["presentation"])), message: requireString(record, "message") };
+  if (type === "select") return { type, ...optionalField("presentation", parseCommandResultPresentation(record["presentation"])), requestId: requireString(record, "requestId"), title: requireString(record, "title"), options: arrayOf(parseCommandOption)(record["options"]) };
   if (type === "tree") return { type, tree: parseSessionTreeSnapshot(record["tree"]) };
-  if (type === "done") return { type, ...optionalField("message", optionalString(record, "message")), ...optionalSession(record["session"]), ...optionalField("promptDraft", optionalString(record, "promptDraft")) };
+  if (type === "done") return { type, ...optionalField("presentation", parseCommandResultPresentation(record["presentation"])), ...optionalField("message", optionalString(record, "message")), ...optionalSession(record["session"]), ...optionalField("promptDraft", optionalString(record, "promptDraft")) };
   throw new Error("Invalid command result type");
 }
 
@@ -1869,6 +2048,7 @@ function parseSessionTreeNode(value: unknown): SessionTreeNode {
     parentId: requireNullableString(record, "parentId"),
     kind: parseSessionTreeNodeKind(record["kind"]),
     summary: requireString(record, "summary"),
+    ...optionalField("summaryPresentation", parseSessionTreeSummaryPresentation(record["summaryPresentation"])),
     ...optionalField("timestamp", optionalString(record, "timestamp")),
     ...optionalField("label", optionalString(record, "label")),
   };

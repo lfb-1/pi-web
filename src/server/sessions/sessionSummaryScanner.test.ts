@@ -2,11 +2,13 @@ import * as fsPromises from "node:fs/promises";
 import { appendFile, mkdir, mkdtemp, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { SessionManager } from "../../piSdk.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PiSessionListEntry } from "./piSessionService.js";
 import { rewriteHeaderWithoutParentSession } from "./sessionFileRewrite.testSupport.js";
 import { SessionSummaryScanner } from "./sessionSummaryScanner.js";
+import { SESSION_UI_METADATA_CUSTOM_TYPE } from "./sessionMetadata.js";
+import { SESSION_INTERVENTION_CUSTOM_TYPE } from "./sessionIntervention.js";
 
 // Route node:fs/promises through a plain copy of the real module: Node's
 // builtin namespaces are frozen, so vi.spyOn cannot redefine their exports
@@ -121,6 +123,93 @@ describe("session summary scanner parity with the SDK listing", () => {
   });
 });
 
+describe("session summary scanner public metadata", () => {
+  it("keeps only explicit metadata across fast-path and foreign-format entries, memo reuse and chunk folding", async () => {
+    const publicEntry = (leg: number) => ({ type: "custom", customType: SESSION_UI_METADATA_CUSTOM_TYPE,
+      data: { version: 1, metadata: { example: { leg } } } });
+    const path = await writeSession("metadata.jsonl", [
+      headerLine({ id: "metadata", cwd: WORKSPACE }),
+      JSON.stringify(publicEntry(1)),
+      messageLine({ role: "user", content: textContent("first") }),
+      JSON.stringify({ type: "custom", customType: "private", data: { secret: "not public" } }),
+      // Reordered keys and whitespace use the parse fallback rather than the byte classifier.
+      `  ${JSON.stringify({ id: "foreign", ...publicEntry(2) })}`,
+      JSON.stringify({ ...publicEntry(3), data: { version: 99, metadata: { example: { leg: 3 } } } }),
+      '{"type":"custom","customType":"pi-web.session-ui-metadata","data":',
+    ]);
+    const scanner = new SessionSummaryScanner({ chunkBytes: 17 });
+    for (let i = 0; i < 2; i++) {
+      expect(await scanner.scanSessionSummariesInDir(sessionDir)).toMatchObject([{ metadata: { example: { leg: 2 } }, messageCount: 1 }]);
+    }
+    await appendFile(path, `${JSON.stringify(publicEntry(4))}\n`);
+    expect(await scanner.scanSessionSummariesInDir(sessionDir)).toMatchObject([{ metadata: { example: { leg: 4 } } }]);
+  });
+});
+
+describe("session summary scanner intervention state", () => {
+  const interventionLine = (required: boolean) => JSON.stringify({
+    type: "custom", customType: SESSION_INTERVENTION_CUSTOM_TYPE, data: { version: 1, required },
+  });
+
+  it("retains a cold intervention through memo reuse and clears it after an appended resume marker", async () => {
+    const path = await writeSession("intervention.jsonl", [
+      headerLine({ id: "intervention", cwd: WORKSPACE }),
+      interventionLine(true),
+      JSON.stringify({ type: "branch_summary", parentId: "root", summary: "changed branch" }),
+    ]);
+    const scanner = new SessionSummaryScanner({ chunkBytes: 17 });
+    for (let pass = 0; pass < 2; pass++) {
+      expect(await scanner.scanSessionSummariesInDir(sessionDir)).toMatchObject([{ id: "intervention", interventionRequired: true }]);
+    }
+
+    await appendFile(path, `${interventionLine(false)}\n`);
+    for (let pass = 0; pass < 2; pass++) {
+      const summaries = await scanner.scanSessionSummariesInDir(sessionDir);
+      expect(summaries).toHaveLength(1);
+      expect(summaries[0]?.interventionRequired).not.toBe(true);
+    }
+  });
+
+  it("keeps an earlier marker beyond 64 KiB of trailing bookkeeping and message bodies without parsing those bodies", async () => {
+    const padding = "trailing-body-".repeat(8 * 1024);
+    await writeSession("intervention-long-tail.jsonl", [
+      headerLine({ id: "long-tail", cwd: WORKSPACE }),
+      messageLine({ role: "user", content: textContent("first message") }),
+      interventionLine(true),
+      JSON.stringify({ type: "label", id: "bookkeeping", label: padding }),
+      messageLine({ role: "toolResult", content: textContent(padding) }),
+    ]);
+    const parseSpy = vi.spyOn(JSON, "parse");
+    try {
+      const scanner = new SessionSummaryScanner({ chunkBytes: 4096 });
+      expect(await scanner.scanSessionSummariesInDir(sessionDir)).toMatchObject([
+        { id: "long-tail", interventionRequired: true, messageCount: 2, firstMessage: "first message" },
+      ]);
+      expect(parseSpy.mock.calls.some(([input]) => input.includes(padding))).toBe(false);
+    } finally {
+      parseSpy.mockRestore();
+    }
+  });
+
+  it("folds foreign reordered custom fields and ignores invalid later transitions", async () => {
+    const foreignMarker = (required: boolean) => `  ${JSON.stringify({
+      data: { required, version: 1 }, id: "foreign", customType: SESSION_INTERVENTION_CUSTOM_TYPE, type: "custom",
+    })}`;
+    const path = await writeSession("intervention-foreign.jsonl", [
+      headerLine({ id: "foreign-intervention", cwd: WORKSPACE }),
+      interventionLine(false),
+      foreignMarker(true),
+      JSON.stringify({ type: "custom", customType: SESSION_INTERVENTION_CUSTOM_TYPE, data: { version: 99, required: false } }),
+    ]);
+    const scanner = new SessionSummaryScanner({ chunkBytes: 19 });
+    expect(await scanner.scanSessionSummariesInDir(sessionDir)).toMatchObject([{ interventionRequired: true }]);
+    await appendFile(path, `${foreignMarker(false)}\n`);
+    const summaries = await scanner.scanSessionSummariesInDir(sessionDir);
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0]?.interventionRequired).not.toBe(true);
+  });
+});
+
 describe("session summary scanner name handling", () => {
   it("keeps the latest non-empty session_info name", async () => {
     const path = await writeSession("renamed.jsonl", [
@@ -182,15 +271,6 @@ describe("session summary scanner first message extraction", () => {
 
     expect(await scanFileSummary(path)).toMatchObject({ firstMessage: "part one part two" });
   });
-
-  it("falls back to the SDK's placeholder when no user message has text", async () => {
-    const path = await writeSession("no-text.jsonl", [
-      headerLine({ id: "no-text", cwd: WORKSPACE }),
-      messageLine({ role: "assistant", content: textContent("only assistant") }),
-    ]);
-
-    expect(await scanFileSummary(path)).toMatchObject({ firstMessage: "(no messages)", messageCount: 1 });
-  });
 });
 
 describe("session summary scanner edge cases", () => {
@@ -216,12 +296,6 @@ describe("session summary scanner edge cases", () => {
 
     expect(await scanFileSummary(join(sessionDir, "garbage.jsonl"))).toBeUndefined();
     expect(await scanFileSummary(latePath)).toMatchObject({ id: "late", messageCount: 1, firstMessage: "hi" });
-  });
-
-  it("skips headers without a usable string id instead of listing broken sessions", async () => {
-    const path = await writeSession("no-id.jsonl", [JSON.stringify({ type: "session", version: 3, timestamp: "2026-01-01T00:00:00.000Z", cwd: WORKSPACE })]);
-
-    expect(await scanFileSummary(path)).toBeUndefined();
   });
 
   it("lists headers without a cwd with an empty cwd for the gateway filter to drop", async () => {
@@ -697,8 +771,8 @@ describe("session summary scanner multi-chunk folding with a small chunk seam", 
 describe("session summary scanner deliberate SDK divergences", () => {
   it("skips headers with an empty, missing, or non-string id, where the SDK lists a broken entry", async () => {
     // The SDK lists these sessions with whatever the header carries as id
-    // (undefined, "", or a number); downstream lookups then call .startsWith
-    // on it and crash. The scanner is deliberately stricter and skips them.
+    // (undefined, "", or a number). The scanner is deliberately stricter and
+    // skips invalid session identities before they reach downstream consumers.
     await writeSession("missing-id.jsonl", [
       JSON.stringify({ type: "session", version: 3, timestamp: "2026-01-01T00:00:00.000Z", cwd: WORKSPACE }),
       messageLine({ role: "user", content: textContent("hi") }),

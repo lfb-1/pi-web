@@ -55,17 +55,18 @@ export function configResponse(config: PiWebConfigValues): PiWebConfigResponse {
     exists: true,
     config,
     effectiveConfig: config,
-    envOverrides: { host: false, port: false, allowedHosts: false, spawnSessions: false, subsessions: false, askUser: false },
+    envOverrides: { host: false, port: false, allowedHosts: false, spawnSessions: false, subsessions: false, sessionMessages: false, askUser: false },
   };
 }
 
 export function pluginsResponse(plugins: PiWebPluginInfo[]): PiWebPluginsResponse {
   return {
-    lifecycleVersion: 1,
+    lifecycleVersion: 2,
     plugins,
     diagnostics: [],
     serverRuntime: {
       status: "available",
+      terminalMode: "recovery-disabled",
       restartRequired: false,
       recovery: {
         showSafeStart: "pi-web plugins safe-start show",

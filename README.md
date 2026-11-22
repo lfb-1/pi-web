@@ -3,48 +3,37 @@
 [![CI](https://github.com/lfb-1/pi-web/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/lfb-1/pi-web/actions/workflows/ci.yml)
 [![npm version](https://img.shields.io/npm/v/@jmfederico/pi-web)](https://www.npmjs.com/package/@jmfederico/pi-web)
 [![Node.js](https://img.shields.io/node/v/@jmfederico/pi-web)](package.json)
+[![Bun*](https://img.shields.io/badge/Bun*-fbf0df?logo=bun&logoColor=black)](https://pi-web.dev/install#bun)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 > [!NOTE]
-> This is the research-oriented `lfb-1/pi-web` fork. The first foundation release adds
-> broader research-file highlighting and KaTeX rendering in chat while retaining upstream
-> compatibility. See [FORK.md](FORK.md) for scope, provenance, and maintenance policy.
+> This is the research-oriented `lfb-1/pi-web` fork. It adds broader research-file
+> highlighting, KaTeX rendering in chat, experiment visualization, voice input and
+> browser attention alerts while retaining upstream compatibility. See [FORK.md](FORK.md)
+> for scope, provenance, and maintenance policy.
 
-**PI WEB is a web UI for [Pi Coding Agent](https://github.com/earendil-works/pi/tree/main/packages/coding-agent) that keeps agent sessions running in real workspaces on your machine or server.**
+**PI WEB is a remote-first runtime for AI coding agents, with a web interface for managing their work.**
 
-Run agents where your code, tools, credentials, and build caches live. Supervise them from any browser.
+Built for [Pi Coding Agent](https://github.com/earendil-works/pi/tree/main/packages/coding-agent), it keeps sessions running in real workspaces on your computer or server. Give instructions, inspect files, and review progress from any browser. Agents keep running when you disconnect.
 
-Website and docs: <https://pi-web.dev/>
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/pi-web-desktop-pi-web-dark.png" />
+    <img src="docs/assets/pi-web-desktop-pi-web-light.png" alt="PI WEB on desktop, with projects and sessions beside chat and a source-code preview" width="560" />
+  </picture>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/pi-web-mobile-pi-web-dark.png" />
+    <img src="docs/assets/pi-web-mobile-pi-web-light.png" alt="The same example session on a phone, with chat and message controls" width="162" />
+  </picture>
+</p>
 
-![PI WEB](docs/assets/pi-web-banner.png)
+*Example session shown on desktop and phone.*
 
-![PI WEB desktop screenshot](docs/assets/pi-web-desktop.png)
-
-## Why PI WEB?
-
-Agentic development works better when the work environment is persistent.
-
-PI WEB lets you:
-
-- keep Pi Coding Agent sessions alive after browser disconnects;
-- run agents inside real repositories and git worktrees;
-- supervise multiple sessions in parallel;
-- switch between laptop, phone, tablet, and desktop;
-- use a server, workstation, or remote dev box as your agent runtime;
-- manage projects, workspaces, files, terminals, sessions, and remote machines from one web UI.
-
-Your browser is the control surface. The work stays where it can keep running.
+[See the desktop and phone interfaces](https://pi-web.dev/#interface)
 
 ## Quick start
 
-Requirements:
-
-- Node.js 22.19.0 or newer
-- npm
-- Pi Coding Agent `>=0.84.0`, configured for your user
-- git and the development tools your agents need
-
-Install and start PI WEB as per-user services:
+The recommended setup uses Node.js 22.19.0+, npm, Pi Coding Agent installed and configured for your user, git, and the development tools your agents need. [Best-effort Bun support](https://pi-web.dev/install#bun) is also available.
 
 ```bash
 npm install -g @jmfederico/pi-web --allow-scripts=node-pty
@@ -52,128 +41,34 @@ pi-web install
 pi-web doctor
 ```
 
-On npm 12, the scoped flag lets `node-pty` prepare its required native module without enabling install scripts for other dependencies.
+On npm 12, the scoped flag lets `node-pty` prepare its required native module.
 
-Then open:
-
-```text
-http://127.0.0.1:8504
-```
-
-Useful commands:
+Open <http://127.0.0.1:8504>. Add a project, choose a workspace or Git worktree, and start a session.
 
 ```bash
 pi-web status
 pi-web logs
 pi-web restart
-pi-web doctor
-pi-web version
+pi-web update
 pi-web uninstall
 ```
 
-<!-- Keep README guidance concise. Put install variants, troubleshooting,
-configuration, and operational details in docs/, then link from here. -->
-
-For more install options, including one-line install, Pi package install, WSL/manual usage, and remote access, see the [installation guide](https://pi-web.dev/install).
+For installation variants, Docker, and remote access, see the [installation guide](https://pi-web.dev/install).
 
 ## Core model
 
-PI WEB organizes work like this:
+- **Machine:** a local or remote PI WEB runtime.
+- **Project:** a folder on that machine.
+- **Workspace:** a working folder, such as a Git worktree.
+- **Session:** a Pi Coding Agent conversation running in a workspace.
 
-```text
-Machine     a local or remote PI WEB runtime endpoint
-Project     a folder on that machine
-Workspace   a provider-owned working folder; bundled Git discovers worktrees, otherwise the project folder
-Session     a Pi Coding Agent chat running inside a workspace
-```
+Use files, terminals, plugins, and agent workflows in one UI. Register remote machines to supervise work across a fleet.
 
-A typical flow:
+## Security
 
-1. Add a project.
-2. Choose a workspace or git worktree.
-3. Start a session.
-4. Let the agent work.
-5. Come back later from any browser.
+PI WEB assumes trusted users, repositories, paths, and plugins. It is not a sandbox or a multi-tenant platform.
 
-## Remote-first development
-
-PI WEB is designed for remote AI-driven development.
-
-Instead of tying agent work to your laptop session, run PI WEB on a machine that stays available: a server, desktop, cloud VM, home lab machine, or remote dev box.
-
-Use a private network, SSH tunnel, trusted reverse proxy, or federated PI WEB machine setup when accessing it remotely.
-
-Read more: [Remote-first development](https://pi-web.dev/remote-first)
-
-## Machines and fleets
-
-PI WEB can register other PI WEB runtimes as remote machines. One browser-facing PI WEB instance can proxy projects, files, git state, sessions, terminals, activity, Pi package management, and selected-machine settings from trusted remote machines.
-
-When a remote machine is selected, Settings tabs label their target. Pi packages, PI WEB plugin enablement, session daemon toggles, external file access, and upload defaults target the selected machine. Gateway/server settings such as host, port, allowed hosts, registered machines/tokens, and keyboard shortcuts stay local to the gateway/browser.
-
-Read more: [Fleet and machines guide](https://pi-web.dev/machines)
-
-## PI WEB plugins
-
-PI WEB supports trusted browser plugins plus optional sessiond-backed workspace providers. Bundled Git uses the same public provider and backend contracts available to installed plugins. Use **Settings → PI WEB plugins** to manage desired state on the selected machine.
-
-Pi packages are a separate Pi package-manager concept. A Pi package may include a PI WEB plugin, but installing a package and enabling it are different operations. Server-backed changes require a session-daemon restart; see the plugin guide for lifecycle and recovery details.
-
-Read more: [PI WEB plugin guide and API](https://pi-web.dev/plugins)
-
-## Configuration
-
-Global config lives at:
-
-```text
-$PI_WEB_CONFIG
-~/.config/pi-web/config.json
-```
-
-Project-local PI WEB config lives at:
-
-```text
-<project>/.pi-web/config.json
-```
-
-Common configuration includes host/port, path access, uploads, PI WEB plugin enablement, shortcuts, and session daemon options. In Settings, machine-affecting config targets the selected machine; gateway host/port/allowed-hosts, remote machine registration, tokens, and keyboard shortcuts stay local.
-
-Read more: [Configuration reference](https://pi-web.dev/config)
-
-## Development
-
-Clone the repository and run:
-
-```bash
-npm install
-npm run dev
-```
-
-Open the Vite URL, usually:
-
-```text
-http://localhost:8505
-```
-
-For the split development setup:
-
-```bash
-npm run dev:sessiond
-npm run dev:web
-npm run dev:client
-```
-
-Validate changes with:
-
-```bash
-npm run verify
-```
-
-## Security model
-
-PI WEB assumes trusted users, trusted repositories, and trusted server paths.
-
-It is not a sandbox, permission system, or multi-tenant platform. Do not expose it directly to the public internet without a trusted network, firewall, VPN, SSH tunnel, or authenticated reverse proxy.
+For remote access, use a trusted private network, VPN, SSH tunnel, or authenticated reverse proxy. Do not expose PI WEB directly to the public internet.
 
 ## Documentation
 
@@ -184,6 +79,15 @@ It is not a sandbox, permission system, or multi-tenant platform. Do not expose 
 - [Configuration](https://pi-web.dev/config)
 - [Plugins](https://pi-web.dev/plugins)
 - [FAQ](https://pi-web.dev/faq)
+
+## Development
+
+```bash
+npm install
+npm run dev
+```
+
+Open the Vite URL, usually <http://localhost:8505>. See [development checks](docs/development-checks.md) for verification guidance.
 
 ## License
 

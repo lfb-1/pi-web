@@ -1,5 +1,6 @@
 import { PI_WEB_PLUGIN_LIFECYCLE_VERSION, type PiWebPluginSafeStart, type PiWebPluginsResponse, type PiWebPluginScope } from "../shared/apiTypes.js";
 import { isPiWebPluginId } from "../shared/pluginIds.js";
+import { REQUIRED_TERMINAL_PLUGIN_ID, type TerminalPluginMode } from "../shared/requiredTerminalPlugin.js";
 import {
   PiWebPluginCatalog,
   readPiWebPluginPackageArtifact,
@@ -29,7 +30,18 @@ export {
 
 export interface PiWebPluginManifest {
   lifecycleVersion: typeof PI_WEB_PLUGIN_LIFECYCLE_VERSION;
+  terminalMode: TerminalPluginMode;
   plugins: PiWebPluginManifestEntry[];
+}
+
+export class PiWebPluginManifestRuntimeError extends Error {
+  override name = "PiWebPluginManifestRuntimeError";
+  readonly statusCode: 409 | 503;
+
+  constructor(readonly runtimeStatus: "unavailable" | "incompatible", message: string) {
+    super(message);
+    this.statusCode = runtimeStatus === "unavailable" ? 503 : 409;
+  }
 }
 
 export interface PiWebPluginManifestEntry {
@@ -37,6 +49,11 @@ export interface PiWebPluginManifestEntry {
   module: string;
   /** Active compatible server revision from sessiond's immutable startup snapshot. */
   backendRevision?: string;
+  /** Versioned transport metadata used to expose `context.peer.request`. */
+  pairedRequestVersion?: 1;
+  /** Versioned transport metadata used to expose `context.peer.openChannel`. */
+  pairedChannelVersion?: 1;
+  pairedResourceVersion?: 1;
   source: string;
   scope: PiWebPluginScope;
   machineSpecific: boolean;
@@ -60,6 +77,8 @@ const BROWSER_ARTIFACT_CACHE_MAX_BYTES = 64 * 1024 * 1024;
 
 export interface PiWebPluginServiceOptions extends PiWebPluginCatalogOptions {
   catalog?: PiWebPluginCatalog;
+  /** Development only: serve rebuilt UI against the still-running backend. */
+  relaxBrowserPairing?: boolean;
   runtimeProvider?: WorkspaceProviderRuntimeReader;
   recoveryProvider?: () => { safeStart?: PiWebPluginSafeStart } | Promise<{ safeStart?: PiWebPluginSafeStart }>;
 }
@@ -67,6 +86,7 @@ export interface PiWebPluginServiceOptions extends PiWebPluginCatalogOptions {
 /** Browser manifest and asset adapter over the process-neutral package catalog. */
 export class PiWebPluginService {
   private readonly catalog: PiWebPluginCatalog;
+  private readonly relaxBrowserPairing: boolean;
   private readonly runtimeProvider: WorkspaceProviderRuntimeReader | undefined;
   private readonly recoveryProvider: PiWebPluginServiceOptions["recoveryProvider"];
   private readonly browserArtifacts = new Map<string, CachedBrowserArtifact>();
@@ -74,26 +94,39 @@ export class PiWebPluginService {
 
   constructor(options: PiWebPluginServiceOptions = {}) {
     this.catalog = options.catalog ?? new PiWebPluginCatalog(options);
+    this.relaxBrowserPairing = options.relaxBrowserPairing ?? false;
     this.runtimeProvider = options.runtimeProvider;
     this.recoveryProvider = options.recoveryProvider;
   }
 
   async manifest(): Promise<PiWebPluginManifest> {
     const lifecycle = await this.lifecycle();
+    const runtime = lifecycle.response.serverRuntime;
+    if (runtime.status !== "available") {
+      throw new PiWebPluginManifestRuntimeError(
+        runtime.status,
+        requiredRuntimeFailureMessage(runtime.status, runtime.message),
+      );
+    }
     const plugins: PiWebPluginManifestEntry[] = [];
-    for (const { plugin, backendRevision } of lifecycle.browserPlugins) {
+    for (const { plugin, backendRevision, pairedRequestVersion, pairedChannelVersion, pairedResourceVersion } of lifecycle.browserPlugins) {
       const artifact = await this.captureBrowserArtifact(plugin, backendRevision);
       if (artifact === undefined) continue;
       plugins.push({
         id: plugin.id,
         module: browserModuleUrl(plugin),
         ...(backendRevision === undefined ? {} : { backendRevision }),
+        ...(pairedRequestVersion === undefined ? {} : { pairedRequestVersion }),
+        ...(pairedChannelVersion === undefined ? {} : { pairedChannelVersion }),
+        ...(pairedResourceVersion === undefined ? {} : { pairedResourceVersion }),
         source: plugin.source,
         scope: plugin.scope,
         machineSpecific: plugin.machineSpecific,
       });
     }
-    return { lifecycleVersion: PI_WEB_PLUGIN_LIFECYCLE_VERSION, plugins };
+    const terminalMode = lifecycle.response.serverRuntime.terminalMode;
+    if (terminalMode === "required") requireTerminalManifestEntry(plugins);
+    return { lifecycleVersion: PI_WEB_PLUGIN_LIFECYCLE_VERSION, terminalMode, plugins };
   }
 
   async plugins(): Promise<PiWebPluginsResponse> {
@@ -105,8 +138,14 @@ export class PiWebPluginService {
     let artifact = this.browserArtifacts.get(pluginId);
     if (artifact !== undefined && !await this.cachedArtifactIsActive(artifact)) artifact = undefined;
     artifact ??= await this.loadBrowserArtifact(pluginId);
+    // Refresh advertised revisions for browser-only and relaxed development
+    // snapshots; production server-backed assets stay pinned to sessiond.
+    if (artifact !== undefined && (artifact.backendRevision === undefined || this.relaxBrowserPairing)
+      && browserRevision !== undefined && artifact.revision !== browserRevision) {
+      artifact = await this.loadBrowserArtifact(pluginId);
+    }
     if (artifact === undefined) return undefined;
-    if (browserRevision !== undefined && assetPath === artifact.entryPath && artifact.revision !== browserRevision) return undefined;
+    if (browserRevision !== undefined && artifact.revision !== browserRevision) return undefined;
     const content = artifact.files.get(assetPath);
     if (content === undefined) return undefined;
     this.touchBrowserArtifact(artifact);
@@ -168,6 +207,11 @@ export class PiWebPluginService {
 
   private async cachedArtifactIsActive(artifact: CachedBrowserArtifact): Promise<boolean> {
     if (artifact.backendRevision === undefined) return true;
+    if (this.relaxBrowserPairing) {
+      const lifecycle = await this.lifecycle();
+      return lifecycle.browserPlugins.some(({ plugin, backendRevision }) =>
+        plugin.id === artifact.pluginId && backendRevision === artifact.backendRevision);
+    }
     const runtime = await this.loadRuntime();
     if (runtime.status !== "available") return false;
     const record = runtime.snapshot.records.find(({ pluginId }) => pluginId === artifact.pluginId);
@@ -204,7 +248,7 @@ export class PiWebPluginService {
   private async lifecycle() {
     const desired = await this.catalog.snapshot();
     const [runtime, desiredSafeStart] = await Promise.all([this.loadRuntime(), this.loadDesiredSafeStart()]);
-    return reconcilePiWebPluginLifecycle(desired, runtime, browserModuleUrl, desiredSafeStart);
+    return reconcilePiWebPluginLifecycle(desired, runtime, browserModuleUrl, desiredSafeStart, this.relaxBrowserPairing);
   }
 
   private async loadDesiredSafeStart(): Promise<PiWebPluginSafeStart | "off" | undefined> {
@@ -226,6 +270,23 @@ export class PiWebPluginService {
       };
     }
   }
+}
+
+function requiredRuntimeFailureMessage(status: "unavailable" | "incompatible", message: string | undefined): string {
+  const detail = message === undefined || message === "" ? "no runtime detail was available" : message;
+  return `Required Terminal plugin runtime is ${status}: ${detail}. Retry when the session daemon is available and compatible; only an active safe-start-none runtime may disable Terminal.`;
+}
+
+function requireTerminalManifestEntry(plugins: readonly PiWebPluginManifestEntry[]): void {
+  const terminal = plugins.find(({ id }) => id === REQUIRED_TERMINAL_PLUGIN_ID);
+  if (terminal === undefined) throw new Error("Required Terminal browser entry is unavailable; use safe start none for recovery");
+  if (terminal.scope !== "bundled" || terminal.source !== "bundled" || !terminal.machineSpecific) {
+    throw new Error("Required Terminal browser entry is not the bundled machine-specific package");
+  }
+  if (terminal.backendRevision === undefined || terminal.pairedRequestVersion !== 1 || terminal.pairedChannelVersion !== 1) {
+    throw new Error("Required Terminal browser/server pairing is incompatible; restart or use safe start none for recovery");
+  }
+  if (plugins[0] !== terminal) throw new Error("Required Terminal browser entry must be activated before ordinary plugins");
 }
 
 function browserModuleUrl(plugin: PiWebPluginCatalogEntry): string {

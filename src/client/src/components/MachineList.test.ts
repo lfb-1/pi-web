@@ -4,6 +4,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { Machine, MachineHealth, MachineStatus } from "../api";
 import type { MachineStatusSnapshot } from "../../../shared/machineStatus";
 import { machineStatusSnapshot } from "../machineStatus.testSupport";
+import { installPopoverFake } from "./anchoredPopup.testSupport";
+installPopoverFake();
 import { canRemoveMachine, MachineList } from "./MachineList";
 
 afterEach(() => {
@@ -17,7 +19,55 @@ describe("canRemoveMachine", () => {
   });
 });
 
+it("offers name editing only for remote machines", async () => {
+  const remote = machine("remote-a", "remote");
+  const list = await mountMachineList([machine("local", "local"), remote]);
+  const edited: Machine[] = [];
+  list.onEdit = (machine) => { edited.push(machine); };
+  await list.updateComplete;
+  rowFor(list, "local").querySelector<HTMLButtonElement>(".action-menu-toggle")?.click();
+  await list.updateComplete;
+  expect([...list.shadowRoot?.querySelectorAll(".ui-menu-item") ?? []].some((button) => button.textContent === "Edit display name")).toBe(false);
+  rowFor(list, "remote-a").querySelector<HTMLButtonElement>(".action-menu-toggle")?.click();
+  await list.updateComplete;
+  const edit = [...(list.shadowRoot?.querySelectorAll<HTMLButtonElement>(".ui-menu-item") ?? [])].find((button) => button.textContent === "Edit display name");
+  expect(edit).toBeDefined();
+  edit?.click();
+  await list.updateComplete;
+  expect(edited).toEqual([remote]);
+  expect(list.shadowRoot?.querySelector(".action-menu-panel")).toBeNull();
+});
+
+it("shows native remote-machine actions and reconciles dismissal before reopening", async () => {
+  const list = await mountMachineList([machine("local", "local"), machine("remote-a", "remote")]);
+  list.onRemove = () => undefined; await list.updateComplete;
+  const trigger = rowFor(list, "remote-a").querySelector<HTMLButtonElement>(".action-menu-toggle");
+  if (!trigger) throw new Error("Missing remote actions trigger");
+  trigger.click(); await list.updateComplete;
+  const panel = list.shadowRoot?.querySelector<HTMLElement>("[popover]");
+  expect(panel?.getRootNode()).toBe(list.shadowRoot);
+  expect(trigger.getAttribute("aria-expanded")).toBe("true");
+  panel?.hidePopover(); await list.updateComplete;
+  expect(trigger.getAttribute("aria-expanded")).toBe("false");
+  expect(list.shadowRoot?.querySelector("[popover]")).toBeNull();
+  trigger.click(); await list.updateComplete;
+  expect(list.shadowRoot?.querySelector("[popover]")).not.toBeNull();
+});
+
 describe("machine status indicator", () => {
+  it("retains work inside intervention until the machine goes offline", async () => {
+    const list = await mountMachineList([machine("remote-a", "remote")], {
+      "remote-a": machineStatusSnapshot({ machine: { "core:working": true, "core:intervention-required": true, "core:unread": true } }),
+    });
+    const row = rowFor(list, "remote-a");
+    expect(row.querySelector(".intervention-required .activity-indicator.session")).not.toBeNull();
+
+    list.statuses = { "remote-a": machineHealth("remote-a", "offline") };
+    await list.updateComplete;
+    expect(row.querySelector(".intervention-required, .activity-indicator.session")).toBeNull();
+    expect(unreadDot(row)).not.toBeNull();
+  });
+
   it("shows an unread dot only on machines whose snapshot reports unread, including offline ones", async () => {
     const list = await mountMachineList(
       [machine("local", "local"), machine("remote-a", "remote"), machine("remote-b", "remote")],

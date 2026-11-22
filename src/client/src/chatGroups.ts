@@ -1,36 +1,69 @@
-import type { ChatLine, ChatPart } from "./components/shared";
+import type { ChatLine, ChatPart } from "./chatTypes";
+import { interventionRequestText } from "./chatInterventions";
 
 export type ChatGroup =
   | { kind: "message"; message: ChatLine; index: number }
   | { kind: "tool-image"; message: ChatLine; index: number; toolName?: string }
-  | { kind: "group"; messages: ChatLine[]; startIndex: number; endIndex: number };
+  // Members keep their source indexes even when invisible entries are skipped.
+  | { kind: "group"; messages: { message: ChatLine; index: number }[]; startIndex: number; endIndex: number };
 
-export function groupChatMessages(messages: ChatLine[], indexOffset = 0): ChatGroup[] {
+export type ChatToolImageOutput = Extract<ChatGroup, { kind: "tool-image" }>;
+export type ChatDisplayGroup = Exclude<ChatGroup, ChatToolImageOutput>
+  | { kind: "tool-images"; outputs: [ChatToolImageOutput, ...ChatToolImageOutput[]] };
+
+/** Combine only adjoining image outputs; conversation and activity remain boundaries. */
+export function groupConsecutiveImageOutputs(groups: readonly ChatGroup[]): ChatDisplayGroup[] {
+  const result: ChatDisplayGroup[] = [];
+  for (const group of groups) {
+    if (group.kind !== "tool-image") { result.push(group); continue; }
+    const previous = result.at(-1);
+    if (previous?.kind === "tool-images") previous.outputs.push(group);
+    else result.push({ kind: "tool-images", outputs: [group] });
+  }
+  return result;
+}
+
+export function groupChatMessages(
+  messages: ChatLine[],
+  indexOffset = 0,
+  preserveCustomMessage: (customType: string) => boolean = () => false,
+  standaloneTool: (part: Extract<ChatPart, { type: "toolExecution" }>) => boolean = () => false,
+): ChatGroup[] {
   const groups: ChatGroup[] = [];
-  let eventMessages: ChatLine[] = [];
-  let eventStartIndex = 0;
+  let eventMessages: Extract<ChatGroup, { kind: "group" }>["messages"] = [];
 
   const pushEvent = (message: ChatLine, index: number) => {
-    if (!eventMessages.length) eventStartIndex = index;
-    eventMessages.push(message);
+    eventMessages.push({ message, index });
   };
   const flushEvents = () => {
-    if (!eventMessages.length) return;
-    groups.push({ kind: "group", messages: eventMessages, startIndex: eventStartIndex, endIndex: eventStartIndex + eventMessages.length - 1 });
+    const first = eventMessages[0];
+    const last = eventMessages.at(-1);
+    if (first === undefined || last === undefined) return;
+    groups.push({ kind: "group", messages: eventMessages, startIndex: first.index, endIndex: last.index });
     eventMessages = [];
   };
 
   messages.forEach((message, index) => {
-    const readableParts = message.parts.filter((part) => isReadablePart(message, part));
-    const technicalParts = message.parts.filter((part) => !isReadablePart(message, part));
+    const parts = message.parts.flatMap((part) => part.type === "customMessage" && !preserveCustomMessage(part.customType)
+      ? part.parts : [part]);
+    const visibleParts = parts.filter((part) => part.type !== "toolResultBoundary" && part.type !== "empty");
+    // Ordering markers affect the conversation tail, not visual grouping.
+    if (visibleParts.length === 0) return;
+    const readableParts: ChatPart[] = [];
+    const technicalParts: ChatPart[] = [];
+    for (const part of visibleParts) {
+      (isReadablePart(message, part) || (part.type === "toolExecution" && standaloneTool(part)) ? readableParts : technicalParts).push(part);
+    }
 
     const absoluteIndex = indexOffset + index;
-    const metadata = { ...(message.source === undefined ? {} : { source: message.source }), ...(message.meta === undefined ? {} : { meta: message.meta }) };
-    if (technicalParts.length) pushEvent({ role: message.role, parts: technicalParts, ...metadata }, absoluteIndex);
+    const metadata = { ...(message.entryId === undefined ? {} : { entryId: message.entryId }), ...(message.source === undefined ? {} : { source: message.source }), ...(message.meta === undefined ? {} : { meta: message.meta }) };
+    if (technicalParts.length) {
+      const role = technicalParts.every((part) => part.type === "skillRead") ? "skill" : message.role;
+      pushEvent({ role, parts: technicalParts, ...metadata }, absoluteIndex);
+    }
     if (readableParts.length) {
       flushEvents();
-      const role = readableParts.every((part) => part.type === "skillRead") ? "skill" : message.role;
-      const readableMessage = { role, parts: readableParts, ...metadata };
+      const readableMessage = { role: message.role, parts: readableParts, ...metadata };
       if (isToolImageMessage(readableMessage)) {
         const toolName = toolNameFromParts(technicalParts);
         groups.push({ kind: "tool-image", message: readableMessage, index: absoluteIndex, ...(toolName === undefined ? {} : { toolName }) });
@@ -43,7 +76,48 @@ export function groupChatMessages(messages: ChatLine[], indexOffset = 0): ChatGr
   return groups;
 }
 
-export function summarizeChatGroup(messages: ChatLine[]): string {
+/** Whether this slice renders a message header rather than a headerless shell. */
+export function chatMessageHasHeader(message: ChatLine): boolean {
+  return !(message.parts.length > 0 && (
+    (message.role === "tool" && message.parts.every((part) => part.type === "toolExecution"))
+    || message.parts.every((part) => part.type === "askUserRecord")
+  ));
+}
+
+/** Select rendered slice identities, independent of disclosure and plugin policy. */
+export function canonicalEntryActionHeaders(groups: readonly ChatGroup[]): ReadonlySet<ChatLine> {
+  const entries = new Map<string, { message: ChatLine; priority: number }>();
+  for (const group of groups) {
+    for (const message of group.kind === "group" ? group.messages.map((event) => event.message) : [group.message]) {
+      if (message.entryId === undefined || !chatMessageHasHeader(message)) continue;
+      // A normal reply wins over attached events. Conversation headers also
+      // outrank skill-only slices, so thinking retains history when no reply exists.
+      const conversation = message.role === "user" || message.role === "assistant";
+      const reply = group.kind !== "group" && message.parts.some((part) => part.type === "text" || part.type === "image");
+      const priority = conversation ? (reply ? 3 : 2) : (group.kind !== "group" ? 1 : 0);
+      const previous = entries.get(message.entryId);
+      if (previous === undefined || priority > previous.priority) entries.set(message.entryId, { message, priority });
+    }
+  }
+  return new Set(Array.from(entries.values(), ({ message }) => message));
+}
+
+export interface ChatGroupSummary {
+  kind: "compaction" | "branch" | "events";
+  count: number;
+  roles: Partial<Record<ChatLine["role"], number>>;
+}
+
+export function summarizeChatGroup(messages: ChatLine[], format?: (summary: ChatGroupSummary) => string): string {
+  if (format !== undefined) {
+    const roles: ChatGroupSummary["roles"] = {};
+    for (const message of messages) roles[message.role] = (roles[message.role] ?? 0) + 1;
+    return format({
+      kind: messages.every((message) => message.source === "compaction") ? "compaction"
+        : messages.every((message) => message.source === "branch_summary") ? "branch" : "events",
+      count: messages.length, roles,
+    });
+  }
   if (messages.every((message) => message.source === "compaction")) return `${String(messages.length)} history compaction ${messages.length === 1 ? "summary" : "summaries"}`;
   if (messages.every((message) => message.source === "branch_summary")) return `${String(messages.length)} branch ${messages.length === 1 ? "summary" : "summaries"}`;
   const counts = messages.reduce<Record<string, number>>((acc, message) => {
@@ -67,6 +141,8 @@ function toolNameFromParts(parts: ChatPart[]): string | undefined {
 
 function isReadablePart(message: ChatLine, part: ChatPart): boolean {
   if (message.source === "compaction" || message.source === "branch_summary") return false;
-  if (part.type === "skillInvocation" || part.type === "skillRead" || part.type === "image" || part.type === "askUserRecord") return true;
+  if (part.type === "skillInvocation" || part.type === "image" || part.type === "askUserQuestion" || part.type === "askUserRecord" || part.type === "customMessage") return true;
+  // A request addressed to the user must not be folded into collapsed activity.
+  if (interventionRequestText(part) !== undefined) return true;
   return part.type === "text" && (message.role === "user" || message.role === "assistant" || message.role === "system" || message.role === "bash");
 }

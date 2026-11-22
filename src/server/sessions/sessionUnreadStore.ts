@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { piWebDataDir } from "../../config.js";
 import {
   SESSION_UNREAD_CATALOG_ID_MAX_LENGTH,
@@ -127,12 +127,22 @@ export class SessionUnreadStore {
     }
     if (!this.activeByIdentity.has(key)) return [];
 
+    const mutations = this.markUnread(sessionId, cwd);
+    this.activeByIdentity.delete(key);
+    return mutations;
+  }
+
+  /** Record a fresh unread order without consuming an in-flight activity latch. */
+  markUnread(sessionId: string, cwd: string): SessionUnreadMutation[] {
+    this.requireLoaded();
+    const identity = requireIdentity(sessionId, cwd);
+    const key = sessionIdentityKey(identity);
+    if (this.excludedByIdentity.has(key)) return [];
     const completionOrder = incrementSafe(this.nextCompletionOrder, "Session unread completion order exhausted");
     const willExceedLimit = !this.unreadByIdentity.has(key) && this.unreadByIdentity.size >= SESSION_UNREAD_LIMIT;
     this.assertRevisionCapacity(willExceedLimit ? 2 : 1);
     const completedAt = this.now().toISOString();
 
-    this.activeByIdentity.delete(key);
     this.nextCompletionOrder = completionOrder;
     const summary: SessionUnreadSummary = {
       sessionId,
@@ -211,6 +221,34 @@ export class SessionUnreadStore {
     this.unreadByIdentity.delete(key);
     const mutations = [this.mutation(identity, null)];
     this.schedulePersist();
+    return mutations;
+  }
+
+  hasUnread(): boolean {
+    this.requireLoaded();
+    return this.unreadByIdentity.size > 0;
+  }
+
+  /** Retain exact canonical workspace members without changing session identity spelling. */
+  reconcileWorkspaces(cwds: Iterable<string>): SessionUnreadMutation[] {
+    this.requireLoaded();
+    const retained = new Set([...cwds].map((cwd) => resolve(
+      requireBoundedNonEmptyString(cwd, "cwd", SESSION_UNREAD_CWD_MAX_LENGTH),
+    )));
+    const removed = [...this.unreadByIdentity.entries()]
+      .filter(([, summary]) => !retained.has(resolve(summary.cwd)));
+    this.assertRevisionCapacity(removed.length);
+
+    for (const [key, identity] of this.activeByIdentity) {
+      if (!retained.has(resolve(identity.cwd))) this.activeByIdentity.delete(key);
+    }
+    // Sub-session exclusions are separate lifecycle state, not unread garbage.
+    const mutations: SessionUnreadMutation[] = [];
+    for (const [key, summary] of removed) {
+      this.unreadByIdentity.delete(key);
+      mutations.push(this.mutation(summary, null));
+    }
+    if (mutations.length > 0) this.schedulePersist();
     return mutations;
   }
 

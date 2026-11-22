@@ -9,20 +9,33 @@ import type { PiSessionServiceDependencies } from "../sessions/piSessionService.
  */
 export interface SessionServiceDependencyInput {
   agentDir: string;
+  /** Session-local package event connections and companion backend bindings. */
+  sessionEvents: NonNullable<PiSessionServiceDependencies["sessionEvents"]>;
   /** Daemon-lifetime session archive, constructed against the captured daemon environment. */
   archiveStore: NonNullable<PiSessionServiceDependencies["archiveStore"]>;
+  sessionPins: NonNullable<PiSessionServiceDependencies["sessionPins"]>;
   sessionManager: PiSessionServiceDependencies["sessionManager"];
   modelRuntime: PiSessionServiceDependencies["modelRuntime"];
   workspaceActivity: NonNullable<PiSessionServiceDependencies["workspaceActivity"]>;
   logger: NonNullable<PiSessionServiceDependencies["logger"]>;
   notificationStore: NonNullable<PiSessionServiceDependencies["notificationStore"]>;
   unreadStore: NonNullable<PiSessionServiceDependencies["unreadStore"]>;
+  /** Invalidates browser session lists after agent-requested archival. */
+  onSessionArchived: NonNullable<PiSessionServiceDependencies["onSessionArchived"]>;
   /** Notifies the machine status projection that unread state changed. */
   onUnreadChanged: NonNullable<PiSessionServiceDependencies["onUnreadChanged"]>;
   /** Read-only view of the background refresher; see the assembly below. */
   catalogRefreshStatus: NonNullable<PiSessionServiceDependencies["catalogRefreshStatus"]>;
+  /** Live global config reader for request-time defaults (attachments and session naming). */
+  config: NonNullable<PiSessionServiceDependencies["config"]>;
   /** Omitted when the operator has not enabled session spawning. */
   spawnTargets?: NonNullable<PiSessionServiceDependencies["spawnTargets"]>;
+  /** Project boundary shared by messaging and spawning, independent of their enablement. */
+  messageTargets: NonNullable<PiSessionServiceDependencies["messageTargets"]>;
+  /** Whether agents may send messages, independently of spawning and subsessions. */
+  sessionMessagesEnabled: boolean;
+  /** Whether messaging may cross project boundaries on this machine. */
+  crossProjectSessionMessages: boolean;
   /** The operator's subsessions preference, which also requires spawning. */
   subsessionsEnabled: boolean;
   /** Whether agents may post structured question sets to the browser. */
@@ -47,10 +60,15 @@ export function sessionServiceDependencies(input: SessionServiceDependencyInput)
   return {
     modelRuntime: input.modelRuntime,
     agentDir: input.agentDir,
+    sessionEvents: input.sessionEvents,
     archiveStore: input.archiveStore,
+    sessionPins: input.sessionPins,
     workspaceActivity: input.workspaceActivity,
     logger: input.logger,
     ...(input.spawnTargets === undefined ? {} : { spawnTargets: input.spawnTargets }),
+    messageTargets: input.messageTargets,
+    sessionMessagesEnabled: input.sessionMessagesEnabled,
+    crossProjectSessionMessages: input.crossProjectSessionMessages,
     // Tracked subsessions share the spawn capability's project-scope resolver,
     // so they stay off unless spawning is configured too.
     subsessionsEnabled: input.spawnTargets !== undefined && input.subsessionsEnabled,
@@ -60,9 +78,11 @@ export function sessionServiceDependencies(input: SessionServiceDependencyInput)
     notificationStore: input.notificationStore,
     unreadStore: input.unreadStore,
     onUnreadChanged: input.onUnreadChanged,
+    onSessionArchived: input.onSessionArchived,
     // Read-only, so session startup can tell a waiting user that provider
     // model lists are refreshing at the same time.
     catalogRefreshStatus: input.catalogRefreshStatus,
+    config: input.config,
     sessionManager: input.sessionManager,
   };
 }

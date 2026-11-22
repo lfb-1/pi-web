@@ -1,19 +1,44 @@
 import { api, type Machine, type MachineHealth, type MachineRuntime } from "../api";
+import { machineMessages as messages } from "../machineMessages";
 import { resetWorkspaceScopedState } from "../appState";
-import type { GetState, SetState, UpdateUrl } from "./types";
+import { BrowserErrorReporter, machineBrowserErrorScope } from "../browserErrors";
+import type { GetState, NavigationDestinationOptions, NavigationSelection, SetState, UpdateUrl } from "./types";
 import type { ProjectController } from "./projectController";
+
+export interface MachineControllerDependencies {
+  navigateToMachine?: (machine: Machine, options?: NavigationDestinationOptions) => Promise<boolean>;
+  captureNavigation?: () => NavigationSelection;
+}
 
 export class MachineController {
   private readonly runtimeRefreshSeqByMachine = new Map<string, number>();
+  private readonly identityRevisionByMachine = new Map<string, number>();
+  private readonly pendingIdentityEdits = new Set<string>();
+  private readonly navigateToMachine: MachineControllerDependencies["navigateToMachine"];
+  private readonly captureNavigation: MachineControllerDependencies["captureNavigation"];
+  private readonly browserErrors: BrowserErrorReporter;
 
-  constructor(private readonly getState: GetState, private readonly setState: SetState, private readonly updateUrl: UpdateUrl, private readonly projects: Pick<ProjectController, "loadProjects">) {}
+  constructor(
+    private readonly getState: GetState,
+    private readonly setState: SetState,
+    private readonly updateUrl: UpdateUrl,
+    private readonly projects: Pick<ProjectController, "loadProjects">,
+    deps: MachineControllerDependencies = {},
+  ) {
+    this.navigateToMachine = deps.navigateToMachine;
+    this.captureNavigation = deps.captureNavigation;
+    this.browserErrors = new BrowserErrorReporter(getState, setState);
+  }
 
-  async loadMachines(routeMachineId?: string): Promise<void> {
+  async loadMachines(routeMachineId?: string): Promise<boolean> {
     this.setState({ error: "", isLoadingMachines: true });
     try {
       const machines = await api.machines();
       const selectedMachine = await this.selectInitialMachine(machines, routeMachineId);
       const machineIds = new Set(machines.map((machine) => machine.id));
+      for (const error of Object.values(this.getState().browserErrors)) {
+        if (error.scope.kind !== "global" && !machineIds.has(error.scope.machineId)) this.browserErrors.discard(machineBrowserErrorScope(error.scope.machineId));
+      }
       this.setState({
         machines,
         selectedMachine,
@@ -22,8 +47,11 @@ export class MachineController {
       });
       void this.refreshMachineHealthFor(machines);
       void this.refreshMachineRuntimeFor(machines);
+      return true;
     } catch (error) {
       this.setState({ error: String(error) });
+      this.browserErrors.report(machineBrowserErrorScope(routeMachineId ?? "local"), String(error));
+      return false;
     } finally {
       this.setState({ isLoadingMachines: false });
     }
@@ -35,6 +63,7 @@ export class MachineController {
       selectedMachine: machine,
       projects: [],
       workspaces: [],
+      workspaceResolution: undefined,
       isLoadingWorkspaces: false,
       selectedProject: undefined,
       selectedWorkspace: undefined,
@@ -49,7 +78,6 @@ export class MachineController {
       sendingPrompts: {},
       workspacesByProjectId: {},
       workspaceDeletionRuns: {},
-      activeTerminalCount: 0,
       ...resetWorkspaceScopedState(),
     });
     if (options.updateUrl !== false) this.updateUrl();
@@ -59,11 +87,13 @@ export class MachineController {
   }
 
   async addMachine(input: { name: string; baseUrl: string; token?: string }): Promise<Machine | undefined> {
+    const expected = navigationSelection(this.getState(), this.captureNavigation);
     this.setState({ error: "" });
     try {
       const machine = await api.addMachine(input);
       this.setState({ machines: [...this.getState().machines.filter((candidate) => candidate.id !== machine.id), machine] });
-      await this.selectMachine(machine);
+      if (this.navigateToMachine !== undefined) await this.navigateToMachine(machine, { expected });
+      else await this.selectMachine(machine);
       return machine;
     } catch (error) {
       this.setState({ error: String(error) });
@@ -71,26 +101,80 @@ export class MachineController {
     }
   }
 
+  async refreshMachineIdentity(machineId: string): Promise<void> {
+    if (this.pendingIdentityEdits.has(machineId) || !this.getState().machines.some((machine) => machine.id === machineId)) return;
+    const revision = this.invalidateMachineIdentity(machineId);
+    try {
+      const identity = await api.machine(machineId);
+      if (revision !== this.identityRevisionByMachine.get(machineId)) return;
+      const state = this.getState();
+      // A name refresh owns identity only, never membership, connection settings, or navigation.
+      const machines = state.machines.map((machine) => machine.id === machineId ? withMachineIdentity(machine, identity) : machine);
+      this.setState({ machines, ...(state.selectedMachine === undefined ? {} : { selectedMachine: machines.find((machine) => machine.id === state.selectedMachine?.id) ?? state.selectedMachine }) });
+    } catch (error) {
+      if (revision === this.identityRevisionByMachine.get(machineId)) {
+        const detail = String(error);
+        this.browserErrors.reportLocalized(machineBrowserErrorScope(machineId), () => messages.t("refreshFailed", { error: detail }));
+      }
+    }
+  }
+
+  async updateMachine(machineId: string, name: string): Promise<Machine | undefined> {
+    const revision = this.invalidateMachineIdentity(machineId);
+    this.pendingIdentityEdits.add(machineId);
+    this.setState({ error: "" });
+    try {
+      const machine = await api.updateMachine(machineId, { name });
+      if (revision !== this.identityRevisionByMachine.get(machineId)) return undefined;
+      const state = this.getState();
+      if (!state.machines.some((candidate) => candidate.id === machineId)) return undefined;
+      const machines = state.machines.map((candidate) => candidate.id === machineId ? withMachineIdentity(candidate, machine) : candidate);
+      this.setState({
+        machines,
+        ...(state.selectedMachine?.id === machineId ? { selectedMachine: machines.find((candidate) => candidate.id === machineId) } : {}),
+      });
+      return machine;
+    } catch (error) {
+      if (revision === this.identityRevisionByMachine.get(machineId)) this.setState({ error: String(error) });
+      return undefined;
+    } finally {
+      if (revision === this.identityRevisionByMachine.get(machineId)) {
+        this.pendingIdentityEdits.delete(machineId);
+        this.invalidateMachineIdentity(machineId);
+      }
+    }
+  }
+
+  private invalidateMachineIdentity(machineId: string): number {
+    const revision = (this.identityRevisionByMachine.get(machineId) ?? 0) + 1;
+    this.identityRevisionByMachine.set(machineId, revision);
+    return revision;
+  }
+
   async deleteMachine(machine: Machine | undefined = this.getState().selectedMachine, options: { selectFallback?: boolean } = {}): Promise<Machine | undefined> {
     if (machine === undefined) return undefined;
     if (machine.kind === "local") {
-      this.setState({ error: "The local machine cannot be removed." });
+      this.browserErrors.reportLocalized(machineBrowserErrorScope(machine.id), () => messages.t("cannotRemove"));
       return undefined;
     }
     try {
-      const wasSelected = this.getState().selectedMachine?.id === machine.id;
       await api.deleteMachine(machine.id);
+      this.invalidateMachineIdentity(machine.id);
+      this.pendingIdentityEdits.delete(machine.id);
       const machines = this.getState().machines.filter((candidate) => candidate.id !== machine.id);
       const local = machines.find((candidate) => candidate.id === "local") ?? machines[0];
+      this.browserErrors.discard(machineBrowserErrorScope(machine.id));
       this.setState({ machines, machineStatuses: omitKey(this.getState().machineStatuses, machine.id), machineRuntimes: omitKey(this.getState().machineRuntimes, machine.id), machineStatusSnapshots: omitKey(this.getState().machineStatusSnapshots, machine.id) });
-      if (wasSelected && local !== undefined) {
+      if (this.getState().selectedMachine?.id === machine.id && local !== undefined) {
         if (options.selectFallback === false) return local;
-        await this.selectMachine(local);
+        const expected = navigationSelection(this.getState(), this.captureNavigation);
+        if (this.navigateToMachine !== undefined) await this.navigateToMachine(local, { expected });
+        else await this.selectMachine(local);
         return local;
       }
       return undefined;
     } catch (error) {
-      this.setState({ error: String(error) });
+      this.browserErrors.report(machineBrowserErrorScope(machine.id), String(error));
       return undefined;
     }
   }
@@ -101,7 +185,7 @@ export class MachineController {
       this.setState({ machineStatuses: { ...this.getState().machineStatuses, [health.machineId]: health } });
       return health;
     } catch (error) {
-      this.setState({ error: String(error) });
+      this.browserErrors.report(machineBrowserErrorScope(machineId), String(error));
       return undefined;
     }
   }
@@ -115,7 +199,7 @@ export class MachineController {
       this.setState({ machineRuntimes: { ...this.getState().machineRuntimes, [runtime.machineId]: runtime } });
       return runtime;
     } catch (error) {
-      if (this.runtimeRefreshSeqByMachine.get(machineId) === seq) this.setState({ error: String(error) });
+      if (this.runtimeRefreshSeqByMachine.get(machineId) === seq) this.browserErrors.report(machineBrowserErrorScope(machineId), String(error));
       return undefined;
     }
   }
@@ -126,10 +210,8 @@ export class MachineController {
     if (requestedMachine.kind !== "remote") return requestedMachine;
 
     const health = await this.safeRemoteHealth(requestedMachine);
-    this.setState({
-      machineStatuses: { ...this.getState().machineStatuses, [health.machineId]: health },
-      ...(health.ok ? {} : { error: `${requestedMachine.name} is unavailable; reconnecting…` }),
-    });
+    this.setState({ machineStatuses: { ...this.getState().machineStatuses, [health.machineId]: health } });
+    if (!health.ok) this.browserErrors.reportLocalized(machineBrowserErrorScope(requestedMachine.id), () => messages.t("reconnecting", { name: requestedMachine.name }));
     return requestedMachine;
   }
 
@@ -164,10 +246,28 @@ export class MachineController {
   }
 }
 
+function withMachineIdentity(machine: Machine, identity: Pick<Machine, "name" | "nameOverride" | "reportedName">): Machine {
+  const updated = { ...machine, name: identity.name };
+  if (identity.nameOverride === undefined) delete updated.nameOverride;
+  else updated.nameOverride = identity.nameOverride;
+  if (identity.reportedName === undefined) delete updated.reportedName;
+  else updated.reportedName = identity.reportedName;
+  return updated;
+}
+
 function omitKey<T>(record: Record<string, T>, keyToOmit: string): Record<string, T> {
   return Object.fromEntries(Object.entries(record).filter(([key]) => key !== keyToOmit));
 }
 
 function filterKeys<T>(record: Record<string, T>, allowedKeys: Set<string>): Record<string, T> {
   return Object.fromEntries(Object.entries(record).filter(([key]) => allowedKeys.has(key)));
+}
+
+function navigationSelection(state: ReturnType<GetState>, captureNavigation?: () => NavigationSelection): NavigationSelection {
+  return captureNavigation?.() ?? {
+    machineId: state.selectedMachine?.id ?? "local",
+    projectId: state.selectedProject?.id,
+    workspaceId: state.selectedWorkspace?.id,
+    ...(state.selectedSession === undefined || Reflect.get(state.selectedSession, "clientPendingStart") !== true ? { sessionId: state.selectedSession?.id } : {}),
+  };
 }

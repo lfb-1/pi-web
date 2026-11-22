@@ -1,0 +1,450 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { existsSync } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type {
+  JsonValue,
+  ServerPluginPeerV5 as ServerPluginPeer,
+  ServerPluginPeerChannelOpenContextV5 as ServerPluginPeerChannelOpenContext,
+  ServerPluginPeerRequestContextV5 as ServerPluginPeerRequestContext,
+  ServerPluginPeerWorkspace,
+  ProjectInput,
+  ServerPluginActivationContextV5 as ServerPluginActivationContext,
+  ServerPluginNoticeInput,
+} from "@jmfederico/pi-web/server-plugin-api";
+import {
+  activateTerminalPlugin,
+  createTerminalPeer,
+  TERMINAL_SERVICE_CAPABILITY,
+  MAINTENANCE_TERMINAL_CAPABILITY,
+  terminalOutputFrames,
+} from "./server-plugin.js";
+import { createDefaultPtyProvider } from "./ptyComposition.js";
+import { TerminalService } from "./terminalService.js";
+
+const services: TerminalService[] = [];
+
+afterEach(() => {
+  for (const service of services.splice(0)) service.dispose();
+});
+
+describe("maintenance execution host boundary", () => {
+  it("validates and snapshots the private capability", () => {
+    const env = { CUSTOM: "captured" };
+    const context = MAINTENANCE_TERMINAL_CAPABILITY.parse({ cwd: process.cwd(), env });
+    env.CUSTOM = "changed";
+    expect(context.env["CUSTOM"]).toBe("captured");
+    expect(Object.isFrozen(context.env)).toBe(true);
+    for (const value of [{ cwd: "relative", env: {} }, { cwd: process.cwd() }, { cwd: process.cwd(), env: { BAD: 1 } }]) {
+      expect(() => MAINTENANCE_TERMINAL_CAPABILITY.parse(value)).toThrow();
+    }
+  });
+
+  it("binds maintenance execution exactly once and rejects invalid contexts before binding", () => {
+    const service = trackedService();
+    expect(() => { service.bindMaintenanceExecutionContext({ cwd: "relative", env: {} }); }).toThrow("absolute");
+    service.bindMaintenanceExecutionContext({ cwd: process.cwd(), env: {} });
+    expect(() => { service.bindMaintenanceExecutionContext({ cwd: process.cwd(), env: {} }); }).toThrow("already bound");
+  });
+});
+
+describe.skipIf(process.platform === "win32")("Terminal peer server entry", () => {
+  it("uses the host maintenance cwd lazily without a registered project or plugin-data dependency", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "pi-web-maintenance-"));
+    const cwd = join(directory, "maintenance");
+    const activation = activateTerminalPlugin(activationContext("pi-web.terminal"));
+    try {
+      await activation.start?.({
+        capabilities: { resolve: (capability) => capability.parse(MAINTENANCE_TERMINAL_CAPABILITY.parse({ cwd, env: { ...process.env } })) },
+        signal: new AbortController().signal,
+      });
+      const peer = activation.peer;
+      if (peer === undefined) throw new Error("Expected Terminal peer");
+      await expect(backendRequest(peer, maintenanceContext("terminal.list", null))).resolves.toEqual([]);
+      expect(existsSync(cwd)).toBe(false);
+      const run = await backendRequest(peer, maintenanceContext("terminal.run", {
+        origin: "updates", title: "Update", command: "pwd", cwd: "/ignored", projectId: "ignored", workspaceId: "ignored",
+      }));
+      expect(run).toMatchObject({ scope: "maintenance", origin: "updates" });
+      expect(run).not.toHaveProperty("projectId");
+      expect(run).not.toHaveProperty("workspaceId");
+      expect(existsSync(cwd)).toBe(true);
+      const terminalId = jsonString(run, "terminalId");
+      const sent: JsonValue[] = [];
+      const channel = await peer.openChannel?.({
+        ...maintenanceContext("terminal.attach", { terminalId }), send: (frame) => { sent.push(frame); },
+      });
+      await vi.waitFor(() => {
+        expect(sent.filter((frame) => jsonStringOrUndefined(frame, "type") === "output")
+          .map((frame) => jsonStringOrUndefined(frame, "data") ?? "").join("")).toContain(cwd);
+      });
+      await vi.waitFor(async () => {
+        await expect(backendRequest(peer, maintenanceContext("terminal.get-run", { runId: jsonString(run, "id") })))
+          .resolves.toMatchObject({ status: "succeeded" });
+      });
+      await channel?.close?.({ code: 1000, reason: "done", signal: new AbortController().signal });
+      const continued = await backendRequest(peer, maintenanceContext("terminal.continue", { terminalId }));
+      expect(continued).toMatchObject({ scope: "maintenance", cwd, exited: false });
+      expect(continued).not.toHaveProperty("workspaceId");
+      const interactiveOutput: JsonValue[] = [];
+      const interactive = await peer.openChannel?.({
+        ...maintenanceContext("terminal.attach", { terminalId, cols: 80, rows: 24 }),
+        send: (frame) => { interactiveOutput.push(frame); },
+      });
+      if (interactive === undefined) throw new Error("Expected continued maintenance channel");
+      await interactive.receive({ type: "resize", cols: 90, rows: 25 }, new AbortController().signal);
+      await interactive.receive({ type: "input", data: "printf 'continued-%s\\n' maintenance\n" }, new AbortController().signal);
+      await vi.waitFor(() => {
+        expect(interactiveOutput.map((frame) => jsonStringOrUndefined(frame, "data") ?? "").join(""))
+          .toContain("continued-maintenance");
+      });
+      await backendRequest(peer, maintenanceContext("terminal.close", { terminalId }));
+      await interactive.close?.({ code: 1000, reason: "done", signal: new AbortController().signal });
+    } finally {
+      await activation.dispose?.(new AbortController().signal);
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("isolates every terminal operation and attach channel between maintenance and workspace, even at the same cwd", async () => {
+    const service = trackedService();
+    service.bindMaintenanceExecutionContext({ cwd: process.cwd(), env: { ...process.env } });
+    const peer = createTerminalPeer(service);
+    for (const [owner, other] of [[maintenanceContext, requestContext], [requestContext, maintenanceContext]] as const) {
+      const run = await backendRequest(peer, owner("terminal.run", { origin: "test", title: "Isolation", command: "sleep 30" }));
+      const runId = jsonString(run, "id");
+      const terminalId = jsonString(run, "terminalId");
+      await expect(backendRequest(peer, other("terminal.list", null))).resolves.toEqual([]);
+      await expect(backendRequest(peer, other("terminal.list-runs", null))).resolves.not.toEqual(expect.arrayContaining([expect.objectContaining({ id: runId })]));
+      await expect(backendRequest(peer, other("terminal.get-run", { runId }))).resolves.toBeNull();
+      await expect(backendRequest(peer, other("terminal.cancel-run", { runId }))).rejects.toThrow("not found");
+      for (const operation of ["terminal.close", "terminal.continue"]) {
+        await expect(backendRequest(peer, other(operation, { terminalId }))).rejects.toThrow("not found");
+      }
+      for (const input of [{ terminalId }, { terminalId, cols: 80, rows: 24 }]) {
+        expect(() => peer.openChannel?.({ ...other("terminal.attach", input), send: () => undefined }))
+          .toThrow("not found");
+      }
+      await expect(backendRequest(peer, owner("terminal.cancel-run", { runId }))).resolves.toMatchObject({ id: runId });
+      await backendRequest(peer, owner("terminal.close", { terminalId }));
+    }
+  });
+
+  it("rejects manual maintenance shell creation without creating its working directory", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "pi-web-maintenance-shell-"));
+    const cwd = join(directory, "maintenance");
+    const service = trackedService();
+    service.bindMaintenanceExecutionContext({ cwd, env: { ...process.env } });
+    const peer = createTerminalPeer(service);
+    try {
+      await expect(backendRequest(peer, maintenanceContext("terminal.create", { name: "Maintenance" })))
+        .rejects.toThrow("New terminals require a workspace");
+      await expect(backendRequest(peer, maintenanceContext("terminal.list", null))).resolves.toEqual([]);
+      expect(existsSync(cwd)).toBe(false);
+    } finally {
+      service.dispose();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed when the host maintenance directory is not bound", async () => {
+    const peer = createTerminalPeer(trackedService());
+    await expect(backendRequest(peer, maintenanceContext("terminal.create", {}))).rejects.toThrow("maintenance directory is unavailable");
+  });
+
+  it("rejects project scope consistently for requests and channels", async () => {
+    const peer = createTerminalPeer(trackedService());
+    for (const operation of ["terminal.list", "terminal.create", "terminal.close", "terminal.continue", "terminal.run", "terminal.list-runs", "terminal.get-run", "terminal.cancel-run"]) {
+      await expect(backendRequest(peer, { ...requestContext(operation, null), scope: { kind: "project", project: project() } }))
+        .rejects.toThrow("requires machine or workspace scope");
+    }
+    expect(() => peer.openChannel?.({ ...channelContext({}, [], new AbortController()), scope: { kind: "project", project: project() } }))
+      .toThrow("requires machine or workspace scope");
+  });
+  it("derives Terminal scope from the host and prevents learned ids crossing workspaces", async () => {
+    const service = trackedService();
+    const backend = createTerminalPeer(service);
+    const created = await backendRequest(backend, requestContext("terminal.create", { name: "Scoped shell" }));
+    const terminalId = jsonString(created, "id");
+
+    await expect(backendRequest(backend, requestContext("terminal.list", null))).resolves.toEqual([
+      expect.objectContaining({ id: terminalId, cwd: process.cwd(), name: "Scoped shell" }),
+    ]);
+    await expect(backendRequest(backend, requestContext("terminal.list", null, "workspace-2"))).resolves.toEqual([]);
+    await expect(backendRequest(backend, requestContext("terminal.close", { terminalId }, "workspace-2")))
+      .rejects.toThrow("Terminal not found in this workspace");
+
+    await expect(backendRequest(backend, requestContext("terminal.close", { terminalId }))).resolves.toEqual({ closed: true });
+  });
+
+  it("owns command-run control operations within the resolved workspace", async () => {
+    const service = trackedService();
+    const backend = createTerminalPeer(service);
+    const runValue = await backendRequest(backend, requestContext("terminal.run", {
+      origin: "tasks",
+      title: "Output",
+      command: "printf terminal-paired-run",
+      metadata: { "pi.operation": "test" },
+    }));
+    const runId = jsonString(runValue, "id");
+
+    await expect(backendRequest(backend, requestContext("terminal.get-run", { runId }, "workspace-2"))).resolves.toBeNull();
+    await expect(backendRequest(backend, requestContext("terminal.list-runs", { metadata: { "pi.operation": "test" } })))
+      .resolves.toEqual([expect.objectContaining({ id: runId, workspaceId: "workspace-1" })]);
+    await vi.waitFor(async () => {
+      await expect(backendRequest(backend, requestContext("terminal.get-run", { runId })))
+        .resolves.toEqual(expect.objectContaining({ status: "succeeded", exitCode: 0 }));
+    });
+  });
+
+  it("transports generated title and shell-name metadata across the peer boundary without accepting browser provenance", async () => {
+    const service = trackedService();
+    const backend = createTerminalPeer(service);
+    const titlePresentation = { kind: "workspaceRemoval" as const, label: "feature/<img>" };
+    const run = service.runCommand({
+      projectId: "project-1", workspaceId: "workspace-1", cwd: process.cwd(),
+      origin: "core", title: "Delete workspace: feature/<img>", command: "true", titlePresentation,
+    });
+    await expect(backendRequest(backend, requestContext("terminal.get-run", { runId: run.id })))
+      .resolves.toMatchObject({ titlePresentation, title: run.title });
+    await expect(backendRequest(backend, requestContext("terminal.list", null)))
+      .resolves.toEqual([expect.objectContaining({ name: run.title, titlePresentation })]);
+    const created = await backendRequest(backend, requestContext("terminal.create", {}));
+    expect(created).toMatchObject({ defaultShellNumber: 2, name: "Shell 2" });
+    const authored = await backendRequest(backend, requestContext("terminal.run", {
+      origin: "browser", title: run.title, command: "true", titlePresentation,
+    }));
+    expect(authored).not.toHaveProperty("titlePresentation");
+  });
+
+  it("reports a private host-composed command failure without exposing the intent on the run", async () => {
+    const records: ServerPluginNoticeInput[] = [];
+    const activation = activateTerminalPlugin(activationContext("pi-web.terminal", (input) => { records.push(input); }));
+    const run = terminalServiceCapability(activation).runCommand({
+      origin: "core",
+      projectId: "project-1",
+      workspaceId: "workspace-1",
+      cwd: process.cwd(),
+      title: "Remove workspace",
+      command: "exit 9",
+      failureNotice: {
+        message: "Workspace removal failed. See terminal output.",
+        context: { targetWorkspaceId: "target-workspace" },
+      },
+    });
+
+    await vi.waitFor(() => {
+      expect(records).toEqual([{
+        severity: "error",
+        message: "Workspace removal failed. See terminal output.",
+        scope: { projectId: "project-1" },
+        context: {
+          commandRunId: run.id,
+          targetWorkspaceId: "target-workspace",
+        },
+      }]);
+    });
+    expect(run).not.toHaveProperty("failureNotice");
+    await activation.dispose?.(new AbortController().signal);
+  });
+
+  it("does not accept a failure-notice intent from the browser peer protocol", async () => {
+    const records: ServerPluginNoticeInput[] = [];
+    const activation = activateTerminalPlugin(activationContext("pi-web.terminal", (input) => { records.push(input); }));
+    const backend = activation.peer;
+    if (backend === undefined) throw new Error("Expected Terminal peer");
+    const runValue = await backendRequest(backend, requestContext("terminal.run", {
+      origin: "browser",
+      title: "Fail without host intent",
+      command: "exit 8",
+      failureNotice: {
+        message: "Spoofed notice",
+        context: { projectId: "project-1" },
+      },
+    }));
+    const runId = jsonString(runValue, "id");
+
+    await vi.waitFor(async () => {
+      await expect(backendRequest(backend, requestContext("terminal.get-run", { runId })))
+        .resolves.toEqual(expect.objectContaining({ status: "failed", exitCode: 8 }));
+    });
+    expect(records).toEqual([]);
+    expect(runValue).not.toHaveProperty("failureNotice");
+    await activation.dispose?.(new AbortController().signal);
+  });
+
+  it("attaches a bounded JSON channel for input, resize, output, and cleanup", async () => {
+    const service = trackedService();
+    const backend = createTerminalPeer(service);
+    const created = await backendRequest(backend, requestContext("terminal.create", {}));
+    const terminalId = jsonString(created, "id");
+    const sent: JsonValue[] = [];
+    const controller = new AbortController();
+    const openChannel = backend.openChannel?.bind(backend);
+    if (openChannel === undefined) throw new Error("Expected Terminal channel contribution");
+    const channel = await openChannel(channelContext({ terminalId, cols: 120, rows: 40 }, sent, controller));
+
+    await channel.receive({ type: "input", data: "printf '__TERMINAL_PAIRED_CHANNEL__\\n'\n" }, new AbortController().signal);
+    // Enter, Tab, and spaces are valid PTY input even though trimming would make
+    // some of those frames empty.
+    await channel.receive({ type: "input", data: "\r" }, new AbortController().signal);
+    expect(() => channel.receive({ type: "input", data: "" }, new AbortController().signal))
+      .toThrow("data must be a non-empty string");
+    await channel.receive({ type: "resize", cols: 100.9, rows: 30.2 }, new AbortController().signal);
+    await vi.waitFor(() => {
+      expect(sent.some((frame) => jsonStringOrUndefined(frame, "type") === "output"
+        && jsonStringOrUndefined(frame, "data")?.includes("__TERMINAL_PAIRED_CHANNEL__") === true)).toBe(true);
+    });
+    expect(() => channel.receive({ type: "unknown" }, new AbortController().signal))
+      .toThrow("Unsupported Terminal channel frame");
+    if (channel.closed === undefined) throw new Error("Expected Terminal-owned channel completion");
+    await backendRequest(backend, requestContext("terminal.close", { terminalId }));
+    await expect(channel.closed).resolves.toBeUndefined();
+
+    controller.abort(new DOMException("browser disconnected", "AbortError"));
+    await channel.close?.({ code: 1000, reason: "done", signal: new AbortController().signal });
+    expect(() => channel.receive({ type: "input", data: "echo late\n" }, new AbortController().signal))
+      .toThrow("browser disconnected");
+  });
+
+  it("fits the full worst-case escaped replay within the directional output budget", () => {
+    const output = "\u0000".repeat(200_000);
+    const frames = terminalOutputFrames(output, true);
+    const readyBytes = Buffer.byteLength(JSON.stringify({ version: 1, kind: "ready" }), "utf8");
+    const wireBytes = readyBytes + frames.reduce((total, data) => total + Buffer.byteLength(JSON.stringify({
+      version: 1,
+      kind: "data",
+      data,
+    }), "utf8"), 0);
+
+    expect(frames.map(({ data }) => data).join("")).toBe(output);
+    expect(frames.length).toBeGreaterThan(1);
+    expect(frames.slice(0, -1).every((frame) => frame.replayComplete === false)).toBe(true);
+    expect(frames.at(-1)?.replayComplete).toBe(true);
+    expect(wireBytes).toBeLessThan(1_280 * 1024);
+    for (const frame of frames) {
+      expect(Buffer.byteLength(JSON.stringify(frame), "utf8")).toBeLessThanOrEqual(60 * 1024);
+    }
+  });
+
+  it("publishes the required service only for the pi-web.terminal identity", async () => {
+    const activation = activateTerminalPlugin(activationContext("pi-web.terminal"));
+    expect(typeof activation.peer?.request).toBe("function");
+    expect(typeof activation.peer?.openChannel).toBe("function");
+    const capability = terminalServiceCapability(activation);
+    expect(typeof capability.closeForCwd).toBe("function");
+    expect(typeof capability.runCommand).toBe("function");
+    expect(typeof capability.bindActivitySink).toBe("function");
+    expect(activation).not.toHaveProperty("requiredTerminalService");
+    await activation.dispose?.(new AbortController().signal);
+
+    expect(() => activateTerminalPlugin(activationContext("other"))).toThrow("must activate as plugin id pi-web.terminal");
+
+    const withoutNotices = { ...activationContext("pi-web.terminal") };
+    Reflect.deleteProperty(withoutNotices, "notices");
+    expect(() => activateTerminalPlugin(Object.freeze(withoutNotices)))
+      .toThrow("requires server notice reporter version 1");
+  });
+});
+
+function trackedService(): TerminalService {
+  const service = new TerminalService(createDefaultPtyProvider());
+  services.push(service);
+  return service;
+}
+
+function backendRequest(backend: ServerPluginPeer, context: ServerPluginPeerRequestContext): Promise<JsonValue> {
+  const request = backend.request?.bind(backend);
+  if (request === undefined) throw new Error("Expected Terminal peer request handler");
+  return Promise.resolve().then(() => request(context));
+}
+
+function requestContext(operation: string, input: JsonValue, workspaceId = "workspace-1"): ServerPluginPeerRequestContext {
+  return Object.freeze({
+    scope: { kind: "workspace" as const, project: project(), workspace: workspace(workspaceId) },
+    operation,
+    input,
+    signal: new AbortController().signal,
+  });
+}
+
+function channelContext(
+  input: JsonValue,
+  sent: JsonValue[],
+  controller: AbortController,
+): ServerPluginPeerChannelOpenContext {
+  return Object.freeze({
+    scope: { kind: "workspace" as const, project: project(), workspace: workspace("workspace-1") },
+    operation: "terminal.attach",
+    input,
+    signal: controller.signal,
+    send: (frame: JsonValue) => { sent.push(frame); },
+  });
+}
+
+function maintenanceContext(operation: string, input: JsonValue): ServerPluginPeerRequestContext {
+  return { scope: { kind: "machine" }, operation, input, signal: new AbortController().signal };
+}
+
+function project(): ProjectInput {
+  return Object.freeze({ id: "project-1", name: "Project", path: process.cwd() });
+}
+
+function workspace(id: string): ServerPluginPeerWorkspace {
+  return Object.freeze({
+    id,
+    projectId: "project-1",
+    path: process.cwd(),
+    label: id,
+    isMain: true,
+  });
+}
+
+function activationContext(
+  pluginId: string,
+  recordNotice: (input: ServerPluginNoticeInput) => void = () => undefined,
+): ServerPluginActivationContext {
+  return Object.freeze({
+    apiVersion: 5,
+    pluginId,
+    packageRoot: process.cwd(),
+    dataDirectory: "/data/plugin-data/pi-web.terminal",
+    logger: Object.freeze({
+      debug: () => undefined,
+      info: () => undefined,
+      warn: () => undefined,
+      error: () => undefined,
+    }),
+    settings: Object.freeze({}),
+    notices: Object.freeze({ version: 1, record: recordNotice }),
+    execFile: () => Promise.reject(new Error("not used")),
+    signal: new AbortController().signal,
+    lifetimeSignal: new AbortController().signal,
+  });
+}
+
+function terminalServiceCapability(activation: ReturnType<typeof activateTerminalPlugin>) {
+  const provision = activation.provides.find(({ capability }) => (
+    capability.pluginId === TERMINAL_SERVICE_CAPABILITY.pluginId
+      && capability.id === TERMINAL_SERVICE_CAPABILITY.id
+  ));
+  if (provision === undefined) throw new Error("Expected Terminal service capability provision");
+  return TERMINAL_SERVICE_CAPABILITY.parse(provision.value);
+}
+
+function jsonString(value: JsonValue, key: string): string {
+  const result = jsonStringOrUndefined(value, key);
+  if (result === undefined) throw new Error(`Expected JSON string ${key}`);
+  return result;
+}
+
+function jsonStringOrUndefined(value: JsonValue, key: string): string | undefined {
+  if (!isJsonObject(value)) return undefined;
+  const child = value[key];
+  return typeof child === "string" ? child : undefined;
+}
+
+function isJsonObject(value: JsonValue): value is Readonly<Record<string, JsonValue>> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}

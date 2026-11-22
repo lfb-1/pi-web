@@ -1,9 +1,15 @@
 node_modules/
 dist/
+
+# Generated from the pinned material-icon-theme development dependency.
+/src/client/src/plugins/themes/material/generated.ts
+/src/client/src/plugins/themes/material/icons/
 .env
 .DS_Store
 *.log
 .playwright-cli/
+/playwright-report/
+/test-results/
 
 # Local plugin development sandboxes. Symlink these into ~/.pi-web/plugins/<plugin-id>.
 /dev-plugins/

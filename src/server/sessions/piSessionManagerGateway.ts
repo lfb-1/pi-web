@@ -1,12 +1,15 @@
-import type { Dirent } from "node:fs";
-import { readdir } from "node:fs/promises";
+import type { Dirent, Stats } from "node:fs";
+import { open, readFile, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
-import { SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { SessionManager, SettingsManager } from "../../piSdk.js";
 import { AGENT_SESSION_DIR_ENV_KEYS } from "../../config.js";
 import { canonicalizeStoredCwd, cwdPathsEqual } from "../workingDirectory.js";
+import { isNodeErrorWithCode } from "../workspaces/pathSafety.js";
 import { readSessionHeaderSummary, type SessionHeaderReader } from "./sessionFileHeader.js";
+import { tryParseEntry } from "./sessionFileFormat.js";
 import { SessionSummaryScanner } from "./sessionSummaryScanner.js";
+import { TranscriptBranchCache, type TranscriptBranchSnapshot } from "./transcriptBranchCache.js";
 import type { PiSessionListEntry, PiSessionManager, PiSessionManagerGateway, ResolvedSessionFile } from "./piSessionService.js";
 
 type SessionDirSource = "env" | "settings" | "pi-default";
@@ -78,6 +81,15 @@ class SettingsAwarePiSessionManagerGateway implements PiSessionManagerGateway {
    * in-place rewrites those checks cannot see.
    */
   private readonly summaryScanner = new SessionSummaryScanner();
+  // Idle-session transcript snapshots, memoized by file signature and bounded
+  // (LRU) so daemon-lifetime polling cannot retain every session ever read.
+  // Snapshots keep their parsed entries so a file that grew by append only is
+  // extended from the appended bytes instead of re-parsed whole.
+  private readonly transcriptBranches = new TranscriptBranchCache();
+  // In-flight snapshot reads, deduplicated per path. Each entry removes itself
+  // when its read settles, so this map only ever holds genuinely concurrent
+  // reads and needs no bound of its own.
+  private readonly pendingTranscriptBranches = new Map<string, Promise<TranscriptBranchSnapshot | undefined>>();
 
   constructor(private readonly resolver: SessionDirResolver) {}
 
@@ -99,6 +111,16 @@ class SettingsAwarePiSessionManagerGateway implements PiSessionManagerGateway {
     return resolveSessionFileInDir(resolution.sessionDir, cwd, sessionId, readSessionHeaderSummary);
   }
 
+  findSessionFile(sessionId: string, cwds: readonly string[]): Promise<ResolvedSessionFile | undefined> {
+    // Group by session folder: several workspaces can share one configured folder.
+    const cwdsByDir = new Map<string, string[]>();
+    for (const cwd of cwds) {
+      const sessionDir = this.resolver.resolve(cwd).sessionDir;
+      cwdsByDir.set(sessionDir, [...(cwdsByDir.get(sessionDir) ?? []), cwd]);
+    }
+    return findSessionFileByName(cwdsByDir, sessionId, readSessionHeaderSummary);
+  }
+
   invalidateSessionFile(sessionFile: string): void {
     // Detach is the only flow that rewrites a session file in place (keeping
     // the inode), and the summary memo cannot detect such rewrites from
@@ -111,11 +133,67 @@ class SettingsAwarePiSessionManagerGateway implements PiSessionManagerGateway {
     return SessionManager.create(cwd, resolution.sessionDir, options?.parentSession === undefined ? undefined : { parentSession: options.parentSession });
   }
 
+  async readBranch(path: string): Promise<unknown[] | undefined> {
+    return (await this.readTranscriptSnapshot(path))?.branch;
+  }
+
+  async readEntries(path: string): Promise<readonly unknown[] | undefined> {
+    return (await this.readTranscriptSnapshot(path))?.entries;
+  }
+
+  private async readTranscriptSnapshot(path: string): Promise<TranscriptBranchSnapshot | undefined> {
+    // A session whose path is known may still have no file on disk (created in
+    // memory, never persisted) or be removed externally at any moment. Absence
+    // is not a failure: it means there is no disk snapshot to serve.
+    const file = await statIfPresent(path);
+    if (file === undefined) return undefined;
+    const signature = transcriptFileSignature(file);
+    const cached = this.transcriptBranches.get(path, signature);
+    if (cached !== undefined) return cached;
+    const pending = this.pendingTranscriptBranches.get(path);
+    if (pending !== undefined) return pending;
+    const read = this.readSnapshot(path, file, signature)
+      .then((snapshot) => {
+        this.transcriptBranches.set(path, snapshot);
+        return snapshot;
+      })
+      .catch((error: unknown) => {
+        // Deleted between the stat above and the read: again, no snapshot.
+        if (isNodeErrorWithCode(error, "ENOENT")) return undefined;
+        throw error;
+      })
+      .finally(() => { this.pendingTranscriptBranches.delete(path); });
+    this.pendingTranscriptBranches.set(path, read);
+    return read;
+  }
+
+  /**
+   * Parse the transcript snapshot for `path`. When the memoized snapshot's
+   * file grew by append only — same identity, larger size, and the appended
+   * bytes start on a line boundary — parse just those bytes and extend the
+   * memoized entries; any anomaly falls back to a full re-read.
+   */
+  private async readSnapshot(path: string, file: Stats, signature: string): Promise<TranscriptBranchSnapshot> {
+    const identity = transcriptFileIdentity(file);
+    const previous = this.transcriptBranches.getLatest(path);
+    // A zero-size cached prefix has no boundary byte to verify against, but a
+    // full re-read of a file that was empty one poll ago is trivial anyway.
+    if (previous?.identity === identity && previous.size > 0 && previous.size < file.size) {
+      const appended = await readAppendedEntries(path, previous.size, file.size, identity);
+      if (appended !== undefined) {
+        const entries = [...previous.entries, ...appended];
+        return { signature, identity, size: file.size, entries, branch: deriveTranscriptBranch(entries) };
+      }
+    }
+    const entries = parseTranscriptEntries(await readFile(path, "utf8"));
+    return { signature, identity, size: file.size, entries, branch: deriveTranscriptBranch(entries) };
+  }
+
   async listAll(): Promise<PiSessionListEntry[]> {
     const envSessionDir = this.resolver.globalEnvSessionDir();
     const [defaultSessions, envSessions] = await Promise.all([
-      listSessionsInDefaultPiStore(this.resolver.defaultSessionsRoot()),
-      envSessionDir === undefined ? Promise.resolve([]) : listSessionsInDir(envSessionDir),
+      listSessionsInDefaultPiStore(this.resolver.defaultSessionsRoot(), this.summaryScanner),
+      envSessionDir === undefined ? Promise.resolve([]) : listSessionsInDir(envSessionDir, this.summaryScanner),
     ]);
     return uniqueSessionsByPath([...defaultSessions, ...envSessions]);
   }
@@ -125,17 +203,125 @@ class SettingsAwarePiSessionManagerGateway implements PiSessionManagerGateway {
   }
 }
 
-export async function listSessionsInDir(sessionDir: string): Promise<PiSessionListEntry[]> {
+/** Stat a transcript path that may be absent; any error other than absence stays a failure. */
+async function statIfPresent(path: string): Promise<Stats | undefined> {
+  try {
+    return await stat(path);
+  } catch (error: unknown) {
+    if (isNodeErrorWithCode(error, "ENOENT")) return undefined;
+    throw error;
+  }
+}
+
+/** The device + inode pair that identifies a transcript file independently of its path. */
+function transcriptFileIdentity(file: Stats): string {
+  return `${String(file.dev)}:${String(file.ino)}`;
+}
+/** The signature a memoized snapshot is validated against: identity, size, and mtime. */
+function transcriptFileSignature(file: Stats): string {
+  return `${transcriptFileIdentity(file)}:${String(file.size)}:${String(file.mtimeMs)}`;
+}
+
+/**
+ * Read and parse only the bytes appended to a transcript since `offset`, the
+ * size the memoized snapshot was parsed from.
+ *
+ * Returns `undefined` when the append assumption does not hold — the file was
+ * replaced since the stat that produced `identity`, the byte before the
+ * offset is not a line boundary, the first appended line does not parse, or
+ * the read came back short (truncated mid-read) — so the caller falls back to
+ * a full re-read. An unparseable line later in the chunk is skipped, matching
+ * full-read behavior, and a final line still being written simply fails to
+ * parse until the next poll completes it.
+ */
+async function readAppendedEntries(path: string, offset: number, size: number, identity: string): Promise<Record<string, unknown>[] | undefined> {
+  const handle = await open(path, "r");
+  try {
+    const current = await handle.stat();
+    if (transcriptFileIdentity(current) !== identity) return undefined;
+    // Read the byte before the offset along with the appended bytes: it must
+    // end a line, proving the cached prefix still ends on a line boundary in
+    // the file's current content (i.e. this really is a pure append).
+    const length = size - offset + 1;
+    const buffer = Buffer.alloc(length);
+    const { bytesRead } = await handle.read(buffer, 0, length, offset - 1);
+    if (bytesRead !== length) return undefined;
+    if (buffer[0] !== 0x0a) return undefined;
+    const lines = buffer.toString("utf8", 1).split("\n");
+    const appended: Record<string, unknown>[] = [];
+    let firstLine = true;
+    for (const line of lines) {
+      const entry = tryParseEntry(line);
+      if (entry === undefined) {
+        // A first appended line that does not parse means the offset did not
+        // land on a real content boundary after all; later lines may be
+        // skipped the way a full read skips them.
+        if (firstLine && line.trim() !== "") return undefined;
+      } else if (entry["type"] !== "session") {
+        appended.push(entry);
+      }
+      firstLine = false;
+    }
+    return appended;
+  } finally {
+    await handle.close();
+  }
+}
+
+/** Parse every entry line in transcript `content`, skipping unreadable lines and session headers. */
+function parseTranscriptEntries(content: string): Record<string, unknown>[] {
+  const entries: Record<string, unknown>[] = [];
+  for (const line of content.split("\n")) {
+    const entry = tryParseEntry(line);
+    if (entry !== undefined && entry["type"] !== "session") entries.push(entry);
+  }
+  return entries;
+}
+
+/**
+ * SDK-compatible active-branch projection with no migration or write side
+ * effects: the walk from the last id-bearing entry through `parentId` links,
+ * oldest first. Cheap enough to re-run over merged entries after an append.
+ */
+function deriveTranscriptBranch(entries: readonly Record<string, unknown>[]): Record<string, unknown>[] {
+  const byId = new Map<string, Record<string, unknown>>();
+  let leafId: string | undefined;
+  for (const entry of entries) {
+    const id = entry["id"];
+    if (typeof id !== "string") continue;
+    byId.set(id, entry);
+    leafId = id;
+  }
+  const branch: Record<string, unknown>[] = [];
+  const visited = new Set<string>();
+  let currentId = leafId;
+  while (currentId !== undefined && !visited.has(currentId)) {
+    visited.add(currentId);
+    const entry = byId.get(currentId);
+    if (entry === undefined) break;
+    branch.push(entry);
+    currentId = typeof entry["parentId"] === "string" ? entry["parentId"] : undefined;
+  }
+  return branch.reverse();
+}
+
+export async function listSessionsInDir(sessionDir: string, scanner = new SessionSummaryScanner()): Promise<PiSessionListEntry[]> {
   // listAll(sessionDir) lists without the SDK's internal cwd filter, which would
   // otherwise compare against this process's cwd and drop other projects' sessions.
   // Cwd filtering is applied explicitly by filterSessionsForCwd where needed.
   // Session file headers are written by external tools (Pi CLI, SDK consumers),
   // so their cwd is canonicalized here before it enters pi-web.
-  const sessions = await SessionManager.listAll(sessionDir);
-  return sessions.map((session) => ({ ...session, cwd: canonicalizeStoredCwd(session.cwd) }));
+  const [sessions, summaries] = await Promise.all([SessionManager.listAll(sessionDir), scanner.scanSessionSummariesInDir(sessionDir)]);
+  // Keep SDK cleanup dates/counts, while carrying public identity into archive
+  // indexes even when cleanup, rather than a workspace listing, initiates it.
+  const metadataByPath = new Map(summaries.map((summary) => [summary.path, summary.metadata]));
+  return sessions.map((session) => {
+    const metadata = metadataByPath.get(session.path);
+    return { ...session, cwd: canonicalizeStoredCwd(session.cwd), ...(metadata === undefined ? {} : { metadata }) };
+  });
 }
 
-export async function listSessionsInDefaultPiStore(storeRoot: string): Promise<PiSessionListEntry[]> {
+export async function listSessionsInDefaultPiStore(storeRoot: string, scanner = new SessionSummaryScanner()): Promise<PiSessionListEntry[]> {
   let entries: Dirent[];
   try {
     entries = await readdir(storeRoot, { withFileTypes: true });
@@ -144,7 +330,7 @@ export async function listSessionsInDefaultPiStore(storeRoot: string): Promise<P
   }
 
   const sessionDirs = entries.filter((entry) => entry.isDirectory()).map((entry) => join(storeRoot, entry.name));
-  const sessions = (await Promise.all(sessionDirs.map((dir) => listSessionsInDir(dir)))).flat();
+  const sessions = (await Promise.all(sessionDirs.map((dir) => listSessionsInDir(dir, scanner)))).flat();
   return sessions.sort((a, b) => b.modified.getTime() - a.modified.getTime());
 }
 
@@ -158,17 +344,16 @@ export function filterSessionsForCwd(sessions: readonly PiSessionListEntry[], cw
  * Locate a session file by id without parsing transcripts.
  *
  * Session filenames embed the session id (`<timestamp>_<sessionId>.jsonl`), so
- * exact and prefix matches are normally found from the directory names alone
- * and confirmed by one header read. Filename candidates that fail header
+ * exact matches are normally found from the directory names alone and
+ * confirmed by one header read. Filename candidates that fail header
  * verification (a copy whose header holds a different session) do not end the
  * search: the remaining files are checked too, so sessions in renamed or
  * hand-named files still resolve. Headers decide: a file whose header id or cwd
  * does not match is not the session.
  *
- * Among matches, an exact header id wins over a prefix match wherever it
- * appears. Ambiguous prefix candidates are considered in two buckets: filename
- * matches before remaining files, with each bucket sorted by the creation time
- * embedded in SDK-style names (see `byNewestEmbeddedTimestamp`).
+ * Only full header id equality matches. Filename matches are checked before
+ * remaining files, with each bucket sorted by the creation time embedded in
+ * SDK-style names (see `byNewestEmbeddedTimestamp`).
  *
  * The header's cwd is returned canonicalized, matching what `list` reports.
  */
@@ -187,9 +372,6 @@ export async function resolveSessionFileInDir(
   fileNameMatches.sort(byNewestEmbeddedTimestamp);
   remainingFiles.sort(byNewestEmbeddedTimestamp);
 
-  // A prefix match is only provisional: an exact header id wins over it
-  // wherever it appears, so the search continues after one is found.
-  let prefixMatch: ResolvedSessionFile | undefined;
   // Filename matches first; the remaining files follow so a renamed file still
   // resolves when every filename candidate fails header verification.
   for (const sessionFile of [...fileNameMatches, ...remainingFiles]) {
@@ -199,11 +381,36 @@ export async function resolveSessionFileInDir(
     if (header.id === sessionId) {
       return { id: header.id, cwd: canonicalizeStoredCwd(header.cwd), path: sessionFile };
     }
-    if (prefixMatch === undefined && header.id.startsWith(sessionId)) {
-      prefixMatch = { id: header.id, cwd: canonicalizeStoredCwd(header.cwd), path: sessionFile };
-    }
   }
-  return prefixMatch;
+  return undefined;
+}
+
+/**
+ * Locate a session by id within the session folders of known workspaces,
+ * given as each folder with the workspace paths whose sessions it holds. Only
+ * files whose SDK-style name embeds the id are considered, so the cost is one
+ * listing per folder plus a header read per candidate; unlike
+ * `resolveSessionFileInDir`, a hand-renamed file is not found. The header
+ * decides: the candidate must hold the id and belong to one of the folder's
+ * workspaces, exactly as the workspace session list requires.
+ */
+export async function findSessionFileByName(
+  cwdsBySessionDir: ReadonlyMap<string, readonly string[]>,
+  sessionId: string,
+  readHeader: SessionHeaderReader,
+): Promise<ResolvedSessionFile | undefined> {
+  if (sessionId === "") return undefined;
+  const listed = await Promise.all([...cwdsBySessionDir].map(async ([dir, cwds]) => (await listSessionFiles(dir))
+    .filter((sessionFile) => fileNameMatchesSessionId(basename(sessionFile), sessionId))
+    .map((sessionFile) => ({ sessionFile, cwds }))));
+  const candidates = listed.flat().sort((a, b) => byNewestEmbeddedTimestamp(a.sessionFile, b.sessionFile));
+  for (const { sessionFile, cwds } of candidates) {
+    const header = await readHeader(sessionFile);
+    const headerCwd = header?.cwd;
+    if (header?.id !== sessionId || headerCwd === undefined || !cwds.some((cwd) => cwdPathsEqual(cwd, headerCwd))) continue;
+    return { id: header.id, cwd: canonicalizeStoredCwd(headerCwd), path: sessionFile };
+  }
+  return undefined;
 }
 
 /**
@@ -215,8 +422,8 @@ export async function resolveSessionFileInDir(
  * deterministic everywhere.
  *
  * This deliberately drifts from the listing, which orders by modified time:
- * the resolver never stats transcript files, so ambiguous prefix candidates
- * within each bucket are considered in this creation-time order instead.
+ * the resolver never stats transcript files, so candidates within each bucket
+ * are considered in this creation-time order instead.
  */
 function byNewestEmbeddedTimestamp(a: string, b: string): number {
   const timestampA = embeddedFileNameTimestamp(basename(a));
@@ -232,10 +439,10 @@ function embeddedFileNameTimestamp(fileName: string): string {
   return separatorIndex === -1 ? "" : stem.slice(0, separatorIndex);
 }
 
-/** Whether a `.jsonl` file name embeds `sessionId` (exactly or as a prefix). */
+/** Whether a `.jsonl` file name embeds the full `sessionId`. */
 function fileNameMatchesSessionId(fileName: string, sessionId: string): boolean {
   const embeddedId = embeddedFileNameSessionId(fileName);
-  return embeddedId !== undefined && (embeddedId === sessionId || embeddedId.startsWith(sessionId));
+  return embeddedId === sessionId;
 }
 
 /**

@@ -1,3 +1,6 @@
+import { LocalizationController } from "../localization/browser";
+import { pickerMessages as messages } from "../pickerMessages";
+import { stylesheetIntegrationCapability } from "../plugins/styles";
 import { LitElement, css, html, nothing, type PropertyValues } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import type { AppAction } from "../actions";
@@ -5,9 +8,16 @@ import { formatShortcut } from "../keyboardShortcuts";
 import { keyboardEventOriginatesFromNativeActivationControl } from "./keyboardEventTarget";
 import "./ModalSurface";
 import { scrollWhenSelected } from "./scrollWhenSelected";
+import { uiDialogStyles, uiSelectionStyles } from "./ui/dialogStyles";
 
 @customElement("action-palette")
 export class ActionPalette extends LitElement {
+  constructor() {
+    super();
+    stylesheetIntegrationCapability.createController(this);
+    new LocalizationController(this);
+  }
+
   @property({ attribute: false }) actions: AppAction[] = [];
   @property({ attribute: false }) onRun?: (action: AppAction) => void;
   @property({ attribute: false }) onCancel?: () => void;
@@ -20,13 +30,13 @@ export class ActionPalette extends LitElement {
       <modal-surface
         .onClose=${() => this.onCancel?.()}
         .initialFocus=${"input"}
-        .label=${"Action palette"}
+        .label=${messages.t("actionPalette")}
         @keydown=${(event: KeyboardEvent) => { this.handleKeyDown(event); }}
       >
-        <header>
-          <input
+        <header class="ui-dialog-header">
+          <input class="ui-dialog-search" aria-label=${messages.t("searchActions")}
             .value=${this.queryText}
-            placeholder="Search actions..."
+            placeholder=${messages.t("searchActionsPlaceholder")}
             @input=${(event: Event) => {
               if (event.target instanceof HTMLInputElement) {
                 this.queryText = event.target.value;
@@ -34,12 +44,16 @@ export class ActionPalette extends LitElement {
               }
             }}
           >
-          <button title="Close" aria-label="Close" @click=${() => this.onCancel?.()}>×</button>
+          <button class="ui-button ui-button--icon" title=${messages.t("close")} aria-label=${messages.t("close")} @click=${() => this.onCancel?.()}>×</button>
         </header>
-        <div class="options">
-          ${actions.length === 0 ? html`<div class="empty">No actions found.</div>` : actions.map((action, index) => html`
+        <div class="options ui-selection-list">
+          ${actions.length === 0 ? html`<div class="empty ui-dialog-empty">${messages.t("noActions")}</div>` : actions.map((action, index) => {
+            const hasDescription = action.description !== undefined && action.description !== "";
+            const group = action.group !== undefined && action.group !== ""
+              ? html`<small class="group ui-selection-detail">${action.group}</small>` : nothing;
+            return html`
             <button
-              class=${`${index === this.selectedIndex ? "selected" : ""} ${action.enabled === false ? "disabled" : ""}`}
+              class=${`ui-button ui-selection-option ${index === this.selectedIndex ? "selected" : ""} ${action.enabled === false ? "disabled" : ""}`}
               ?disabled=${action.enabled === false}
               title=${action.disabledReason ?? action.title}
               aria-current=${index === this.selectedIndex ? "true" : nothing}
@@ -47,15 +61,16 @@ export class ActionPalette extends LitElement {
               @focus=${() => { this.selectedIndex = index; }}
               @click=${() => { this.run(action); }}
             >
-              <span class="main">
+              <span class="heading">
                 <strong>${action.title}</strong>
-                ${action.description !== undefined && action.description !== "" ? html`<small>${action.description}</small>` : null}
-                ${action.enabled === false && action.disabledReason !== undefined ? html`<small class="disabled-reason">${action.disabledReason}</small>` : null}
+                ${hasDescription ? nothing : group}
+                ${action.shortcut !== undefined ? html`<kbd>${formatShortcut(action.shortcut)}</kbd>` : nothing}
               </span>
-              ${action.shortcut !== undefined ? html`<kbd>${formatShortcut(action.shortcut)}</kbd>` : null}
-              ${action.group !== undefined && action.group !== "" ? html`<small class="group">${action.group}</small>` : null}
+              ${hasDescription ? html`<span class="details ui-selection-detail"><small class="description">${action.description}</small>${group}</span>` : nothing}
+              ${action.enabled === false && action.disabledReason !== undefined ? html`<small class="disabled-reason ui-selection-detail">${action.disabledReason}</small>` : nothing}
             </button>
-          `)}
+          `;
+          })}
         </div>
       </modal-surface>
     `;
@@ -95,27 +110,14 @@ export class ActionPalette extends LitElement {
     this.onRun?.(action);
   }
 
-  static override styles = css`
-    :host { position: fixed; inset: 0; z-index: 20; color: var(--pi-text); font: 14px system-ui, sans-serif; }
-    modal-surface { --palette-top: min(12dvh, 90px); --palette-bottom: max(20px, env(safe-area-inset-bottom)); --modal-surface-place-items: start center; --modal-surface-backdrop-padding: var(--palette-top) 20px var(--palette-bottom); --modal-surface-max-height: min(640px, calc(100dvh - var(--palette-top) - var(--palette-bottom))); }
-    header { display: grid; grid-template-columns: 1fr auto; gap: 8px; padding: 10px; border-bottom: 1px solid var(--pi-border); }
-    input { min-width: 0; border: 0; outline: none; background: transparent; color: var(--pi-text); font: var(--pi-control-font-size, 16px) var(--pi-control-font-family, system-ui, sans-serif); padding: 8px; }
-    input::placeholder { color: var(--pi-dim); }
-    button { border: 0; background: transparent; color: var(--pi-text); cursor: pointer; }
-    header button { color: var(--pi-muted); font-size: 22px; padding: 2px 8px; }
-    .options { flex: 1 1 auto; min-height: 0; overflow: auto; }
-    .options button { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 3px 12px; width: 100%; padding: 10px 12px; border-bottom: 1px solid var(--pi-border-muted); text-align: left; }
-    .options button.selected, .options button:hover:not(:disabled) { background: var(--pi-selection-bg); }
-    .options button:disabled { cursor: not-allowed; opacity: .68; }
-    .options button.disabled.selected { background: color-mix(in srgb, var(--pi-selection-bg) 55%, transparent); }
-    .main { min-width: 0; }
-    strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    small { display: block; color: var(--pi-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  static override styles = [uiDialogStyles, uiSelectionStyles, css`
+    .heading, .details { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; min-width: 0; }
+    strong { flex: 1 1 12ch; min-width: 0; }
+    .description { flex: 1 1 24ch; min-width: 0; font: inherit; }
     .disabled-reason { color: var(--pi-warning); }
-    .group { grid-column: 1 / -1; font-size: 12px; }
-    kbd { align-self: center; border: 1px solid var(--pi-border); border-radius: 6px; background: var(--pi-surface); color: var(--pi-muted); padding: 2px 6px; font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: nowrap; }
-    .empty { padding: 24px; color: var(--pi-muted); text-align: center; }
-  `;
+    .group { flex: 0 1 auto; min-width: 0; max-width: 100%; margin-inline-start: auto; text-align: end; font-size: 12px; }
+    kbd { flex: 0 1 auto; max-width: 100%; margin-inline-start: auto; align-self: center; border: 1px solid var(--pi-border); border-radius: 6px; background: var(--pi-surface); color: var(--pi-muted); padding: 2px 6px; font: 12px var(--pi-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace); white-space: normal; }
+  `];
 }
 
 export function filterActionPaletteActions(actions: readonly AppAction[], queryText: string): AppAction[] {

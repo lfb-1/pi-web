@@ -40,7 +40,7 @@ describe("settings-dialog session daemon machine targeting", () => {
     expect(getDialogProperty(dialog, "sessiondLoading")).toBe(false);
   });
 
-  it("reloads session-daemon config and refreshes the machine runtime together", async () => {
+  it("reloads session-daemon config and the machine runtime together", async () => {
     const config = configResponse({ spawnSessions: false, subsessions: true });
     const configSpy = vi.spyOn(configApi, "config").mockResolvedValue(config);
     const runtimeRefresh = vi.fn(() => Promise.resolve());
@@ -58,17 +58,17 @@ describe("settings-dialog session daemon machine targeting", () => {
   it("saves local session-daemon config through the local machine alias and updates local daemon state", async () => {
     stubWindowTimers();
     const gatewayConfig = configResponse({ host: "127.0.0.1", spawnSessions: false, subsessions: false });
-    const savedConfig = configResponse({ spawnSessions: true });
-    const saveSpy = vi.spyOn(configApi, "saveConfig").mockResolvedValue(savedConfig);
+    const savedConfig = configResponse({ spawnSessions: true, subsessions: false });
+    const saveSpy = vi.spyOn(configApi, "updateConfig").mockResolvedValue(savedConfig);
     const dialog = new SettingsDialog();
     setDialogProperty(dialog, "configResponse", gatewayConfig);
 
     await callDialogPromise(dialog, "saveSessiondConfig", { spawnSessions: true });
 
-    expect(saveSpy.mock.calls).toEqual([[{ spawnSessions: true }, "local"]]);
+    expect(saveSpy.mock.calls).toEqual([[{ set: { spawnSessions: true }, unset: [] }, "local"]]);
     expect(getDialogProperty(dialog, "sessiondConfigResponse")).toBe(savedConfig);
     expect(getDialogProperty(dialog, "configResponse")).toMatchObject({ config: { host: "127.0.0.1", spawnSessions: true, subsessions: false } });
-    expect(getDialogProperty(dialog, "savedMessage")).toBe("Config saved.");
+    expect(getDialogProperty(dialog, "savedMessage")).toBe("Session daemon settings saved for local. Restart the session daemon to apply agent permission changes. Restarting interrupts active sessions.");
     expect(getDialogProperty(dialog, "saving")).toBe(false);
   });
 
@@ -76,13 +76,13 @@ describe("settings-dialog session daemon machine targeting", () => {
     stubWindowTimers();
     const patch = { spawnSessions: false, subsessions: true };
     const saved = configResponse(patch);
-    const saveSpy = vi.spyOn(configApi, "saveConfig").mockResolvedValue(saved);
+    const saveSpy = vi.spyOn(configApi, "updateConfig").mockResolvedValue(saved);
     const dialog = new SettingsDialog();
     dialog.machine = remoteMachine;
 
     await callDialogPromise(dialog, "saveSessiondConfig", patch);
 
-    expect(saveSpy).toHaveBeenCalledWith(patch, remoteMachine.id);
+    expect(saveSpy).toHaveBeenCalledWith({ set: patch, unset: [] }, remoteMachine.id);
     expect(getDialogProperty(dialog, "sessiondConfigResponse")).toBe(saved);
   });
 
@@ -108,7 +108,7 @@ describe("settings-dialog session daemon machine targeting", () => {
   it("ignores stale session-daemon save responses after the selected machine changes", async () => {
     stubWindowTimers();
     const save = deferred<PiWebConfigResponse>();
-    vi.spyOn(configApi, "saveConfig").mockReturnValue(save.promise);
+    vi.spyOn(configApi, "updateConfig").mockReturnValue(save.promise);
     const dialog = new SettingsDialog();
     dialog.machine = remoteMachine;
 
@@ -131,7 +131,7 @@ describe("settings-dialog session daemon machine targeting", () => {
 
     await callDialogPromise(dialog, "loadSessiondConfigForTarget");
 
-    expect(getDialogProperty(dialog, "sessiondError")).toBe("Failed to load session-daemon config from Lab Mac (remote machine): Could not reach Lab Mac for selected-machine settings. Check the machine connection and try again.");
+    expect(getDialogProperty(dialog, "sessiondError")).toBe("Failed to load session-daemon config from Lab Mac (remote machine): Remote machine unavailable");
     expect(getDialogProperty(dialog, "sessiondLoading")).toBe(false);
   });
 });

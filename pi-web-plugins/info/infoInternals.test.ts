@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { PiWebComponentStatus, PiWebReleaseStatus, PiWebStatusResponse, PluginMachine, Workspace } from "@jmfederico/pi-web/plugin-api";
-import { componentDetails, componentHealth, diagnosticsSummary, formatVersion, installationLabel, machineKindLabel, releaseSummary, workspaceFlags } from "./infoInternals.js";
+import { componentHealth, createInfoContent } from "./infoInternals.js";
+import { LocalizationService } from "../../src/client/src/localization/service.js";
+
+const service = new LocalizationService({ preferences: { language: "en", formatLocale: "en-US", timeZone: "UTC" } });
+const { componentDetails, diagnosticsSummary, installationLabel, piVersionDriftNote, releaseSummary, workspaceFlags } = createInfoContent(service);
 
 describe("componentHealth", () => {
   it("reports current when the component is available and not stale", () => {
@@ -36,8 +40,8 @@ describe("releaseSummary", () => {
 });
 
 describe("componentDetails", () => {
-  it("combines versions, health, and installation into one line", () => {
-    expect(componentDetails(componentStatus())).toBe("running 1.0.0 · installed 1.0.0 · current · global npm package · /usr/lib/node_modules");
+  it("reports the Pi version as unknown when the component does not report one", () => {
+    expect(componentDetails(componentStatusWithoutPi())).toContain("pi unknown");
   });
 
   it("includes the component error when present", () => {
@@ -47,51 +51,61 @@ describe("componentDetails", () => {
   });
 });
 
+describe("piVersionDriftNote", () => {
+  it("is undefined when both components run the same Pi version", () => {
+    expect(piVersionDriftNote(componentStatus(), componentStatus({ component: "sessiond" }))).toBeUndefined();
+  });
+
+  it("names the session daemon Pi version when it differs from the web process", () => {
+    expect(piVersionDriftNote(componentStatus(), componentStatus({ component: "sessiond", piVersion: "0.83.0" }))).toBe("session daemon running 0.83.0");
+  });
+
+  it("stays quiet while the session daemon is unavailable or predates Pi version reporting", () => {
+    expect(piVersionDriftNote(componentStatus(), componentStatus({ component: "sessiond", available: false, piVersion: "0.83.0" }))).toBeUndefined();
+    expect(piVersionDriftNote(componentStatus(), componentStatusWithoutPi({ component: "sessiond" }))).toBeUndefined();
+    expect(piVersionDriftNote(componentStatusWithoutPi(), componentStatus({ component: "sessiond", piVersion: "0.83.0" }))).toBeUndefined();
+  });
+});
+
 describe("diagnosticsSummary", () => {
-  it("renders a full status block for bug reports", () => {
+  it("includes operational versions, installation paths and context for bug reports", () => {
     const summary = diagnosticsSummary({ status: statusResponse(), machine: machineFixture(), workspace: workspaceFixture() });
 
-    expect(summary).toBe([
-      "PI WEB diagnostics",
-      "Package: @jmfederico/pi-web",
-      "Web/UI: running 1.0.0 · installed 1.0.1 · restart needed · global npm package · /usr/lib/node_modules",
-      "Session daemon: running 1.0.0 · installed 1.0.0 · current · local checkout · /srv/dev/pi-web",
-      "Release: Update available: 1.1.0 (checked 2025-01-02T03:04:05Z)",
-      "Status generated: 2025-01-02T03:04:06Z",
-      "Machine: devbox (local machine)",
-      "Workspace: pi-web — /srv/dev/pi-web (provider: git, main workspace)",
-    ].join("\n"));
+    const lines = summary.split("\n");
+    const web = lines.find((line) => line.startsWith("Web/UI:"));
+    const sessiond = lines.find((line) => line.startsWith("Session daemon:"));
+    expect(web).toContain("running 1.0.0");
+    expect(web).toContain("installed 1.0.1");
+    expect(web).toContain("restart needed");
+    expect(web).toContain("/usr/lib/node_modules");
+    expect(sessiond).toContain("installed 1.0.0");
+    expect(sessiond).toContain("current");
+    expect(sessiond).toContain("/srv/dev/pi-web");
+    for (const detail of [
+      "@jmfederico/pi-web", "0.84.1", "1.1.0", "devbox", "git",
+      service.date(new Date("2025-01-02T03:04:05Z"), { dateStyle: "medium", timeStyle: "medium" }),
+      service.date(new Date("2025-01-02T03:04:06Z"), { dateStyle: "medium", timeStyle: "medium" }),
+    ]) {
+      expect(summary).toContain(detail);
+    }
   });
 
   it("degrades gracefully when the status and workspace are unavailable", () => {
     const summary = diagnosticsSummary({ status: undefined });
 
-    expect(summary).toBe([
-      "PI WEB diagnostics",
-      "Status: unavailable",
-      "Workspace: none selected",
-    ].join("\n"));
+    expect(summary).toContain("unavailable");
+    expect(summary).toContain("none selected");
+    expect(summary).not.toMatch(/undefined|null/);
   });
 });
 
 describe("small formatters", () => {
-  it("formats missing versions as unknown", () => {
-    expect(formatVersion(undefined)).toBe("unknown");
-    expect(formatVersion("")).toBe("unknown");
-    expect(formatVersion("1.0.0")).toBe("1.0.0");
-  });
-
   it("labels installations", () => {
     expect(installationLabel(undefined)).toBe("installation unknown");
     expect(installationLabel({ kind: "pi-package", source: "Pi package", scope: "user" })).toBe("Pi package · user");
     expect(installationLabel({ kind: "docker", dockerMode: "dev" })).toBe("Docker development runtime");
     expect(installationLabel({ kind: "docker" })).toBe("Docker runtime");
     expect(installationLabel({ kind: "unknown" })).toBe("installation unknown");
-  });
-
-  it("labels machine kinds", () => {
-    expect(machineKindLabel("local")).toBe("local machine");
-    expect(machineKindLabel("remote")).toBe("remote machine");
   });
 
   it("describes folder workspaces", () => {
@@ -111,11 +125,19 @@ function componentStatus(patch: Partial<PiWebComponentStatus> = {}): PiWebCompon
     label: "Web/UI",
     runtimeVersion: "1.0.0",
     installedVersion: "1.0.0",
+    piVersion: "0.84.1",
     stale: false,
     available: true,
     installation: { kind: "npm-global", path: "/usr/lib/node_modules" },
     ...patch,
   };
+}
+
+/** Component status from a host that predates Pi version reporting. */
+function componentStatusWithoutPi(patch: Partial<PiWebComponentStatus> = {}): PiWebComponentStatus {
+  const component = componentStatus(patch);
+  delete component.piVersion;
+  return component;
 }
 
 function release(patch: Partial<PiWebReleaseStatus> = {}): PiWebReleaseStatus {
@@ -154,7 +176,7 @@ function workspaceFixture(patch: Partial<Workspace> = {}): Workspace {
     isMain: true,
     provider: {
       pluginId: "git",
-      capabilities: { request: true, remove: true },
+      capabilities: { remove: true },
       metadata: { branch: "main" },
     },
     ...patch,

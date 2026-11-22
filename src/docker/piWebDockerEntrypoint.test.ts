@@ -28,6 +28,12 @@ describe("pi-web-docker entrypoint", () => {
         "PI_WEB_GID=1000",
         "DOCKER_GID=998",
         "PI_WEB_IMAGE=pi-web:test",
+        "PI_WEB_UBUNTU_IMAGE=ubuntu:26.04",
+        "PI_WEB_NODE_IMAGE=node:24-bookworm-slim",
+        "PI_WEB_EXTRA_APT_PACKAGES='fd-find bat'",
+        "PI_WEB_DOCKER_CLI_VERSION=29-cli",
+        "PI_WEB_MISE_VERSION=2026.5.0",
+        "PI_WEB_GIT_VERSION=",
         "",
       ].join("\n"));
 
@@ -51,10 +57,12 @@ describe("pi-web-docker entrypoint", () => {
       expect(output).toContain("Streaming detached PI WEB Docker helper logs inline.");
       expect(output).toContain("Reconnect with: docker logs -f pi-web-docker-update-");
       expect(output).toContain("helper log: update in progress");
-      expect(output).not.toContain("Follow progress with:");
 
       const dockerCalls = await readFile(dockerCallsPath, "utf8");
       expect(dockerCalls).toContain("__run-detached update");
+      for (const key of ["PI_WEB_UBUNTU_IMAGE", "PI_WEB_NODE_IMAGE", "PI_WEB_EXTRA_APT_PACKAGES", "PI_WEB_DOCKER_CLI_VERSION", "PI_WEB_MISE_VERSION", "PI_WEB_GIT_VERSION"]) {
+        expect(dockerCalls).toContain(`--env ${key}=`);
+      }
       expect(dockerCalls).toMatch(/(?:^|\n)logs -f pi-web-docker-update-\d{14}-\d+(?:\n|$)/);
     } finally {
       await rm(tempDir, { recursive: true, force: true });

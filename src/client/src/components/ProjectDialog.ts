@@ -1,12 +1,32 @@
+import { LocalizationController } from "../localization/browser";
+import { projectWorkspaceMessages as messages } from "../projectWorkspaceMessages";
+import { stylesheetIntegrationCapability } from "../plugins/styles";
 import { LitElement, html } from "lit";
 import { customElement, property, query, state } from "lit/decorators.js";
-import { api, type FileSuggestion } from "../api";
+import { api, trustApi, type FileSuggestion } from "../api";
+import type { ProjectTrustChoice } from "../controllers/projectController";
 import { css } from "lit";
 import "./ModalSurface";
+import { uiDialogStyles, uiFormStyles, uiSelectionStyles } from "./ui/dialogStyles";
+
+/** Server-resolved trust state for the entered path, keyed on the decided path. */
+interface ProjectTrustState {
+  path: string;
+  decision: boolean | null;
+  trusted: boolean;
+  loading: boolean;
+  error?: string;
+}
 
 @customElement("project-dialog")
 export class ProjectDialog extends LitElement {
-  @property({ attribute: false }) onSubmit?: (path: string, create: boolean) => void;
+  constructor() {
+    super();
+    stylesheetIntegrationCapability.createController(this);
+    new LocalizationController(this);
+  }
+
+  @property({ attribute: false }) onSubmit?: (path: string, create: boolean, trust: ProjectTrustChoice | undefined) => void;
   @property({ attribute: false }) onCancel?: () => void;
   @property() machineId = "local";
   @state() private path = "";
@@ -14,9 +34,16 @@ export class ProjectDialog extends LitElement {
   @state() private suggestions: FileSuggestion[] = [];
   @state() private selected = 0;
   @state() private loading = false;
+  @state() private suggestionError = false;
+  @state() private trust: ProjectTrustState | undefined;
+  @state() private trustTouched = false;
   @query("input") private pathInput?: HTMLInputElement;
 
-  private requestId = 0;
+  // Separate staleness counters: setPath fires both loaders, so a shared one
+  // would make the trust read invalidate every in-flight suggestions request
+  // (leaving "Loading folders…" up forever).
+  private suggestionRequestId = 0;
+  private trustRequestId = 0;
 
   override connectedCallback(): void {
     super.connectedCallback();
@@ -24,24 +51,28 @@ export class ProjectDialog extends LitElement {
   }
 
   private async loadSuggestions() {
-    const requestId = ++this.requestId;
+    const requestId = ++this.suggestionRequestId;
     this.loading = true;
+    this.suggestionError = false;
+    this.suggestions = [];
     try {
       const suggestions = await api.projectDirectories(this.path, this.machineId);
-      if (requestId !== this.requestId) return;
+      if (requestId !== this.suggestionRequestId) return;
       this.suggestions = suggestions;
       this.selected = Math.min(this.selected, Math.max(0, suggestions.length - 1));
     } catch {
-      if (requestId === this.requestId) this.suggestions = [];
+      if (requestId === this.suggestionRequestId) this.suggestionError = true;
     } finally {
-      if (requestId === this.requestId) this.loading = false;
+      if (requestId === this.suggestionRequestId) this.loading = false;
     }
   }
 
   private setPath(value: string) {
     this.path = value;
     this.selected = 0;
+    this.trustTouched = false;
     void this.loadSuggestions();
+    void this.loadTrust();
   }
 
   private pick(suggestion: FileSuggestion) {
@@ -50,7 +81,7 @@ export class ProjectDialog extends LitElement {
 
   private submit() {
     if (this.path.trim() === "") return;
-    this.onSubmit?.(this.path, this.createMissing);
+    this.onSubmit?.(this.path, this.createMissing, this.trust === undefined ? undefined : { trusted: this.trust.trusted, changed: this.trustTouched });
   }
 
   private onPathInput(event: InputEvent) {
@@ -61,6 +92,61 @@ export class ProjectDialog extends LitElement {
   private onCreateMissingChange(event: InputEvent) {
     if (!(event.target instanceof HTMLInputElement)) return;
     this.createMissing = event.target.checked;
+  }
+
+  /**
+   * Server-resolved existing trust for the entered path (never the raw path
+   * trusted verbatim). Dropped when a newer path input or an explicit user
+   * toggle supersedes it, so a stale read can not clobber the user's choice.
+   */
+  private async loadTrust() {
+    const requestId = ++this.trustRequestId;
+    const trimmed = this.path.trim();
+    if (trimmed === "") {
+      if (requestId === this.trustRequestId) this.trust = undefined;
+      return;
+    }
+    if (requestId === this.trustRequestId) {
+      // Keep the previous value visible (cosmetic continuity) while the read
+      // for the new path is in flight; the result replaces it either way.
+      this.trust = {
+        path: trimmed,
+        decision: this.trust?.decision ?? null,
+        trusted: this.trust?.trusted ?? false,
+        loading: true,
+      };
+    }
+    try {
+      const result = await trustApi.projectTrust(trimmed, this.machineId);
+      if (requestId !== this.trustRequestId || this.trustTouched) return;
+      this.trust = { path: result.path, decision: result.decision, trusted: result.trusted, loading: false };
+    } catch (error) {
+      if (requestId !== this.trustRequestId || this.trustTouched) return;
+      this.trust = { path: trimmed, decision: null, trusted: false, loading: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  private onTrustChange(checked: boolean) {
+    this.trustTouched = true;
+    if (this.trust !== undefined) this.trust = { ...this.trust, trusted: checked, loading: false };
+  }
+
+  private renderTrustChoice() {
+    const unavailable = this.trust === undefined || this.trust.loading || this.trust.error !== undefined;
+    return html`
+      <label class="check ui-checkbox-field">
+        <input type="checkbox" aria-describedby=${this.trust?.error === undefined ? "project-trust-help" : "project-trust-help project-trust-error"} .checked=${this.trust?.trusted ?? false} ?disabled=${unavailable} @change=${(event: InputEvent) => { if (event.target instanceof HTMLInputElement) this.onTrustChange(event.target.checked); }} />
+        <span>${messages.t("trustProject")}</span>
+      </label>
+      <small id="project-trust-help" class="trust-hint">
+        ${messages.t("trustHelp")}
+        <a href="https://pi.dev/docs/latest/security" target="_blank" rel="noreferrer">${messages.t("learnTrust")}</a>
+      </small>
+      ${this.trust?.error === undefined ? null : html`
+        <small id="project-trust-error" class="trust-error ui-form-error" role="alert">${messages.t("trustError", { error: this.trust.error })}</small>
+        <button class="ui-button" type="button" @click=${() => { void this.loadTrust(); }}>${messages.t("retryTrust")}</button>
+      `}
+    `;
   }
 
   // Escape and backdrop presses are owned by the modal surface (routed to
@@ -91,56 +177,55 @@ export class ProjectDialog extends LitElement {
       <modal-surface
         .onClose=${() => this.onCancel?.()}
         .initialFocus=${"input"}
-        .label=${"Add project"}
+        .label=${messages.t("addProject")}
         @keydown=${(event: KeyboardEvent) => { this.onKeyDown(event); }}
       >
-        <header>
-          <strong>Add project</strong>
-          <button @click=${() => { this.onCancel?.(); }} aria-label="Close">×</button>
+        <form class="ui-form" @submit=${(event: SubmitEvent) => { event.preventDefault(); }}>
+        <header class="ui-dialog-header">
+          <strong class="ui-dialog-title">${messages.t("addProject")}</strong>
+          <button class="ui-button ui-button--icon" type="button" @click=${() => { this.onCancel?.(); }} aria-label=${messages.t("closeAdd")}>×</button>
         </header>
-        <div class="body">
-          <label>
-            Project folder
-            <input .value=${this.path} @input=${(event: InputEvent) => { this.onPathInput(event); }} placeholder="/path/to/project or ~/code/project" />
+        <div class="body ui-dialog-body ui-form-body">
+          <small id="project-machine-help" class="machine-hint">${this.machineId === "local" ? messages.t("localFolders") : messages.t("remoteFolders", { machine: this.machineId })}</small>
+          <label class="ui-form-field">
+            ${messages.t("folder")}
+            <input class="ui-input" dir="ltr" aria-describedby=${this.suggestionError ? "project-machine-help project-folder-error" : "project-machine-help project-folder-status"} .value=${this.path} @input=${(event: InputEvent) => { this.onPathInput(event); }} placeholder=${messages.t("folderPlaceholder")} />
           </label>
-          <div class="suggestions">
-            ${this.loading ? html`<div class="hint">Loading folders…</div>` : null}
+          ${this.suggestionError ? html`
+            <div id="project-folder-error" class="trust-error ui-form-error" role="alert">${messages.t("folderError")}</div>
+            <button class="ui-button" type="button" @click=${() => { void this.loadSuggestions(); }}>${messages.t("retryFolders")}</button>
+          ` : null}
+          <div id="project-folder-status" class="suggestions ui-selection-list" aria-live="polite">
+            ${this.loading ? html`<div class="hint">${messages.t("loadingFolders")}</div>` : null}
             ${this.suggestions.map((suggestion, index) => html`
-              <button class=${index === this.selected ? "selected" : ""} @click=${() => { this.pick(suggestion); }}>
-                ${suggestion.path}
+              <button type="button" class=${`ui-button ui-selection-option ${index === this.selected ? "selected" : ""}`} @click=${() => { this.pick(suggestion); }}>
+                <bdi dir="ltr">${suggestion.path}</bdi>
               </button>
             `)}
-            ${!this.loading && this.suggestions.length === 0 ? html`<div class="hint">No matching folders. Enter a new path to create it.</div>` : null}
+            ${!this.loading && !this.suggestionError && this.suggestions.length === 0 ? html`<div class="hint">${messages.t("noFolders")}</div>` : null}
           </div>
-          <label class="check">
+          <label class="check ui-checkbox-field">
             <input type="checkbox" .checked=${this.createMissing} @change=${(event: InputEvent) => { this.onCreateMissingChange(event); }} />
-            Create the folder if it does not exist
+            ${messages.t("createFolder")}
           </label>
+          ${this.renderTrustChoice()}
         </div>
-        <footer>
-          <button @click=${() => { this.onCancel?.(); }}>Cancel</button>
-          <button class="primary" ?disabled=${this.path.trim() === ""} @click=${() => { this.submit(); }}>Add project</button>
+        <footer class="ui-dialog-footer">
+          <button class="ui-button" type="button" @click=${() => { this.onCancel?.(); }}>${messages.t("cancel")}</button>
+          <button class="ui-button ui-button--primary" type="button" ?disabled=${this.path.trim() === ""} @click=${() => { this.submit(); }}>${messages.t("addProject")}</button>
         </footer>
+        </form>
       </modal-surface>
     `;
   }
 
-  static override styles = css`
-    :host { position: fixed; inset: 0; z-index: 30; color: var(--pi-text); font: 14px system-ui, sans-serif; }
-    modal-surface { --modal-surface-place-items: start center; --modal-surface-backdrop-padding: min(12vh, 90px) 0 0; --modal-surface-width: min(720px, calc(100vw - 40px)); --modal-surface-max-height: min(700px, calc(100vh - 40px)); }
-    header, footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 12px; border-bottom: 1px solid var(--pi-border); }
-    footer { border-top: 1px solid var(--pi-border); border-bottom: 0; justify-content: end; }
-    .body { display: grid; gap: 12px; padding: 12px; min-height: 0; }
-    label { display: grid; gap: 6px; color: var(--pi-muted); }
-    input[type="text"], input:not([type]) { box-sizing: border-box; width: 100%; border: 1px solid var(--pi-border); border-radius: 8px; background: var(--pi-bg); color: var(--pi-text); padding: 9px; font: var(--pi-control-font-size, 16px) var(--pi-control-monospace-font-family, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace); }
-    .check { display: flex; grid-template-columns: auto 1fr; align-items: center; color: var(--pi-text); }
-    .suggestions { min-height: 90px; max-height: 320px; overflow: auto; border: 1px solid var(--pi-border); border-radius: 8px; background: var(--pi-surface); }
-    .suggestions button { display: block; width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border: 0; border-bottom: 1px solid var(--pi-border); border-radius: 0; background: transparent; color: var(--pi-text); padding: 8px 10px; text-align: left; font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-    .suggestions button.selected, .suggestions button:hover { background: var(--pi-selection-bg); }
+  static override styles = [uiDialogStyles, uiFormStyles, uiSelectionStyles, css`
+    :host { --ui-dialog-max-height: 700px; --ui-input-font-family: var(--pi-control-monospace-font-family, var(--pi-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace)); }
+    .suggestions { min-height: 90px; max-height: 320px; }
+    .suggestions button { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 13px var(--pi-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace); }
     .hint { padding: 12px; color: var(--pi-muted); }
-    button { border: 1px solid var(--pi-border); border-radius: 8px; background: var(--pi-surface); color: var(--pi-text); padding: 7px 9px; cursor: pointer; }
-    header button { border: 0; background: transparent; color: var(--pi-muted); font-size: 22px; padding: 0 8px; }
-    .primary { border-color: var(--pi-success-border); background: var(--pi-success-border); }
-    button:disabled { opacity: .5; cursor: not-allowed; }
-  `;
+    .trust-error { color: var(--pi-danger, #c0392b); }
+    .trust-hint, .machine-hint { color: var(--pi-muted); line-height: 1.3; }
+    .trust-hint a { color: var(--pi-accent); }
+  `];
 }

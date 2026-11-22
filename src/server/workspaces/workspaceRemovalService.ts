@@ -1,12 +1,13 @@
 import { isAbsolute, parse, relative, resolve, sep } from "node:path";
 import type { TerminalCommandRun, WorkspaceListing } from "../../shared/apiTypes.js";
-import { workspaceDeletionMetadata } from "../../shared/workspaceDeletion.js";
+import { workspaceDeleteOperation, workspaceDeletionMetadata } from "../../shared/workspaceDeletion.js";
+import type { ServerNoticeCreator } from "../notices/serverNoticeService.js";
 import {
   requireWorkspaceRemovalPrecondition,
   WORKSPACE_REMOVAL_OPERATION_TIMEOUT_MS,
 } from "../../shared/workspaceRemovalProtocol.js";
 import type { Project } from "../types.js";
-import type { RunTerminalCommandOptions } from "../terminals/terminalService.js";
+import type { RunTerminalCommandOptions } from "../terminals/requiredTerminalService.js";
 import {
   WorkspaceProviderRemovalError,
   type WorkspaceProviderRemovalTarget,
@@ -34,6 +35,10 @@ export interface WorkspaceRemovalTerminalHost {
 export interface WorkspaceRemovalServiceOptions {
   timeoutMs?: number;
   preRemoveHook?: WorktreePreRemoveHookProbe;
+  /** Records non-cancelled removal failures before the request reports them. */
+  notices?: Pick<ServerNoticeCreator, "record">;
+  /** Requests discovery after admission and again when the command settles. */
+  onMutation?: (projectId: string) => void;
 }
 
 interface WorkspaceRemovalFlight {
@@ -60,7 +65,11 @@ export class WorkspaceRemovalError extends Error {
 export class WorkspaceRemovalService {
   private readonly timeoutMs: number;
   private readonly preRemoveHook: WorktreePreRemoveHookProbe;
+  private readonly notices: Pick<ServerNoticeCreator, "record"> | undefined;
+  private readonly onMutation: ((projectId: string) => void) | undefined;
   private readonly flights = new Map<string, WorkspaceRemovalFlight>();
+  private readonly shutdown = new AbortController();
+  private closePromise: Promise<void> | undefined;
 
   constructor(
     private readonly providers: WorkspaceRemovalProvider,
@@ -69,6 +78,8 @@ export class WorkspaceRemovalService {
   ) {
     this.timeoutMs = positiveInteger(options.timeoutMs ?? WORKSPACE_REMOVAL_OPERATION_TIMEOUT_MS, "timeoutMs");
     this.preRemoveHook = options.preRemoveHook ?? realWorktreePreRemoveHookProbe;
+    this.notices = options.notices;
+    this.onMutation = options.onMutation;
   }
 
   async remove(
@@ -77,6 +88,7 @@ export class WorkspaceRemovalService {
     precondition: string,
     signal?: AbortSignal,
   ): Promise<TerminalCommandRun> {
+    throwIfAborted(this.shutdown.signal);
     let expectedPrecondition: string;
     try {
       expectedPrecondition = requireWorkspaceRemovalPrecondition(precondition);
@@ -112,6 +124,21 @@ export class WorkspaceRemovalService {
       () => { this.finishFlight(key, flight); },
     );
     return await this.waitForFlight(flight, signal);
+  }
+
+  /** Cancels removal orchestration before the required Terminal capability is disposed. */
+  closeAll(reason = "Session daemon shutdown"): Promise<void> {
+    this.closePromise ??= this.closeRemovalFlights(reason);
+    return this.closePromise;
+  }
+
+  private async closeRemovalFlights(reason: string): Promise<void> {
+    if (!this.shutdown.signal.aborted) this.shutdown.abort(new DOMException(reason, "AbortError"));
+    const flights = [...this.flights.values()];
+    for (const flight of flights) {
+      if (!flight.controller.signal.aborted) flight.controller.abort(abortError(this.shutdown.signal));
+    }
+    await Promise.allSettled(flights.map(({ promise }) => promise));
   }
 
   private async executeRemoval(
@@ -164,8 +191,15 @@ export class WorkspaceRemovalService {
             workspaceId: commandWorkspace.id,
             cwd: commandWorkspace.path,
             title: plan.title,
+            ...(plan.titlePresentation === undefined ? {} : { titlePresentation: plan.titlePresentation }),
             command,
             metadata: workspaceDeletionMetadata(target),
+            ...(this.onMutation === undefined ? {} : { onSettled: () => { this.onMutation?.(project.id); } }),
+            failureNotice: {
+              message: "Workspace removal failed. See terminal output.",
+              presentation: { kind: "workspaceRemovalCommandFailed" },
+              context: { targetWorkspaceId: target.id },
+            },
           });
         } catch (error) {
           throw new WorkspaceRemovalError(
@@ -176,10 +210,22 @@ export class WorkspaceRemovalService {
         }
       });
     } catch (error) {
-      if (error instanceof WorkspaceRemovalDeadlineError) {
-        throw new WorkspaceRemovalError(error.message, 504, { cause: error });
-      }
-      throw error;
+      const failure = error instanceof WorkspaceRemovalDeadlineError
+        ? new WorkspaceRemovalError(error.message, 504, { cause: error })
+        : error;
+      if (!isAbortError(failure)) this.notices?.record({
+        severity: "error",
+        message: `Workspace removal failed: ${errorMessage(failure)}`,
+        presentation: { kind: "workspaceRemovalFailed", detail: errorMessage(failure) },
+        source: workspaceDeleteOperation,
+        scope: { projectId: project.id },
+        context: { targetWorkspaceId: workspaceId },
+      });
+      throw failure;
+    } finally {
+      // The command runs after this request returns. Refresh now, and again on
+      // settlement so discovery performed mid-command cannot leave stale state.
+      this.onMutation?.(project.id);
     }
   }
 
@@ -339,6 +385,10 @@ function isSameOrAncestor(ancestor: string, descendant: string): boolean {
 
 function throwIfAborted(signal: AbortSignal | undefined): void {
   if (signal?.aborted === true) throw abortError(signal);
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
 }
 
 function abortError(signal: AbortSignal | undefined): Error {

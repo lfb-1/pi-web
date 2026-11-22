@@ -1,10 +1,11 @@
-import type { AskUserSubmission, DeleteWorkspaceFileResponse, ExtensionDialogAnswer, FileSuggestion, MoveWorkspaceFileOptions, PiPackageInstallRequest, PiPackageRemoveRequest, PiPackageScope, PiPackageUpdateRequest, PiWebConfigValues, PromptAttachment, RunTerminalCommandInput, SessionBulkMutationRef, SessionCleanupRequest, SessionNotificationDismissThrough, SessionRef, SessionTreeForkRequest, SessionTreeForkResult, SessionTreeNavigateRequest, SessionUnreadAcknowledgeRequest, TerminalCommandRun, TerminalCommandRunFilter, WorkspaceRemovalRequest, WriteWorkspaceFileOptions } from "../../../shared/apiTypes";
+import { parseSessionDefaults } from "../../../shared/sessionDefaults";
+import type { SessionDefaultsUpdate } from "../../../shared/apiTypes";
+import type { AskUserSubmission, DeleteWorkspaceFileResponse, ExtensionDialogAnswer, FileSuggestion, MoveWorkspaceFileOptions, PiPackageInstallRequest, PiPackageRemoveRequest, PiPackageScope, PiPackageUpdateRequest, PiWebConfigValues, PromptAttachment, ServerNoticeDismissRequest, SessionBulkMutationRef, SessionCleanupRequest, SessionModelScopeMode, SessionNotificationDismissThrough, SessionQueueMessageMutation, SessionRef, SessionTreeForkRequest, SessionTreeForkResult, SessionTreeNavigateRequest, SessionUnreadAcknowledgeRequest, WorkspaceRemovalRequest, WriteWorkspaceFileOptions } from "../../../shared/apiTypes";
 import { resolveAppUrl } from "../appUrl";
 import { request } from "./http";
 import {
   arrayOf,
   parseAborted,
-  parseAskUserCloseResponse,
   parseAccepted,
   parseArchived,
   parseAuthProvidersResponse,
@@ -22,6 +23,8 @@ import {
   parseMachinesResponse,
   parseMessagePage,
   parseModelSelectionResponse,
+  parseMcpAuthServersResponse,
+  parseSessionModelCatalogResponse,
   parseMoveWorkspaceFileResponse,
   parseOAuthFlowState,
   parsePiPackageMutationResponse,
@@ -39,24 +42,26 @@ import {
   parseSessionCleanupExecuteResponse,
   parseSessionCleanupPreviewResponse,
   parseSessionInfo,
+  parseSessionLocation,
   parseSessionNotificationInboxSnapshot,
+  parseServerNoticeSnapshot,
   parseSessionStatus,
   parseSessionUnreadCatalogSnapshot,
   parseSessionStreamSnapshot,
+  parseSessionTranscriptSnapshot,
   parseSessionTreeForkResult,
   parseSessionTreeNavigateResult,
   parseSlashCommand,
   parseStopped,
-  parseTerminalCommandRun,
-  parseTerminalInfo,
   parseThinkingLevelsResponse,
   parseWriteWorkspaceFileResponse,
   parseWorkspaceProviderResolution,
+  parseWorkspaceTrustResponse,
   requireMachineStatusSnapshot,
 } from "./parsers";
-import { messagePath } from "./urls";
+import { messagePath, streamSnapshotPath, transcriptSnapshotPath } from "./urls";
 
-const machinePrefix = (machineId = "local") => `api/machines/${encodeURIComponent(machineId)}`;
+export const machinePrefix = (machineId = "local") => `api/machines/${encodeURIComponent(machineId)}`;
 
 function sessionBasePath(session: SessionRef, machineId = "local"): string {
   return `${machinePrefix(machineId)}/sessions/${encodeURIComponent(session.id)}`;
@@ -98,7 +103,9 @@ export const piWebApi = {
 
 export const machinesApi = {
   machines: () => request("api/machines", parseMachinesResponse),
+  machine: (machineId: string) => request(`api/machines/${encodeURIComponent(machineId)}`, parseMachine),
   addMachine: (input: { name: string; baseUrl: string; token?: string }) => request("api/machines", parseMachine, { method: "POST", body: JSON.stringify(input) }),
+  updateMachine: (machineId: string, input: { name: string }) => request(`api/machines/${encodeURIComponent(machineId)}`, parseMachine, { method: "PATCH", body: JSON.stringify(input) }),
   deleteMachine: (machineId: string) => request(`api/machines/${encodeURIComponent(machineId)}`, (value) => value, { method: "DELETE" }),
   health: (machineId: string) => request(`api/machines/${encodeURIComponent(machineId)}/health`, parseMachineHealth),
   runtime: (machineId: string, refresh = false) => request(`api/machines/${encodeURIComponent(machineId)}/runtime${refresh ? "?refresh=1" : ""}`, parseMachineRuntime, refresh ? { cache: "no-store" } : {}),
@@ -113,7 +120,9 @@ function pluginsPath(machineId?: string): string {
 }
 
 export const configApi = {
+  namingModels: (machineId = "local") => request(`${machinePrefix(machineId)}/models`, parseModelSelectionResponse),
   config: (machineId?: string) => request(configPath(machineId), parsePiWebConfigResponse),
+  updateConfig: (update: { set?: PiWebConfigValues; unset?: string[] }, machineId?: string) => request(configPath(machineId), parsePiWebConfigResponse, { method: "PATCH", body: JSON.stringify(update) }),
   saveConfig: (config: PiWebConfigValues, machineId?: string) => request(configPath(machineId), parsePiWebConfigResponse, { method: "PUT", body: JSON.stringify({ config }) }),
 };
 
@@ -146,6 +155,14 @@ export const machineStatusApi = {
   machineStatus: (machineId = "local") => request(`${machinePrefix(machineId)}/status`, requireMachineStatusSnapshot),
 };
 
+export const noticesApi = {
+  snapshot: (machineId = "local") => request(`${machinePrefix(machineId)}/notices`, parseServerNoticeSnapshot, { cache: "no-store" }),
+  dismiss: (machineId: string, daemonInstanceId: string, noticeId: string) => {
+    const body: ServerNoticeDismissRequest = { daemonInstanceId, noticeId };
+    return request(`${machinePrefix(machineId)}/notices/dismiss`, parseServerNoticeSnapshot, { method: "POST", body: JSON.stringify(body) });
+  },
+};
+
 export const projectsApi = {
   projects: (machineId = "local") => request(`${machinePrefix(machineId)}/projects`, arrayOf(parseProject)),
   addProject: (path: string, name?: string, create?: boolean, machineId = "local") => request(`${machinePrefix(machineId)}/projects`, parseProject, { method: "POST", body: JSON.stringify({ path, name, create }) }),
@@ -153,7 +170,7 @@ export const projectsApi = {
   projectDirectories: (query: string, machineId = "local") => request(`${machinePrefix(machineId)}/project-directories?q=${encodeURIComponent(query)}`, arrayOf(parseFileSuggestion)),
 };
 
-function workspaceResolution(projectId: string, machineId = "local") {
+function workspaceResolution(projectId: string, machineId = "local", options?: { signal?: AbortSignal }) {
   return request(
     `${machinePrefix(machineId)}/projects/${encodeURIComponent(projectId)}/workspaces`,
     (value) => {
@@ -161,24 +178,33 @@ function workspaceResolution(projectId: string, machineId = "local") {
       if (resolution.projectId !== projectId) throw new Error("Workspace resolution did not match the requested project");
       return resolution;
     },
+    options?.signal === undefined ? undefined : { signal: options.signal },
   );
 }
 
 export const workspacesApi = {
   workspaceResolution,
-  workspaces: async (projectId: string, machineId = "local") => [
-    ...(await workspaceResolution(projectId, machineId)).workspaces,
+  workspaces: async (projectId: string, machineId = "local", options?: { signal?: AbortSignal }) => [
+    ...(await workspaceResolution(projectId, machineId, options)).workspaces,
   ],
   deleteWorkspace: (projectId: string, workspaceId: string, precondition: string, machineId = "local") => {
     const body: WorkspaceRemovalRequest = { precondition };
     return request(
       `${machinePrefix(machineId)}/projects/${encodeURIComponent(projectId)}/workspaces/${encodeURIComponent(workspaceId)}`,
-      parseTerminalCommandRun,
+      (value): unknown => value,
       { method: "DELETE", body: JSON.stringify(body) },
     );
   },
-  workspaceTree: (projectId: string, workspaceId: string, path = "", machineId = "local") => request(`${machinePrefix(machineId)}/projects/${encodeURIComponent(projectId)}/workspaces/${encodeURIComponent(workspaceId)}/tree?path=${encodeURIComponent(path)}`, parseFileTreeResponse),
-  workspaceFile: (projectId: string, workspaceId: string, path: string, machineId = "local") => request(`${machinePrefix(machineId)}/projects/${encodeURIComponent(projectId)}/workspaces/${encodeURIComponent(workspaceId)}/file?path=${encodeURIComponent(path)}`, parseFileContentResponse),
+  workspaceTree: (projectId: string, workspaceId: string, path = "", machineId = "local", options?: { signal?: AbortSignal }) => request(
+    `${machinePrefix(machineId)}/projects/${encodeURIComponent(projectId)}/workspaces/${encodeURIComponent(workspaceId)}/tree?path=${encodeURIComponent(path)}`,
+    parseFileTreeResponse,
+    options?.signal === undefined ? undefined : { signal: options.signal },
+  ),
+  workspaceFile: (projectId: string, workspaceId: string, path: string, machineId = "local", options?: { signal?: AbortSignal }) => request(
+    `${machinePrefix(machineId)}/projects/${encodeURIComponent(projectId)}/workspaces/${encodeURIComponent(workspaceId)}/file?path=${encodeURIComponent(path)}`,
+    parseFileContentResponse,
+    options?.signal === undefined ? undefined : { signal: options.signal },
+  ),
   writeWorkspaceFile: (projectId: string, workspaceId: string, path: string, content: string | Uint8Array, options?: WriteWorkspaceFileOptions, machineId = "local") => {
     const params = new URLSearchParams({ path });
     if (options?.createDirs === false) params.set("createDirs", "false");
@@ -208,8 +234,22 @@ export const workspacesApi = {
 };
 
 export const sessionsApi = {
-  sessions: (cwd: string, machineId = "local") => request(`${machinePrefix(machineId)}/sessions?cwd=${encodeURIComponent(cwd)}`, arrayOf(parseSessionInfo)),
+  sessions: (cwd: string, machineId = "local", options?: { signal?: AbortSignal }) => request(
+    `${machinePrefix(machineId)}/sessions?cwd=${encodeURIComponent(cwd)}`,
+    arrayOf(parseSessionInfo),
+    options?.signal === undefined ? undefined : { signal: options.signal },
+  ),
+  sessionLocation: (sessionId: string, machineId = "local", options?: { signal?: AbortSignal; timeoutMs?: number }) => request(
+    `${machinePrefix(machineId)}/sessions/${encodeURIComponent(sessionId)}/location`,
+    parseSessionLocation,
+    {
+      cache: "no-store",
+      ...(options?.signal === undefined ? {} : { signal: options.signal }),
+      ...(options?.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+    },
+  ),
   unreadCatalog: (machineId = "local") => request(`${machinePrefix(machineId)}/sessions/unread`, parseSessionUnreadCatalogSnapshot, { cache: "no-store" }),
+  markUnread: (session: SessionRef, machineId = "local") => request(sessionPath(session, "unread", machineId), parseSessionUnreadCatalogSnapshot, { method: "POST", body: JSON.stringify({ cwd: session.cwd }) }),
   acknowledgeUnread: (session: SessionRef, catalogId: string, throughCompletionOrder: number, machineId = "local") => {
     const body: SessionUnreadAcknowledgeRequest = { cwd: session.cwd, catalogId, throughCompletionOrder };
     return request(sessionPath(session, "unread/acknowledge", machineId), parseSessionUnreadCatalogSnapshot, { method: "POST", body: JSON.stringify(body) });
@@ -224,16 +264,26 @@ export const sessionsApi = {
   deleteArchivedMany: (sessions: readonly SessionRef[], machineId = "local") => request(`${machinePrefix(machineId)}/sessions/bulk/delete-archived`, parseSessionBulkDeleteArchivedResponse, { method: "POST", body: sessionBulkMutationBody(sessions) }),
   messages: (session: SessionRef, options?: { limit?: number; before?: number }, machineId = "local") => request(messagePath(session, options, machineId), parseMessagePage),
   status: (session: SessionRef, machineId = "local") => request(sessionQueryPath(session, "status", machineId), parseSessionStatus),
-  streamSnapshot: (session: SessionRef, machineId = "local") => request(sessionQueryPath(session, "stream-snapshot", machineId), parseSessionStreamSnapshot),
+  streamSnapshot: (session: SessionRef, machineId = "local") => request(streamSnapshotPath(session, machineId), parseSessionStreamSnapshot),
+  transcriptSnapshot: (session: SessionRef, options?: { limit?: number; signal?: AbortSignal; timeoutMs?: number }, machineId = "local") => request(
+    transcriptSnapshotPath(session, options, machineId), parseSessionTranscriptSnapshot,
+    { ...(options?.signal === undefined ? {} : { signal: options.signal }), ...(options?.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }) },
+  ),
+  mutateQueuedMessage: (session: SessionRef, mutation: SessionQueueMessageMutation, machineId = "local") => request(sessionPath(session, "queue/message", machineId), parseSessionStatus, { method: "POST", body: sessionBody(session, { ...mutation }) }),
   clearQueue: (session: SessionRef, machineId = "local") => request(sessionPath(session, "queue/clear", machineId), parseSessionStatus, { method: "POST", body: sessionBody(session) }),
   dismissWarning: (session: SessionRef, dismissId: string, machineId = "local") => request(sessionPath(session, "warnings/dismiss", machineId), parseSessionStatus, { method: "POST", body: sessionBody(session, { dismissId }) }),
-  submitAsk: (session: SessionRef, askId: string, submission: AskUserSubmission, machineId = "local") => request(sessionPath(session, "ask/submit", machineId), parseAskUserCloseResponse, { method: "POST", body: sessionBody(session, { askId, answers: submission.answers }) }),
-  cancelAsk: (session: SessionRef, askId: string, machineId = "local") => request(sessionPath(session, "ask/cancel", machineId), parseAskUserCloseResponse, { method: "POST", body: sessionBody(session, { askId }) }),
+  submitAsk: (session: SessionRef, askId: string, submission: AskUserSubmission, machineId = "local") => request(sessionPath(session, "ask/submit", machineId), parseSessionStatus, { method: "POST", body: sessionBody(session, { askId, answers: submission.answers }) }),
+  cancelAsk: (session: SessionRef, askId: string, machineId = "local") => request(sessionPath(session, "ask/cancel", machineId), parseSessionStatus, { method: "POST", body: sessionBody(session, { askId }) }),
   answerDialog: (session: SessionRef, dialogId: string, value: ExtensionDialogAnswer, machineId = "local") => request(sessionPath(session, "dialogs/answer", machineId), parseExtensionDialogCloseResponse, { method: "POST", body: sessionBody(session, { dialogId, value }) }),
   cancelDialog: (session: SessionRef, dialogId: string, machineId = "local") => request(sessionPath(session, "dialogs/cancel", machineId), parseExtensionDialogCloseResponse, { method: "POST", body: sessionBody(session, { dialogId }) }),
   models: (session: SessionRef, machineId = "local") => request(sessionQueryPath(session, "models", machineId), parseModelSelectionResponse),
+  modelCatalog: (session: SessionRef, machineId = "local") => request(sessionQueryPath(session, "models/catalog", machineId), parseSessionModelCatalogResponse),
+  setModelEnabled: (session: SessionRef, provider: string, modelId: string, enabled: boolean, machineId = "local") => request(sessionPath(session, "models/enabled", machineId), parseSessionModelCatalogResponse, { method: "POST", body: sessionBody(session, { provider, modelId, enabled }) }),
+  setModelScope: (session: SessionRef, mode: SessionModelScopeMode, machineId = "local") => request(sessionPath(session, "models/scope", machineId), parseSessionModelCatalogResponse, { method: "POST", body: sessionBody(session, { mode }) }),
   setModel: (session: SessionRef, provider: string, modelId: string, machineId = "local") => request(sessionPath(session, "model", machineId), parseSessionStatus, { method: "POST", body: sessionBody(session, { provider, modelId }) }),
   cycleModel: (session: SessionRef, direction: "forward" | "backward", machineId = "local") => request(sessionPath(session, "model/cycle", machineId), parseSessionStatus, { method: "POST", body: sessionBody(session, { direction }) }),
+  getSessionDefaults: (session: SessionRef, machineId = "local") => request(sessionQueryPath(session, "defaults", machineId), parseSessionDefaults),
+  setSessionDefaults: (session: SessionRef, defaults: SessionDefaultsUpdate, machineId = "local") => request(sessionPath(session, "defaults", machineId), parseSessionDefaults, { method: "POST", body: sessionBody(session, { ...defaults }) }),
   thinkingLevels: (session: SessionRef, machineId = "local") => request(sessionQueryPath(session, "thinking-levels", machineId), parseThinkingLevelsResponse),
   setThinkingLevel: (session: SessionRef, level: string, machineId = "local") => request(sessionPath(session, "thinking-level", machineId), parseSessionStatus, { method: "POST", body: sessionBody(session, { level }) }),
   cycleThinkingLevel: (session: SessionRef, machineId = "local") => request(sessionPath(session, "thinking-level/cycle", machineId), parseSessionStatus, { method: "POST", body: sessionBody(session) }),
@@ -245,7 +295,12 @@ export const sessionsApi = {
   respondToCommand: (session: SessionRef, requestId: string, value: string, machineId = "local") => request(sessionPath(session, "commands/respond", machineId), parseCommandResult, { method: "POST", body: sessionBody(session, { requestId, value }) }),
   navigateTree: (session: SessionRef, navigation: SessionTreeNavigateRequest, machineId = "local") => request(sessionPath(session, "tree/navigate", machineId), parseSessionTreeNavigateResult, {
     method: "POST",
-    body: sessionBody(session, { targetId: navigation.targetId, expectedLeafId: navigation.expectedLeafId, summary: navigation.summary }),
+    body: sessionBody(session, {
+      targetId: navigation.targetId,
+      expectedLeafId: navigation.expectedLeafId,
+      summary: navigation.summary,
+      ...(navigation.retainCheckpoint === undefined ? {} : { retainCheckpoint: navigation.retainCheckpoint }),
+    }),
   }),
   forkTree: (session: SessionRef, fork: SessionTreeForkRequest, machineId = "local") => requestSessionTreeFork(session, fork, machineId),
   abort: (session: SessionRef, machineId = "local") => request(sessionPath(session, "abort", machineId), parseAborted, { method: "POST", body: sessionBody(session) }),
@@ -264,22 +319,15 @@ export const sessionsApi = {
   },
   startInteractiveApiKeyLogin: (providerId: string, machineId = "local") => request(`${machinePrefix(machineId)}/auth/api-key/interactive`, parseOAuthFlowState, { method: "POST", body: JSON.stringify({ providerId }) }),
   logoutProvider: (providerId: string, machineId = "local") => request(`${machinePrefix(machineId)}/auth/logout`, parseAccepted, { method: "POST", body: JSON.stringify({ providerId }) }),
+  mcpAuthServers: (session: SessionRef, machineId = "local") => request(sessionQueryPath(session, "mcp/auth/servers", machineId), parseMcpAuthServersResponse),
+  startMcpAuth: (session: SessionRef, mode: "login" | "logout", machineId = "local", serverName?: string) => request(sessionPath(session, "mcp/auth", machineId), parseOAuthFlowState, { method: "POST", body: sessionBody(session, { mode, ...(serverName === undefined ? {} : { serverName }) }) }),
+  mcpAuthFlow: (flowId: string, machineId = "local") => request(`${machinePrefix(machineId)}/auth/mcp/${encodeURIComponent(flowId)}`, parseOAuthFlowState),
+  respondMcpAuthFlow: (flowId: string, requestId: string, value: string, machineId = "local") => request(`${machinePrefix(machineId)}/auth/mcp/${encodeURIComponent(flowId)}/respond`, parseOAuthFlowState, { method: "POST", body: JSON.stringify({ requestId, value }) }),
+  cancelMcpAuthFlow: (flowId: string, machineId = "local") => request(`${machinePrefix(machineId)}/auth/mcp/${encodeURIComponent(flowId)}/cancel`, parseOAuthFlowState, { method: "POST" }),
   startOAuthLogin: (providerId: string, machineId = "local") => request(`${machinePrefix(machineId)}/auth/oauth`, parseOAuthFlowState, { method: "POST", body: JSON.stringify({ providerId }) }),
   oauthFlow: (flowId: string, machineId = "local") => request(`${machinePrefix(machineId)}/auth/oauth/${encodeURIComponent(flowId)}`, parseOAuthFlowState),
   respondOAuthFlow: (flowId: string, requestId: string, value: string, machineId = "local") => request(`${machinePrefix(machineId)}/auth/oauth/${encodeURIComponent(flowId)}/respond`, parseOAuthFlowState, { method: "POST", body: JSON.stringify({ requestId, value }) }),
   cancelOAuthFlow: (flowId: string, machineId = "local") => request(`${machinePrefix(machineId)}/auth/oauth/${encodeURIComponent(flowId)}/cancel`, parseOAuthFlowState, { method: "POST" }),
-};
-
-export const terminalsApi = {
-  terminals: (projectId: string, workspaceId: string, machineId = "local") => request(`${machinePrefix(machineId)}/projects/${encodeURIComponent(projectId)}/workspaces/${encodeURIComponent(workspaceId)}/terminals`, arrayOf(parseTerminalInfo)),
-  startTerminal: (projectId: string, workspaceId: string, options?: { name?: string; cols?: number; rows?: number }, machineId = "local") => request(`${machinePrefix(machineId)}/projects/${encodeURIComponent(projectId)}/workspaces/${encodeURIComponent(workspaceId)}/terminals`, parseTerminalInfo, { method: "POST", body: JSON.stringify(options ?? {}) }),
-  closeWorkspaceTerminals: (projectId: string, workspaceId: string, machineId = "local") => request(`${machinePrefix(machineId)}/projects/${encodeURIComponent(projectId)}/workspaces/${encodeURIComponent(workspaceId)}/terminals`, parseClosed, { method: "DELETE" }),
-  closeTerminal: (projectId: string, workspaceId: string, terminalId: string, machineId = "local") => request(`${machinePrefix(machineId)}/projects/${encodeURIComponent(projectId)}/workspaces/${encodeURIComponent(workspaceId)}/terminals/${encodeURIComponent(terminalId)}`, parseClosed, { method: "DELETE" }),
-  continueTerminal: (projectId: string, workspaceId: string, terminalId: string, machineId = "local") => request(`${machinePrefix(machineId)}/projects/${encodeURIComponent(projectId)}/workspaces/${encodeURIComponent(workspaceId)}/terminals/${encodeURIComponent(terminalId)}/continue`, parseTerminalInfo, { method: "POST" }),
-  runTerminalCommand: (origin: string, input: RunTerminalCommandInput, machineId = "local") => request(`${machinePrefix(machineId)}/projects/${encodeURIComponent(input.workspace.projectId)}/workspaces/${encodeURIComponent(input.workspace.id)}/terminal-command-runs`, parseTerminalCommandRun, { method: "POST", body: JSON.stringify({ origin, title: input.title, command: input.command, metadata: input.metadata ?? {} }) }),
-  listCommandRuns: (filter?: TerminalCommandRunFilter, machineId = "local") => request(`${machinePrefix(machineId)}/terminal-command-runs${terminalCommandRunFilterQuery(filter)}`, arrayOf(parseTerminalCommandRun)),
-  getCommandRun: (runId: string, machineId = "local") => getOptionalTerminalCommandRun(runId, machineId),
-  cancelCommandRun: (runId: string, machineId = "local") => request(`${machinePrefix(machineId)}/terminal-command-runs/${encodeURIComponent(runId)}/cancel`, parseTerminalCommandRun, { method: "POST" }),
 };
 
 /**
@@ -299,7 +347,8 @@ async function requestSessionTreeFork(session: SessionRef, fork: SessionTreeFork
     headers: { "content-type": "application/json" },
     body: sessionBody(session, {
       entryId: fork.entryId,
-      ...(fork.expectedLeafId === undefined ? {} : { expectedLeafId: fork.expectedLeafId }),
+      expectedLeafId: fork.expectedLeafId,
+      ...(fork.retainCheckpoint === undefined ? {} : { retainCheckpoint: fork.retainCheckpoint }),
     }),
   });
   if (!response.ok) {
@@ -315,28 +364,6 @@ function isMissingSessionTreeForkRoute(status: number, value: unknown): boolean 
   if (value["statusCode"] !== 404 || value["error"] !== "Not Found") return false;
   const message = value["message"];
   return typeof message === "string" && /^Route POST:.*\/tree\/fork not found$/i.test(message);
-}
-
-async function getOptionalTerminalCommandRun(runId: string, machineId: string): Promise<TerminalCommandRun | undefined> {
-  const response = await fetch(resolveAppUrl(`${machinePrefix(machineId)}/terminal-command-runs/${encodeURIComponent(runId)}`));
-  if (response.status === 404) return undefined;
-  if (!response.ok) {
-    const body: unknown = await response.json().catch((): unknown => ({}));
-    throw new Error(apiErrorMessage(body) ?? response.statusText);
-  }
-  return parseTerminalCommandRun(await response.json());
-}
-
-function terminalCommandRunFilterQuery(filter: TerminalCommandRunFilter | undefined): string {
-  if (filter === undefined) return "";
-  const params = new URLSearchParams();
-  if (filter.projectId !== undefined) params.set("projectId", filter.projectId);
-  if (filter.workspaceId !== undefined) params.set("workspaceId", filter.workspaceId);
-  if (filter.terminalId !== undefined) params.set("terminalId", filter.terminalId);
-  if (filter.statuses !== undefined && filter.statuses.length > 0) params.set("statuses", filter.statuses.join(","));
-  if (filter.metadata !== undefined && Object.keys(filter.metadata).length > 0) params.set("metadata", JSON.stringify(filter.metadata));
-  const query = params.toString();
-  return query === "" ? "" : `?${query}`;
 }
 
 function apiErrorMessage(value: unknown): string | undefined {
@@ -368,15 +395,32 @@ export const filesApi = {
   },
 };
 
+const workspaceTrustPath = (machineId: string, projectId: string, workspaceId: string) =>
+  `${machinePrefix(machineId)}/projects/${encodeURIComponent(projectId)}/workspaces/${encodeURIComponent(workspaceId)}/trust`;
+
+const projectTrustPath = (machineId: string, path: string) => {
+  const params = new URLSearchParams({ path });
+  return `${machinePrefix(machineId)}/projects/trust?${params.toString()}`;
+};
+
+export const trustApi = {
+  /** Existing-decision lookup for a raw path (add-project dialog); the server resolves the path first. */
+  projectTrust: (path: string, machineId = "local") => request(projectTrustPath(machineId, path), parseWorkspaceTrustResponse),
+  workspaceTrust: (projectId: string, workspaceId: string, machineId = "local") => request(workspaceTrustPath(machineId, projectId, workspaceId), parseWorkspaceTrustResponse),
+  setWorkspaceTrust: (projectId: string, workspaceId: string, trusted: boolean, machineId = "local") => request(workspaceTrustPath(machineId, projectId, workspaceId), parseWorkspaceTrustResponse, { method: "PUT", body: JSON.stringify({ trusted }) }),
+};
+
 export const api = {
   ...piWebApi,
   ...machinesApi,
+  ...noticesApi,
   ...configApi,
   ...pluginsApi,
   ...piPackagesApi,
   ...projectsApi,
   ...workspacesApi,
   ...sessionsApi,
-  ...terminalsApi,
   ...filesApi,
+  ...trustApi,
+
 };

@@ -3,11 +3,14 @@ import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Readable } from "node:stream";
-import type { FastifyInstance } from "fastify";
+import Fastify, { type FastifyInstance } from "fastify";
+import { registerProjectMutationRoutes } from "./sessiond/projectMutationRoutes.js";
 import { afterEach, beforeEach } from "vitest";
 import { buildApp } from "./app.js";
 import { ProjectService } from "./projects/projectService.js";
 import { ProjectStore } from "./storage/projectStore.js";
+import { NavigationPreferenceStore } from "./storage/navigationPreferenceStore.js";
+import { SESSIOND_RUNTIME_CAPABILITIES } from "../shared/capabilities.js";
 import type { MachineClient } from "./machines/machineClient.js";
 import { MachineService } from "./machines/machineService.js";
 import { MachineStore } from "./machines/machineStore.js";
@@ -82,21 +85,24 @@ export const appTestContext: AppTestContext = {
   },
 };
 
-export function registerAppTestHooks(): void {
+export function registerAppTestHooks(initialConfig: PiWebConfigValues = {}): void {
   beforeEach(async () => {
     tempDir = await realpath(await mkdtemp(join(tmpdir(), "pi-web-app-test-")));
     projectDir = join(tempDir, "project");
     remoteClient = undefined;
     sessionDaemonRequests = [];
     piPackageRequests = [];
-    piWebConfig = {};
+    piWebConfig = structuredClone(initialConfig);
     agentProfileResult = { status: "available", profile: appTestAgentProfile(join(tempDir, "agent")) };
     const projects = new ProjectService(new ProjectStore(join(tempDir, "projects.json")));
+    const sessionDaemon = fakeSessionDaemon(projects);
     workspaceCatalog = new AppTestWorkspaceCatalog(projects);
     app = await buildApp({
       projects,
+      navigationPreferences: new NavigationPreferenceStore(join(tempDir, "navigation-preferences.json")),
       workspaceCatalog,
       machines: new MachineService(new MachineStore(join(tempDir, "machines.json")), {
+        localName: () => piWebConfig.installationName,
         remoteClientFactory: () => {
           if (remoteClient === undefined) throw new Error("No remote machine client configured");
           return remoteClient;
@@ -112,18 +118,19 @@ export function registerAppTestHooks(): void {
           capabilities: [],
         }),
       }),
-      sessionDaemon: fakeSessionDaemon(),
+      sessionDaemon,
       agentProfileProvider: { getActiveAgentProfile: () => Promise.resolve(agentProfileResult) },
       config: fakeConfigService(),
       piPackages: fakePiPackageService(),
       piWebPlugins: {
-        manifest: () => Promise.resolve({ lifecycleVersion: 1, plugins: [{ id: "fake", module: "/pi-web-plugins/fake/plugin.js?v=1", source: "test", scope: "local", machineSpecific: false }] }),
+        manifest: () => Promise.resolve({ lifecycleVersion: 2, terminalMode: "recovery-disabled", plugins: [{ id: "fake", module: "/pi-web-plugins/fake/plugin.js?v=1", source: "test", scope: "local", machineSpecific: false }] }),
         plugins: () => Promise.resolve({
-          lifecycleVersion: 1,
+          lifecycleVersion: 2,
           plugins: [{ id: "fake", module: "/pi-web-plugins/fake/plugin.js?v=1", source: "test", scope: "local", machineSpecific: false, enabled: true, discovered: true, conflict: false }],
           diagnostics: [],
           serverRuntime: {
             status: "available",
+            terminalMode: "recovery-disabled",
             restartRequired: false,
             recovery: {
               showSafeStart: "pi-web plugins safe-start show",
@@ -138,6 +145,7 @@ export function registerAppTestHooks(): void {
       clientDist: false,
       logger: false,
     });
+    app.addHook("onClose", () => sessionDaemon.close());
   });
 
   afterEach(async () => {
@@ -307,7 +315,7 @@ export function piWebConfigResponse(config: PiWebConfigValues): PiWebConfigRespo
     exists: false,
     config,
     effectiveConfig: config,
-    envOverrides: { host: false, port: false, allowedHosts: false, spawnSessions: false, subsessions: false, askUser: false },
+    envOverrides: { host: false, port: false, allowedHosts: false, spawnSessions: false, sessionMessages: false, subsessions: false, askUser: false },
   };
 }
 
@@ -351,11 +359,30 @@ function fakePiPackageService(): PiPackageService {
   };
 }
 
-function fakeSessionDaemon(): SessionProxyDaemon {
+function fakeSessionDaemon(projects: ProjectService): SessionProxyDaemon & { close(): Promise<void> } {
+  const daemonApp = Fastify({ logger: false });
+  registerProjectMutationRoutes(daemonApp, projects);
   return {
-    request: (method, path, body) => {
+    close: () => daemonApp.close(),
+    requestStream: async (path) => {
+      sessionDaemonRequests.push({ method: "GET", path });
+      const response = await daemonApp.inject({ method: "GET", url: path });
+      return {
+        statusCode: response.statusCode,
+        headers: { "content-type": "application/json" },
+        body: Readable.from([response.rawPayload]),
+      };
+    },
+    request: async (method, path, body) => {
       const captured = { method, path, ...(body === undefined ? {} : { body }) } satisfies CapturedSessionDaemonRequest;
       sessionDaemonRequests.push(captured);
+      if (method === "GET" && path === "/runtime") {
+        return { statusCode: 200, headers: { "content-type": "application/json" }, body: JSON.stringify({ component: "sessiond", label: "Session daemon", available: true, capabilities: SESSIOND_RUNTIME_CAPABILITIES }) };
+      }
+      if ((method === "POST" && path === "/projects") || (method === "DELETE" && path.startsWith("/projects/"))) {
+        const response = await daemonApp.inject({ method, url: path, ...(body === undefined ? {} : { payload: JSON.stringify(body), headers: { "content-type": "application/json" } }) });
+        return { statusCode: response.statusCode, headers: { "content-type": "application/json" }, body: response.body };
+      }
       return Promise.resolve({
         statusCode: 200,
         headers: { "content-type": "application/json" },

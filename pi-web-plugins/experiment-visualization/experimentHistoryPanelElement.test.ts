@@ -25,6 +25,7 @@ function context(readFile: ReadFile = () => Promise.resolve(file()), machineId =
     prompt: { insertText: vi.fn(), getText: () => "", getSelection: () => null },
     terminal: { open: vi.fn(), runCommand: vi.fn() },
     host: { requestRender: vi.fn() },
+    navigate: vi.fn(),
   } satisfies WorkspacePanelContext;
 }
 

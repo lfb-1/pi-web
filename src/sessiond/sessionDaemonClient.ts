@@ -1,4 +1,6 @@
 import http from "node:http";
+import https from "node:https";
+import type { Readable } from "node:stream";
 import { WebSocket } from "ws";
 import { isHostAbsoluteAgentDir } from "../config.js";
 import type { ActiveAgentProfileDescriptor } from "../shared/apiTypes.js";
@@ -10,8 +12,23 @@ export type SessionDaemonAgentProfileResult =
   | { status: "unavailable"; error: string }
   | { status: "invalid"; error: string };
 
+export interface SessionDaemonClientOptions {
+  baseUrl?: string;
+  /** An explicit socket suppresses the inherited client URL unless baseUrl is also supplied. */
+  socketPath?: string;
+}
+
 export interface SessionDaemonRequestOptions {
   signal?: AbortSignal;
+  /** Selected stream request headers only; never arbitrary browser headers. */
+  headers?: { range?: string };
+  timeoutMs?: number;
+}
+
+export interface SessionDaemonStreamResponse {
+  statusCode: number;
+  headers: Record<string, string>;
+  body: Readable;
 }
 
 export interface SessionDaemonRequestClient {
@@ -24,8 +41,13 @@ export interface SessionDaemonRequestClient {
 }
 
 export class SessionDaemonClient {
-  private readonly baseUrl = sessiondHttpUrl();
-  private readonly socketPath = sessiondSocketPath();
+  private readonly baseUrl: string | undefined;
+  private readonly socketPath: string;
+
+  constructor(options: SessionDaemonClientOptions = {}) {
+    this.baseUrl = options.baseUrl ?? (options.socketPath === undefined ? sessiondHttpUrl() : undefined);
+    this.socketPath = options.socketPath ?? sessiondSocketPath();
+  }
 
   async request(
     method: string,
@@ -40,17 +62,46 @@ export class SessionDaemonClient {
     return this.requestSocket(method, path, payload, options.signal);
   }
 
+  /** Stream binary resources without UTF-8 decoding or buffering the response. */
+  requestStream(path: string, options: SessionDaemonRequestOptions = {}): Promise<SessionDaemonStreamResponse> {
+    const range = options.headers?.range;
+    if (range !== undefined && (range.length > 256 || /[\r\n]/u.test(range))) return Promise.reject(new Error("Invalid resource Range header"));
+    return new Promise((resolve, reject) => {
+      const onResponse = (response: http.IncomingMessage): void => {
+        clearTimeout(headerTimeout);
+        resolve({
+          statusCode: response.statusCode ?? 500,
+          headers: Object.fromEntries(Object.entries(response.headers).map(([key, value]) => [key, Array.isArray(value) ? value.join(", ") : value ?? ""])),
+          body: response,
+        });
+      };
+      const requestOptions: http.RequestOptions = {
+        method: "GET",
+        headers: { "accept-encoding": "identity", ...(options.headers?.range === undefined ? {} : { range: options.headers.range }) },
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
+      };
+      const url = this.baseUrl === undefined || this.baseUrl === "" ? undefined : new URL(path, this.baseUrl);
+      const request = url === undefined
+        ? http.request({ ...requestOptions, socketPath: this.socketPath, path }, onResponse)
+        : (url.protocol === "https:" ? https : http).request(url, requestOptions, onResponse);
+      request.on("error", (error) => { clearTimeout(headerTimeout); reject(error); });
+      const headerTimeout = setTimeout(() => { request.destroy(new Error("Session daemon resource headers timed out")); }, options.timeoutMs ?? 30_000);
+      headerTimeout.unref();
+      request.end();
+    });
+  }
+
   getActiveAgentProfile(): Promise<SessionDaemonAgentProfileResult> {
     return getSessionDaemonActiveAgentProfile(this);
   }
 
-  connectWebSocket(path: string): WebSocket {
+  connectWebSocket(path: string, options: { maxPayload?: number } = {}): WebSocket {
     if (this.baseUrl !== undefined && this.baseUrl !== "") {
       const url = new URL(path, this.baseUrl);
       url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-      return new WebSocket(url);
+      return new WebSocket(url, options);
     }
-    return new WebSocket(`ws+unix:${this.socketPath}:${path}`);
+    return new WebSocket(`ws+unix:${this.socketPath}:${path}`, options);
   }
 
   private async requestUrl(method: string, path: string, payload?: string, signal?: AbortSignal) {

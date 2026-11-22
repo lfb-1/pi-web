@@ -5,6 +5,11 @@ import { join, sep } from "node:path";
 import type { SessionParentRelation } from "../../shared/apiTypes.js";
 import { isRecord, tryParseEntry } from "./sessionFileFormat.js";
 import type { PiSessionListEntry } from "./piSessionService.js";
+import type { SessionUiMetadata } from "../../shared/pluginApiTypes.js";
+import { sessionUiMetadataFromEntry } from "./sessionMetadata.js";
+import { interventionStateFromEntry } from "./sessionIntervention.js";
+import { cwdPathsEqual } from "../workingDirectory.js";
+import { parsePersistedChildSubsessionLink, parsePersistedParentSubsessionLink, type PersistedChildSubsessionLink, type PersistedParentSubsessionLink } from "./subsessionProvenance.js";
 
 /*
  * LISTING CONTRACT
@@ -33,7 +38,8 @@ import type { PiSessionListEntry } from "./piSessionService.js";
  * Per-line work is minimal: lines are classified from their leading
  * `{"type":"..."` bytes without ever decoding them, and lines are only turned
  * into strings and JSON-parsed when they matter — the header, `session_info`
- * lines (rare, one per rename), and message lines until the first user text
+ * lines (rare, one per rename), custom entries for explicitly public metadata,
+ * and message lines until the first user text
  * message has been found. Message bodies after that point (which hold the huge
  * tool results and assistant replies) are neither decoded nor parsed.
  */
@@ -147,7 +153,35 @@ export class SessionSummaryScanner {
     const files = await listSessionFilesInDir(sessionDir);
     this.pruneEntriesRemovedFrom(sessionDir, files);
     const summaries = await scanSessionFilesWithBoundedConcurrency(files, this.chunkBytes, (file, chunkBuffer) => this.scanFileWithMemo(file, chunkBuffer));
-    return sortedSessionSummaries(summaries);
+    const sessions = sortedSessionSummaries(summaries);
+    // Reuse this listing's folds and memoized parent scans; never open SDK
+    // managers (which parse entire transcripts) just to classify a list row.
+    const parents = new Map<string, Promise<PiSessionListEntry | undefined>>();
+    const listed = new Map(sessions.map((session) => [session.path, session]));
+    for (const session of sessions) {
+      const fold = this.memo.get(session.path)?.fold;
+      let marker: PersistedChildSubsessionLink | undefined;
+      for (const link of fold?.childLinks ?? []) {
+        if (link.spawnedSessionId === session.id) marker = link;
+      }
+      const parentPath = session.parentSessionPath;
+      if (marker === undefined || parentPath === undefined || parentPath === "") continue;
+      let parent = listed.get(parentPath);
+      if (parent === undefined) {
+        let pending = parents.get(parentPath);
+        if (pending === undefined) {
+          pending = this.scanFileWithMemo(parentPath, () => Buffer.allocUnsafe(this.chunkBytes));
+          parents.set(parentPath, pending);
+        }
+        parent = await pending;
+      }
+      if (parent?.id !== marker.spawnedBySessionId) continue;
+      const reciprocal = this.memo.get(parentPath)?.fold.parentLinks?.some((link) =>
+        link.spawnedBySessionId === parent.id && link.spawnedSessionId === session.id
+        && link.spawnedSessionFile !== undefined && cwdPathsEqual(link.spawnedSessionFile, session.path));
+      if (reciprocal === true) session.agentSubsession = true;
+    }
+    return sessions;
   }
 
   private pruneEntriesRemovedFrom(sessionDir: string, existingFiles: readonly string[]): void {
@@ -212,6 +246,10 @@ interface SummaryFoldState {
   firstMessageText: string | undefined;
   name: string | undefined;
   parentSessionRelation: SessionParentRelation | undefined;
+  metadata?: SessionUiMetadata;
+  interventionRequired?: boolean;
+  childLinks?: PersistedChildSubsessionLink[];
+  parentLinks?: PersistedParentSubsessionLink[];
 }
 
 function createEmptyFold(): SummaryFoldState {
@@ -324,8 +362,8 @@ async function foldFileLines(file: FileHandle, fold: SummaryFoldState, chunkBuff
 function buildSummaryFromFold(fold: SummaryFoldState, filePath: string, mtime: Date): PiSessionListEntry | undefined {
   if (fold.rejected || fold.header === undefined) return undefined;
   const id = fold.header["id"];
-  // The SDK would list a header without a usable id; downstream lookups then
-  // call `.startsWith` on it and crash. Skip such files instead.
+  // The SDK would list a header without a usable id. Skip such files rather
+  // than exposing an invalid session identity to downstream consumers.
   if (typeof id !== "string" || id === "") return undefined;
 
   const headerCwd = fold.header["cwd"];
@@ -339,10 +377,12 @@ function buildSummaryFromFold(fold: SummaryFoldState, filePath: string, mtime: D
     modified: mtime,
     messageCount: fold.messageCount,
     firstMessage: fold.firstMessageText ?? "(no messages)",
+    ...(fold.interventionRequired === true ? { interventionRequired: true } : {}),
     // Never built: see the listing contract above. Kept because SDK-built
     // entries (cleanup listing) still carry the field.
     allMessagesText: "",
     ...(fold.name === undefined ? {} : { name: fold.name }),
+    ...(fold.metadata === undefined ? {} : { metadata: fold.metadata }),
     ...(typeof parentSessionPath === "string" ? { parentSessionPath } : {}),
     ...(fold.parentSessionRelation === undefined ? {} : { parentSessionRelation: fold.parentSessionRelation }),
   };
@@ -374,6 +414,14 @@ function processLineBytes(data: Buffer, start: number, end: number, state: Summa
     const entry = tryParseEntry(data.toString("utf8", start, end));
     const relation = entry === undefined ? undefined : customParentRelation(entry);
     if (relation !== undefined) state.parentSessionRelation = relation;
+    const intervention = interventionStateFromEntry(entry);
+    if (intervention !== undefined) state.interventionRequired = intervention;
+    const childLink = parsePersistedChildSubsessionLink(entry);
+    if (childLink !== undefined) (state.childLinks ??= []).push(childLink);
+    const parentLink = parsePersistedParentSubsessionLink(entry);
+    if (parentLink !== undefined) (state.parentLinks ??= []).push(parentLink);
+    const metadata = sessionUiMetadataFromEntry(entry);
+    if (metadata !== undefined) state.metadata = metadata;
     return;
   }
   if (entryType === "message") {
@@ -402,7 +450,12 @@ function processLineBytes(data: Buffer, start: number, end: number, state: Summa
   const entry = tryParseEntry(data.toString("utf8", start, end));
   if (entry === undefined) return;
   if (entry["type"] === "session_info") state.name = sessionInfoName(entry);
-  else if (entry["type"] === "message") {
+  else if (entry["type"] === "custom") {
+    const intervention = interventionStateFromEntry(entry);
+    if (intervention !== undefined) state.interventionRequired = intervention;
+    const metadata = sessionUiMetadataFromEntry(entry);
+    if (metadata !== undefined) state.metadata = metadata;
+  } else if (entry["type"] === "message") {
     state.messageCount += 1;
     if (state.firstMessageText === undefined) {
       const userText = firstUserMessageText(entry);
@@ -417,7 +470,7 @@ function processLineBytes(data: Buffer, start: number, end: number, state: Summa
  * them first would mask each byte's high bit — `Buffer.toString("ascii")`
  * turns bytes like `ed e5 f3 f3 e1 e7 e5` into "message" — fabricating
  * matches for corrupt input. Returns "other" when the line carries the
- * SDK-style prefix but not a known type (only message/session_info matter
+ * SDK-style prefix but not a known type (only message/session_info/custom matter
  * for the summary, so such lines need no parse), or undefined when the line
  * does not carry the prefix (or the type is unreasonably long), leaving
  * classification to the parse fallback.

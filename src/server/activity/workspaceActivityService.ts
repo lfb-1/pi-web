@@ -1,5 +1,5 @@
 import { isSessionActive } from "../../shared/activity.js";
-import type { SessionActivity, SessionStatus, TerminalInfo } from "../../shared/apiTypes.js";
+import type { SessionActivity, SessionStatus } from "../../shared/apiTypes.js";
 
 /** One working directory that currently has session or terminal activity. */
 export interface ActiveWorkspaceActivity {
@@ -12,6 +12,7 @@ interface SessionRecord {
   cwd: string;
   status?: SessionStatus;
   activity?: SessionActivity;
+  interventionRequired?: boolean;
 }
 
 interface TerminalRecord {
@@ -36,9 +37,21 @@ export class WorkspaceActivityService {
     const record = this.sessions.get(status.sessionId) ?? { cwd };
     record.cwd = cwd;
     record.status = status;
+    record.interventionRequired = status.interventionRequired === true;
     if (!isSessionActive(status) && record.activity?.phase === "active") delete record.activity;
     this.sessions.set(status.sessionId, record);
     this.pruneIdleSession(status.sessionId);
+    this.notifyChangedCwds(previousCwd, cwd);
+  }
+
+  /** Seed durable intervention state without replacing live work state. */
+  applySessionIntervention(cwd: string, sessionId: string, required: boolean): void {
+    const record = this.sessions.get(sessionId) ?? { cwd };
+    const previousCwd = record.cwd;
+    record.cwd = cwd;
+    record.interventionRequired = required;
+    this.sessions.set(sessionId, record);
+    this.pruneIdleSession(sessionId);
     this.notifyChangedCwds(previousCwd, cwd);
   }
 
@@ -69,7 +82,7 @@ export class WorkspaceActivityService {
     if (changed) this.notifyCwd(cwd);
   }
 
-  updateTerminal(terminal: Pick<TerminalInfo, "id" | "cwd" | "exited">): void {
+  updateTerminal(terminal: { id: string; cwd: string; exited: boolean }): void {
     const previousCwd = this.terminals.get(terminal.id)?.cwd;
     if (terminal.exited) this.terminals.delete(terminal.id);
     else this.terminals.set(terminal.id, { cwd: terminal.cwd });
@@ -82,13 +95,25 @@ export class WorkspaceActivityService {
     this.notifyCwd(previousCwd);
   }
 
-  snapshot(): { workspaces: ActiveWorkspaceActivity[] } {
-    return { workspaces: this.activeCwds().map((cwd) => this.summaryForCwd(cwd)) };
+  snapshot(): {
+    workspaces: ActiveWorkspaceActivity[];
+    sessions: { sessionId: string; cwd: string }[];
+    interventionSessions?: { sessionId: string; cwd: string }[];
+  } {
+    return {
+      workspaces: this.activeCwds().map((cwd) => this.summaryForCwd(cwd)),
+      sessions: [...this.sessions].flatMap(([sessionId, record]) =>
+        isSessionActive(record.status, record.activity) ? [{ sessionId, cwd: record.cwd }] : []),
+      interventionSessions: [...this.sessions].flatMap(([sessionId, record]) =>
+        record.interventionRequired === true ? [{ sessionId, cwd: record.cwd }] : []),
+    };
   }
 
   private pruneIdleSession(sessionId: string): void {
     const record = this.sessions.get(sessionId);
-    if (record !== undefined && !isSessionActive(record.status, record.activity)) this.sessions.delete(sessionId);
+    if (record !== undefined && record.interventionRequired !== true && !isSessionActive(record.status, record.activity)) {
+      this.sessions.delete(sessionId);
+    }
   }
 
   private notifyChangedCwds(previousCwd: string | undefined, cwd: string): void {

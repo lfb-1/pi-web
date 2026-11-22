@@ -1,22 +1,34 @@
 import { describe, expect, it } from "vitest";
-import { parsePiWebComponentStatus, parsePiWebInstallationInfo, parsePiWebRuntimeResponse, parsePiWebVersionResponse } from "./piWebStatusParsing";
+import { parsePiWebComponentStatus, parsePiWebInstallationInfo, parsePiWebRuntimeComponent, parsePiWebRuntimeResponse, parsePiWebVersionResponse } from "./piWebStatusParsing";
 
 describe("PI WEB status parsing", () => {
-  it("drops every advertised capability string while the registry is empty", () => {
+  it("preserves optional engine facts and accepts legacy or malformed optional metadata", () => {
+    const legacy = { component: "sessiond", label: "Session daemon", available: true, stale: false, capabilities: [] };
+    for (const parse of [parsePiWebComponentStatus, parsePiWebRuntimeComponent]) {
+      expect(parse(legacy)).not.toHaveProperty("runtime");
+      expect(parse({ ...legacy, runtime: { name: "bun", version: "1.3.0" } })?.runtime)
+        .toEqual({ name: "bun", version: "1.3.0" });
+      const malformed = parse({ ...legacy, runtime: { name: "future", version: false } });
+      expect(malformed).toBeDefined();
+      expect(malformed).not.toHaveProperty("runtime");
+    }
+  });
+
+  it("preserves supported capabilities and filters obsolete or unknown capabilities", () => {
     expect(parsePiWebRuntimeResponse({
       packageName: "@jmfederico/pi-web",
       generatedAt: "now",
       components: {
-        web: { component: "web", label: "Web/UI", runtimeVersion: "1.0.0", available: true, capabilities: ["piPackages.manage", "future.capability"] },
+        web: { component: "web", label: "Web/UI", runtimeVersion: "1.0.0", available: true, capabilities: ["plugins.lifecycle", "piPackages.manage", "future.capability"] },
         sessiond: { component: "sessiond", label: "Session daemon", runtimeVersion: "1.0.0", available: true, capabilities: ["future.sessiondCapability"] },
       },
-      capabilities: ["piPackages.manage", "future.capability"],
+      capabilities: ["plugins.lifecycle", "piPackages.manage", "future.capability"],
     })).toMatchObject({
       components: {
-        web: { capabilities: [] },
+        web: { capabilities: ["plugins.lifecycle"] },
         sessiond: { capabilities: [] },
       },
-      capabilities: [],
+      capabilities: ["plugins.lifecycle"],
     });
   });
 
@@ -139,6 +151,37 @@ describe("PI WEB status parsing", () => {
       { source: "environment", name: "PI_WEB_AGENT_DIR", replacement: "PI_CODING_AGENT_DIR" },
     ]);
     expect(parsed?.components.sessiond).not.toHaveProperty("deprecatedAgentInputs");
+  });
+
+  it("carries reported Pi versions through component and runtime parsing", () => {
+    expect(parsePiWebComponentStatus({
+      component: "web",
+      label: "Web/UI",
+      runtimeVersion: "1.0.0",
+      piVersion: "0.84.1",
+      stale: false,
+      available: true,
+    })).toMatchObject({ runtimeVersion: "1.0.0", piVersion: "0.84.1" });
+
+    expect(parsePiWebComponentStatus({
+      component: "web",
+      label: "Web/UI",
+      stale: false,
+      available: true,
+    })).not.toHaveProperty("piVersion");
+
+    const runtime = parsePiWebRuntimeResponse({
+      packageName: "@jmfederico/pi-web",
+      generatedAt: "now",
+      components: {
+        web: { component: "web", label: "Web/UI", runtimeVersion: "1.0.0", piVersion: "0.84.1", available: true, capabilities: [] },
+        sessiond: { component: "sessiond", label: "Session daemon", runtimeVersion: "1.0.0", piVersion: "0.83.0", available: true, capabilities: [] },
+      },
+      capabilities: [],
+    });
+
+    expect(runtime?.components.web.piVersion).toBe("0.84.1");
+    expect(runtime?.components.sessiond.piVersion).toBe("0.83.0");
   });
 
   it("parses Docker installation metadata", () => {

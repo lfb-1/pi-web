@@ -1,9 +1,18 @@
+import { LocalizationController, localization } from "../localization/browser";
+import { horizontalScrollEdges } from "./appShell/scrollEdges";
+import { appShellMessages as m } from "../appShellMessages";
+import { stylesheetIntegrationCapability } from "../plugins/styles";
 import { LitElement, css, html, type PropertyValues, type TemplateResult } from "lit";
 import { customElement, property, query, state } from "lit/decorators.js";
+import { repeat } from "lit/directives/repeat.js";
 import type { SessionActivity, SessionInfo, SessionStatus, Workspace } from "../api";
-import type { QualifiedContributionId, QualifiedWorkspacePanelContribution, WorkspacePanelContext } from "../plugins/types";
-import { workspacePanelStyles, type ChatLine } from "./shared";
+import type { ChatLine } from "../chatTypes";
 import "./AgentSessionGraph";
+import type { QualifiedContributionId } from "../plugins/types";
+import { renderNavigationMenuIcon } from "./tabIcons";
+import { workspacePanelStyles } from "./shared";
+import { orderedNavigationTabs, pinnedNavigationTabs } from "../navigationPreferences";
+import { renderPanelToggleButton } from "./appShell/panelToggleButton";
 
 export interface WorkspacePanelEmptyState {
   title: string;
@@ -12,20 +21,41 @@ export interface WorkspacePanelEmptyState {
 
 type WorkspacePanelBadge = string | number | TemplateResult | undefined;
 
+/** Host-bound display callbacks keep application and workspace contracts separate. */
+export interface WorkspaceToolPanel {
+  id: QualifiedContributionId;
+  title: string;
+  icon?: TemplateResult;
+  order?: number;
+  badge?: () => WorkspacePanelBadge;
+  render: () => TemplateResult;
+}
+
 @customElement("workspace-panel")
 export class WorkspacePanel extends LitElement {
+  constructor() {
+    super();
+    new LocalizationController(this);
+    stylesheetIntegrationCapability.createController(this);
+  }
+
   @property({ attribute: false }) workspace: Workspace | undefined;
-  @property({ attribute: false }) panelContext: WorkspacePanelContext | undefined;
   @property({ attribute: false }) emptyState: WorkspacePanelEmptyState | undefined;
-  @property() tool: QualifiedContributionId = "core:workspace.files";
-  @property({ attribute: false }) panels: QualifiedWorkspacePanelContribution[] = [];
+  @property() error = "";
+  @property() tool: QualifiedContributionId | undefined;
+  @property({ attribute: false }) panels: WorkspaceToolPanel[] = [];
+  @property({ type: Boolean }) hideToolTabs = false;
+  @property({ attribute: false }) pinnedIds: string[] = [];
+  @property({ attribute: false }) orderedIds: string[] = [];
+  @property({ attribute: false }) onShowNavigation?: () => void;
+  @property({ attribute: false }) onTogglePanel?: () => void;
+  @property({ attribute: false }) onSelectTool: (tool: QualifiedContributionId) => void = () => undefined;
+  // Fork: agent session graph below the workspace tools.
   @property({ attribute: false }) sessions: SessionInfo[] = [];
   @property({ attribute: false }) selectedSession: SessionInfo | undefined;
   @property({ attribute: false }) messages: ChatLine[] = [];
   @property({ attribute: false }) sessionStatuses: Record<string, SessionStatus> = {};
   @property({ attribute: false }) sessionActivities: Record<string, SessionActivity> = {};
-  @property({ type: Boolean }) hideToolTabs = false;
-  @property({ attribute: false }) onSelectTool: (tool: QualifiedContributionId) => void = () => undefined;
   @property({ attribute: false }) onSelectSession: (session: SessionInfo, rootSession: SessionInfo) => void = () => undefined;
   @query(".workspace-header-strip") private workspaceHeaderStrip?: HTMLElement | null;
   @state() private workspaceHeaderCanScrollLeft = false;
@@ -59,26 +89,24 @@ export class WorkspacePanel extends LitElement {
 
   override render() {
     const workspace = this.workspace;
-    if (workspace === undefined) return this.renderEmptyState(this.emptyState ?? {
-      title: "Select a workspace",
-      body: "Choose a workspace to use its tools.",
-    });
-    const context = this.panelContext;
-    if (context === undefined) return this.renderEmptyState({
-      title: "Workspace tools unavailable",
-      body: "Try selecting the workspace again.",
-    });
+    if (workspace === undefined && this.panels.length === 0) return this.renderEmptyState(this.error !== "" ? { title: this.error } : this.emptyState ?? {
+      title: m.t("selectWorkspace"),
+      body: m.t("chooseWorkspace"),
+    }, true);
     const visiblePanels = this.panels;
-    const selectedPanel = visiblePanels.find((panel) => panel.id === this.tool) ?? visiblePanels[0];
+    // An unresolved route may leave a valid remembered tool, but its content is not displayed.
+    const selectedPanel = this.error !== "" ? undefined
+      : this.tool === undefined ? visiblePanels[0] : visiblePanels.find((panel) => panel.id === this.tool);
+    const pinnedPanels = pinnedNavigationTabs(orderedNavigationTabs(visiblePanels, this.orderedIds), this.pinnedIds);
     return html`
       ${this.hideToolTabs ? null : html`
         <header>
           <div class=${this.workspaceHeaderFrameClass()}>
             <div class="workspace-header-strip" @scroll=${this.onWorkspaceHeaderScroll}>
-              <div class="tabs">
-                ${visiblePanels.map((panel) => {
+              <div class="tabs ui-tabs ui-tabs--primary">
+                ${repeat(pinnedPanels, (panel) => panel.id, (panel) => {
                   const selected = selectedPanel?.id === panel.id;
-                  const badge = panel.badge?.(context);
+                  const badge = panel.badge?.();
                   const ariaLabel = this.panelTabAriaLabel(panel, badge);
                   return html`
                     <button class=${this.panelTabClass(panel, selected)} title=${ariaLabel} aria-label=${ariaLabel} aria-pressed=${String(selected)} @click=${() => { this.onSelectTool(panel.id); }}>
@@ -89,61 +117,69 @@ export class WorkspacePanel extends LitElement {
               </div>
             </div>
           </div>
+          ${this.renderNavigationButton(selectedPanel !== undefined && !pinnedPanels.some((panel) => panel.id === selectedPanel.id))}
+          ${renderPanelToggleButton("workspace", false, this.onTogglePanel)}
         </header>
       `}
       <div class=${`workspace-content-split ${this.agentsExpanded ? "agents-expanded" : "agents-collapsed"}`}>
         <div class="workspace-tool-pane">
-          ${selectedPanel === undefined ? this.renderEmptyState({
-            title: "No workspace tools available",
-            body: "No tools are available for this workspace.",
+          ${this.error !== "" ? this.renderEmptyState({ title: this.error }) : selectedPanel === undefined ? this.renderEmptyState({
+            title: this.tool === undefined ? m.t("noTools") : m.t("unavailablePanel", { id: this.tool }),
           }) : html`
             <div class="panel-content">
-              ${selectedPanel.render(context)}
+              ${selectedPanel.render()}
             </div>
           `}
         </div>
-        <div class="agent-graph-pane">
-          ${this.agentsExpanded ? html`
-            <agent-session-graph
-              .sessions=${this.sessions}
-              .selectedSession=${this.selectedSession}
-              .messages=${this.messages}
-              .statuses=${this.sessionStatuses}
-              .activities=${this.sessionActivities}
-              .onSelectSession=${this.onSelectSession}
-              .showCollapseControl=${true}
-              .onCollapse=${() => { this.agentsExpanded = false; }}
-            ></agent-session-graph>
-          ` : html`
-            <button class="agent-graph-expand" type="button" aria-expanded="false" @click=${() => { this.agentsExpanded = true; }}>
-              <span class="expand-chevron" aria-hidden="true">⌃</span>
-              <strong>Agents</strong>
-              <span>Show panel</span>
-            </button>
-          `}
-        </div>
+        ${this.renderAgentGraphPane()}
       </div>
     `;
   }
 
-  private panelTabClass(panel: QualifiedWorkspacePanelContribution, selected: boolean): string {
+  private renderAgentGraphPane(): TemplateResult {
+    return html`
+      <div class="agent-graph-pane">
+        ${this.agentsExpanded ? html`
+          <agent-session-graph
+            .sessions=${this.sessions}
+            .selectedSession=${this.selectedSession}
+            .messages=${this.messages}
+            .statuses=${this.sessionStatuses}
+            .activities=${this.sessionActivities}
+            .onSelectSession=${this.onSelectSession}
+            .showCollapseControl=${true}
+            .onCollapse=${() => { this.agentsExpanded = false; }}
+          ></agent-session-graph>
+        ` : html`
+          <button class="agent-graph-expand" type="button" aria-expanded="false" @click=${() => { this.agentsExpanded = true; }}>
+            <span class="expand-chevron" aria-hidden="true">⌃</span>
+            <strong>Agents</strong>
+            <span>Show panel</span>
+          </button>
+        `}
+      </div>
+    `;
+  }
+
+  private panelTabClass(panel: WorkspaceToolPanel, selected: boolean): string {
     return [
+      "ui-button", "ui-tab",
       ...(panel.icon === undefined ? [] : ["icon-tab"]),
       ...(selected ? ["selected"] : []),
     ].join(" ");
   }
 
-  private panelTabAriaLabel(panel: QualifiedWorkspacePanelContribution, badge: WorkspacePanelBadge): string {
+  private panelTabAriaLabel(panel: WorkspaceToolPanel, badge: WorkspacePanelBadge): string {
     if (typeof badge !== "string" && typeof badge !== "number") return panel.title;
-    const trimmedBadge = String(badge).trim();
-    return trimmedBadge === "" ? panel.title : `${panel.title}, ${trimmedBadge}`;
+    const trimmedBadge = (typeof badge === "number" ? localization.number(badge) : badge).trim();
+    return trimmedBadge === "" ? panel.title : m.t("badge", { label: panel.title, badge: trimmedBadge });
   }
 
-  private renderPanelTabContent(panel: QualifiedWorkspacePanelContribution, badge: WorkspacePanelBadge): TemplateResult {
+  private renderPanelTabContent(panel: WorkspaceToolPanel, badge: WorkspacePanelBadge): TemplateResult {
     return html`
       ${panel.icon === undefined ? null : html`<span class="tab-custom-icon" aria-hidden="true">${panel.icon}</span>`}
       <span class="tab-label">${panel.title}</span>
-      ${this.isEmptyBadge(badge) ? null : html`<span class="tab-badge">${badge}</span>`}
+      ${this.isEmptyBadge(badge) ? null : html`<span class="tab-badge">${typeof badge === "number" ? localization.number(badge) : badge}</span>`}
     `;
   }
 
@@ -151,8 +187,13 @@ export class WorkspacePanel extends LitElement {
     return badge === undefined || badge === "";
   }
 
-  private renderEmptyState(state: WorkspacePanelEmptyState): TemplateResult {
+  private renderNavigationButton(hiddenActiveDestination = false) {
+    return this.onShowNavigation === undefined ? null : html`<button type="button" class=${`ui-button ui-button--icon navigation-menu-button${hiddenActiveDestination ? " selected" : ""}`} data-navigation-trigger title=${m.t("navigation")} aria-label=${m.t("navigation")} aria-haspopup="dialog" @click=${this.onShowNavigation}>${renderNavigationMenuIcon()}</button>`;
+  }
+
+  private renderEmptyState(state: WorkspacePanelEmptyState, showNavigation = false): TemplateResult {
     return html`
+      ${showNavigation && !this.hideToolTabs ? html`<header>${this.renderNavigationButton()}${renderPanelToggleButton("workspace", false, this.onTogglePanel)}</header>` : null}
       <section class="empty-state" role="status">
         <h2>${state.title}</h2>
         ${state.body === undefined ? null : html`<p>${state.body}</p>`}
@@ -180,8 +221,9 @@ export class WorkspacePanel extends LitElement {
   private updateWorkspaceHeaderScrollState(): void {
     const strip = this.workspaceHeaderStripElement();
     const maxScrollLeft = strip === undefined ? 0 : Math.max(0, strip.scrollWidth - strip.clientWidth);
-    const canScrollLeft = strip !== undefined && strip.scrollLeft > 1;
-    const canScrollRight = strip !== undefined && maxScrollLeft - strip.scrollLeft > 1;
+    const edges = horizontalScrollEdges(strip?.scrollLeft ?? 0, maxScrollLeft, localization.direction);
+    const canScrollLeft = strip !== undefined && edges.left;
+    const canScrollRight = strip !== undefined && edges.right;
     if (this.workspaceHeaderCanScrollLeft !== canScrollLeft) this.workspaceHeaderCanScrollLeft = canScrollLeft;
     if (this.workspaceHeaderCanScrollRight !== canScrollRight) this.workspaceHeaderCanScrollRight = canScrollRight;
   }

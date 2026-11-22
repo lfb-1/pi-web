@@ -1,4 +1,9 @@
-import { LitElement, css, html, unsafeCSS } from "lit";
+import { LocalizationController } from "../localization/browser";
+import { formattedTextMessages as messages } from "../formattedTextMessages";
+import { stylesheetIntegrationCapability } from "../plugins/styles";
+import { LitElement, css, html, unsafeCSS, type PropertyValues, type TemplateResult } from "lit";
+import { VisibleContentController } from "../formatting/deferredContent";
+import type { ChatContentRendering } from "../formatting/contentRendering";
 import { customElement, property } from "lit/decorators.js";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
 // KaTeX layout styles must live inside this component's shadow root to reach the rendered
@@ -7,49 +12,200 @@ import { unsafeHTML } from "lit/directives/unsafe-html.js";
 // loading (font loading is document-scoped and not guaranteed from shadow roots).
 import katexStyles from "katex/dist/katex.min.css?inline";
 import { writeClipboardText } from "../clipboard";
-import { toSafeMarkdownHtml } from "../formatting/markdown";
-import { formattedTextStyles } from "./shared";
+import { parseChatMarkdown } from "../formatting/markdown";
+import type { MarkdownEngine, MarkdownParseResult } from "../formatting/markdownEngine";
+import { DEFAULT_CODE_BLOCK_POLICY, type CodeBlockPolicy } from "../formatting/codeBlockPolicy";
+import { rememberExternalMarkdownImageDimensions, restoreExternalMarkdownImageDimensions } from "../formatting/externalMarkdownImages";
+import type { MarkdownWorkspaceContext, WorkspaceFileOpenRequest } from "../formatting/workspaceLinks";
+import { formattedTextStyles } from "./formattedTextStyles";
+import { codeBlockFrameStyles } from "./codeBlockFrameStyles";
 
 @customElement("formatted-text")
 export class FormattedText extends LitElement {
+  constructor() {
+    super();
+    stylesheetIntegrationCapability.createController(this);
+    new LocalizationController(this, undefined, () => { this.labelsDirty = true; });
+  }
+
   @property() text = "";
+  @property() intentKey: string | undefined;
+  @property({ type: Boolean }) imagesEnabled = true;
+  @property({ attribute: false }) codeBlocks: CodeBlockPolicy = DEFAULT_CODE_BLOCK_POLICY;
+  @property({ attribute: false }) contentRendering: ChatContentRendering | undefined;
+  @property() machineId = "local";
+  @property({ attribute: false }) workspaceContext: MarkdownWorkspaceContext | undefined;
+
+  private readonly enhancement = new VisibleContentController(this);
+  private phase: "markdown" | "preview" | "done" = "markdown";
+  private scheduled = false;
+  private parsed: MarkdownParseResult | undefined;
+  private content: TemplateResult | undefined;
+  private displayedText = "";
+  private replacing = false;
+  private layoutChanged = false;
+  private preserveDeferredLayout = false;
+  private labelsDirty = true;
+  private readonly copyStates = new WeakMap<HTMLButtonElement, "idle" | "copied" | "failed">();
+
+  protected override willUpdate(changes: PropertyValues<this>): void {
+    const inputs = ["text", "intentKey", "imagesEnabled", "codeBlocks", "contentRendering", "machineId", "workspaceContext"] as const;
+    if (!inputs.some((key) => changes.has(key))) return;
+    this.enhancement.cancel();
+    this.scheduled = false;
+    this.phase = "markdown";
+    this.parsed = undefined;
+    // Retain stable source controls and completed previews while prose streams.
+    // New identities/replacements must never show the previous content.
+    this.replacing = !this.text.startsWith(this.displayedText) || changes.has("intentKey") || changes.has("machineId") || changes.has("workspaceContext");
+    // Initial source conversion can change wrapping dramatically. Ordinary
+    // streaming appends must not drag a reader toward the growing message tail.
+    this.preserveDeferredLayout = this.content === undefined || this.replacing || !changes.has("text");
+  }
+
+  override connectedCallback(): void {
+    super.connectedCallback();
+    this.requestUpdate();
+  }
+
+  override disconnectedCallback(): void {
+    super.disconnectedCallback();
+    this.scheduled = false;
+  }
 
   override render() {
-    return html`<div class="formatted" dir="auto" @click=${this.onFormattedClick}>${unsafeHTML(toSafeMarkdownHtml(this.text))}</div>`;
+    const className = this.codeBlocks.overflow === "scroll" ? "formatted code-blocks-scroll" : "formatted";
+    // Source is ordinary escaped Lit text. Neither Markdown nor plugin code is
+    // called by this render or by the session-loading flow. Once formatted, keep
+    // that view until its update is ready: a raw tail after a Markdown block adds
+    // a temporary line on every streaming chunk.
+    const showSource = this.replacing || this.content === undefined;
+    return html`<div class=${className} dir="auto" @load=${this.onImageLoad} @click=${this.onFormattedClick}><div class="enhanced-content" ?hidden=${this.replacing}>${this.content}</div><span class="pending-source" ?hidden=${!showSource}>${showSource ? this.text : ""}</span></div>`;
   }
 
   override updated(): void {
-    this.enhanceCodeBlocks();
+    if (this.phase !== "done" && !this.scheduled) {
+      this.scheduled = true;
+      this.enhancement.request(() => {
+        this.scheduled = false;
+        if (this.phase === "markdown") this.formatMarkdown();
+        else if (this.phase === "preview") this.enhanceMarkdown();
+        this.requestUpdate();
+      });
+    }
+    // HTML is memoized independently of geometry; apply hints on every DOM mount,
+    // in this update's microtask before paint or the chat's position-restoration frame.
+    restoreExternalMarkdownImageDimensions(this.renderRoot);
+    if (this.labelsDirty) {
+      this.labelsDirty = false;
+      // Sanitized HTML is cached independently of language. Update only owned
+      // attributes, preserving source/preview DOM, focus and transient copy state.
+      this.renderRoot.querySelectorAll<HTMLButtonElement>(".code-copy-button").forEach((button) => {
+        this.setCopyButtonState(button, this.copyStates.get(button) ?? "idle");
+      });
+      this.renderRoot.querySelectorAll(".code-block-header").forEach((header) => {
+        header.setAttribute("aria-label", messages.t("controls"));
+      });
+      this.renderRoot.querySelectorAll(".table-scroll").forEach((table) => {
+        table.setAttribute("aria-label", messages.t("table"));
+      });
+    }
+    if (this.layoutChanged) {
+      this.layoutChanged = false;
+      // Let newly mounted content hosts render their source before listeners
+      // measure the transcript; measuring empty child DOM can clamp scrolling.
+      queueMicrotask(() => {
+        if (this.isConnected) this.dispatchEvent(new CustomEvent("content-layout-changed", { bubbles: true, composed: true }));
+      });
+    }
   }
 
-  private enhanceCodeBlocks(): void {
-    this.renderRoot.querySelectorAll("pre").forEach((element) => {
-      if (!(element instanceof HTMLPreElement) || element.parentElement?.classList.contains("code-block-wrapper") === true) return;
-      const code = element.querySelector("code");
-      if (!(code instanceof HTMLElement)) return;
-      const wrapper = document.createElement("div");
-      wrapper.className = "code-block-wrapper";
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "code-copy-button";
-      button.title = "Copy code block";
-      button.setAttribute("aria-label", "Copy code block");
-      const icon = document.createElement("span");
-      icon.setAttribute("aria-hidden", "true");
-      icon.textContent = "⧉";
-      button.append(icon);
-      element.before(wrapper);
-      wrapper.append(element, button);
-    });
+  private notifyDeferredLayoutChanging(): void {
+    if (this.preserveDeferredLayout) {
+      this.dispatchEvent(new CustomEvent("content-layout-changing", { detail: this, bubbles: true, composed: true }));
+    }
   }
+
+  private get markdownEngine(): MarkdownEngine | undefined {
+    const machineId = this.workspaceContext?.machineId ?? this.machineId;
+    return this.contentRendering?.machineId === undefined || this.contentRendering.machineId === machineId
+      ? this.contentRendering?.markdown : undefined;
+  }
+
+  private formatMarkdown(): void {
+    this.notifyDeferredLayoutChanging();
+    try {
+      this.parsed = parseChatMarkdown(this.text, this.workspaceContext, this.intentKey, this.imagesEnabled, this.codeBlocks, this.markdownEngine);
+      if (this.codeBlocks.previews && this.contentRendering !== undefined) {
+        this.phase = "preview";
+        if (this.content === undefined) this.showMarkdown();
+      } else {
+        this.showMarkdown();
+        this.phase = "done";
+      }
+    } catch (error) {
+      console.warn("Chat Markdown formatting failed; source remains available", error);
+      this.replacing = true;
+      this.phase = "done";
+    }
+  }
+
+  private showMarkdown(): void {
+    this.labelsDirty = true;
+    this.layoutChanged = true;
+    this.content = html`${unsafeHTML(this.parsed?.html)}`;
+    this.displayedText = this.text;
+    this.replacing = false;
+  }
+
+  private enhanceMarkdown(): void {
+    this.notifyDeferredLayoutChanging();
+    this.labelsDirty = true;
+    try {
+      this.layoutChanged = true;
+      this.content = this.contentRendering?.renderMarkdown({
+        text: this.text,
+        machineId: this.workspaceContext?.machineId ?? this.machineId,
+        ...(this.parsed === undefined ? {} : { parsed: this.parsed }),
+        toSafeHtml: (text) => parseChatMarkdown(text, this.workspaceContext, this.intentKey, this.imagesEnabled, this.codeBlocks, this.markdownEngine).html,
+      }, this.intentKey, this.codeBlocks);
+      this.displayedText = this.text;
+      this.replacing = false;
+    } catch (error) {
+      console.warn("Chat content enhancement failed; Markdown remains available", error);
+      this.showMarkdown();
+    }
+    this.phase = "done";
+  }
+
+  private readonly onImageLoad = {
+    // Native image loads do not bubble. Capture only inside this formatting root.
+    capture: true,
+    handleEvent: (event: Event): void => {
+      if (event.target instanceof HTMLImageElement) rememberExternalMarkdownImageDimensions(event.target);
+    },
+  };
 
   private readonly onFormattedClick = (event: MouseEvent): void => {
     if (!(event.target instanceof Element)) return;
+    const anchor = event.target.closest("a[data-workspace-file]");
+    if (anchor instanceof HTMLAnchorElement && this.workspaceContext !== undefined
+      && !event.defaultPrevented && event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey
+      && (!anchor.target || anchor.target === "_self")) {
+      const path = anchor.getAttribute("data-workspace-file");
+      if (path !== null) {
+        const request = new CustomEvent<WorkspaceFileOpenRequest>("workspace-file-open", {
+          detail: { ...this.workspaceContext, path }, bubbles: true, composed: true, cancelable: true,
+        });
+        if (!this.dispatchEvent(request)) event.preventDefault();
+      }
+      return;
+    }
     const button = event.target.closest(".code-copy-button");
     if (!(button instanceof HTMLButtonElement)) return;
     const wrapper = button.closest(".code-block-wrapper");
     if (!(wrapper instanceof HTMLElement)) return;
-    const code = wrapper.querySelector("pre code");
+    const code = wrapper.querySelector("pre code, .plain-code-block");
     if (!(code instanceof HTMLElement)) return;
     void this.copyCode(code.textContent, button);
   };
@@ -63,15 +219,19 @@ export class FormattedText extends LitElement {
   }
 
   private setCopyButtonState(button: HTMLButtonElement, state: "idle" | "copied" | "failed"): void {
+    this.copyStates.set(button, state);
     const icon = button.querySelector("span");
     if (icon !== null) icon.textContent = state === "copied" ? "✓" : "⧉";
-    const label = state === "copied" ? "Copied code block" : state === "failed" ? "Failed to copy code block" : "Copy code block";
+    const label = messages.t(state === "idle" ? "copy" : state);
     button.title = label;
     button.setAttribute("aria-label", label);
   }
 
-  static override styles = [formattedTextStyles, unsafeCSS(katexStyles), css`
-    /* Preserve KaTeX layout while keeping long display formulas inside the chat column. */
+  static override styles = [formattedTextStyles, codeBlockFrameStyles, unsafeCSS(katexStyles), css`
+    /* Fork: keep long display formulas inside the chat column. */
     .katex-display { max-width: 100%; overflow-x: auto; overflow-y: hidden; padding-block: 2px; }
+    .pending-source { white-space: pre-wrap; overflow-wrap: anywhere; }
+    .enhanced-content { display: contents; }
+    .enhanced-content[hidden] { display: none; }
   `];
 }

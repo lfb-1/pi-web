@@ -1,55 +1,31 @@
+import { stylesheetIntegrationCapability } from "../plugins/styles";
 import { LitElement, html } from "lit";
 import { customElement, property } from "lit/decorators.js";
 import type { SessionStatus } from "../api";
-import { renderSessionWarningIcon, statusBarStyles } from "./shared";
+import { statusBarStyles } from "./shared";
+import { localization, LocalizationController } from "../localization/browser";
+import definitions from "./statusBar.messages";
 
-export interface StatusBarWarningControlContent {
-  countText: string;
-  accessibleLabel: string;
-}
-
-export function statusBarWarningControlContent(count: number, expanded: boolean): StatusBarWarningControlContent | undefined {
-  if (!Number.isInteger(count) || count <= 0) return undefined;
-  const warningText = `${String(count)} ${count === 1 ? "warning" : "warnings"}`;
-  return {
-    countText: String(count),
-    accessibleLabel: expanded ? `Minimise ${warningText}` : `Show ${warningText} in the warning area`,
-  };
-}
+export const statusBarMessages = localization.registerMessages("core.statusBar", definitions);
 
 @customElement("status-bar")
 export class StatusBar extends LitElement {
-  @property({ attribute: false }) status?: SessionStatus;
-  @property({ type: Number }) warningCount = 0;
-  @property({ type: Boolean }) warningsExpanded = false;
-  @property({ attribute: false }) onToggleWarnings?: () => void;
+  constructor() {
+    super();
+    stylesheetIntegrationCapability.createController(this);
+    new LocalizationController(this);
+  }
 
-  private readonly handleToggleWarnings = (): void => {
-    this.onToggleWarnings?.();
-  };
+  @property({ attribute: false }) status: SessionStatus | undefined;
 
   override render() {
     const status = this.status;
-    if (status === undefined) return html`<div class="bar muted">No session status yet</div>`;
-    const warningControl = statusBarWarningControlContent(this.warningCount, this.warningsExpanded);
-    const showWarningControl = warningControl !== undefined && this.onToggleWarnings !== undefined;
-    if (!showWarningControl && status.pendingMessageCount === 0) return null;
+    if (status === undefined) return html`<div class="bar muted">${statusBarMessages.t("empty")}</div>`;
+    // Fork: the chat footer shows only queued prompts; token, context and cost totals stay hidden.
+    if (status.pendingMessageCount === 0) return null;
     return html`
       <div class="bar">
-        ${warningControl === undefined || this.onToggleWarnings === undefined ? null : html`
-          <button
-            type="button"
-            class="warning-toggle"
-            title=${warningControl.accessibleLabel}
-            aria-label=${warningControl.accessibleLabel}
-            aria-expanded=${String(this.warningsExpanded)}
-            @click=${this.handleToggleWarnings}
-          >
-            ${renderSessionWarningIcon("warning", "warning-toggle-icon")}
-            <span>${warningControl.countText}</span>
-          </button>
-        `}
-        ${status.pendingMessageCount > 0 ? html`<span>${String(status.pendingMessageCount)} queued</span>` : null}
+        <span>${statusBarMessages.t("queued", { count: status.pendingMessageCount })}</span>
       </div>
     `;
   }

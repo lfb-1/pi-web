@@ -1,32 +1,102 @@
+import { stylesheetIntegrationCapability } from "../plugins/styles";
 import { css, html, LitElement, type PropertyValues, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
+import { cache } from "lit/directives/cache.js";
+import { live } from "lit/directives/live.js";
 import type { AppAction } from "../actions";
 import type { AttentionAlertPermission } from "../attentionAlerts";
-import { configApi, piPackagesApi, pluginsApi, type Machine, type MachineRuntime, type PiPackageMutationResponse, type PiPackageScope, type PiPackagesResponse, type PiWebConfigResponse, type PiWebConfigValues, type PiWebPluginsResponse } from "../api";
+import type { RestartServices } from "../../../plugin-api";
+import "./settings/SettingsRestartAction";
+import { loadThemeCatalog, type BrowserThemeCatalog } from "../themeCatalog";
+import { configApi, piPackagesApi, pluginsApi, type Machine, type MachineHealth, type MachineRuntime, type PiPackageMutationResponse, type PiPackageScope, type PiPackagesResponse, type PiWebConfigResponse, type PiWebConfigValues, type PiWebPluginsResponse } from "../api";
+import type { McpAuthContext, McpAuthHandler } from "./settings/SettingsMcpPanel";
+import "./settings/SettingsMcpPanel";
 import type { SettingsSection } from "../settingsRoute";
+import { revealSettingsTarget } from "./settings/settingsTarget";
 import "./ModalSurface";
+import type { ModalSurface } from "./ModalSurface";
+import "./ConfirmationDialog";
+import type { ConfirmationDialog } from "./ConfirmationDialog";
+import { hostAccessChangeBlocksHostname } from "./settings/settingsHostAccess";
+import { uiDialogStyles, uiSelectionStyles } from "./ui/dialogStyles";
 import "./settings/SettingsGeneralPanel";
+import type { SettingsGeneralPanel } from "./settings/SettingsGeneralPanel";
+import "./settings/SettingsThemePanel";
+import type { QualifiedFileIconThemeContribution, QualifiedThemeContribution } from "../plugins/types";
+import "./settings/SettingsFileIconThemePanel";
+import { configureThemePolicy, DEFAULT_THEME_PREFERENCE, type ThemePreference } from "../theme";
 import "./settings/SettingsSessiondPanel";
 import "./settings/SettingsPackagesPanel";
 import "./settings/SettingsPluginsPanel";
 import "./settings/SettingsShortcutsPanel";
-import { friendlyPiPackageErrorMessage, piPackageMutationFollowUpMessage, piPackageTargetLabel, shouldRefreshGatewayPluginsAfterPiPackageMutation, type PiPackageOperationState, type PiPackageTargetContext } from "./settings/piPackageSettings";
+import { piPackagesResponseAfterMutation, shouldRefreshGatewayPluginsAfterPiPackageMutation, type PiPackageOperationState, type PiPackageTargetContext } from "./settings/piPackageSettings";
 import { loadGatewaySettingsData, loadPiPackagesData } from "./settings/settingsDataLoading";
 import { mergeSelectedMachineAccessConfig } from "./settings/settingsMachineAccessConfig";
-import { friendlySelectedMachineSettingsErrorMessage, isSelectedMachineSettingsUnsupported, pluginLifecycleSupport, selectedMachineSettingsSupportKey, settingsMachineTarget, settingsMachineTargetLabel, type PluginLifecycleSupport, type SettingsMachineTarget } from "./settings/settingsMachineTarget";
-import { mergeSelectedMachinePluginConfig, pluginEnabledConfigPatch } from "./settings/settingsPluginConfig";
+import { isSelectedMachineSettingsUnsupported, pluginLifecycleSupport, selectedMachineSettingsSupportKey, settingsMachineTarget, type PluginLifecycleSupport, type SettingsMachineTarget } from "./settings/settingsMachineTarget";
+import { mergeSelectedMachinePluginConfig } from "./settings/settingsPluginConfig";
+import { enforcedSetting, explicitConfigUpdate, resetConfigUpdate, settingPath } from "./settings/settingsConfigUpdate";
 import { mergeSelectedMachineSessiondConfig } from "./settings/settingsSessiondConfig";
+import { configureLocalizationPolicy, LocalizationController, localization } from "../localization/browser";
+import source from "./settingsDialog.messages";
+import { settingsFeedbackTargetLabel, settingsFeedbackLifecycleUnavailable, settingsFeedbackSelectedError, settingsFeedbackPackageError, settingsFeedbackPackageFollowUp } from "./settings/settingsFeedback";
+
+export const settingsDialogMessages = localization.registerMessages("core.settingsDialog", source);
+type DisplayText = string | (() => string);
+const displayText = (value: DisplayText): string => typeof value === "function" ? value() : value;
 
 @customElement("settings-dialog")
 export class SettingsDialog extends LitElement {
+  constructor() {
+    super();
+    new LocalizationController(this);
+    stylesheetIntegrationCapability.createController(this);
+  }
+
   @property({ attribute: false }) section: SettingsSection = "general";
+  /** Browser authority for gateway lockout warnings; independent of selected machine. */
+  @property({ attribute: false }) currentHostname = typeof location === "undefined" ? "" : location.hostname;
+  /** Optional data-settings-target destination within the active section. */
+  @property({ attribute: false }) target: string | undefined;
+  private revealedTarget: string | undefined;
+  private targetRequest = 0;
   @property({ attribute: false }) actions: AppAction[] = [];
+  @property({ attribute: false }) themes: readonly QualifiedThemeContribution[] = [];
+  @property({ attribute: false }) onThemeCatalogLoaded: (catalog: BrowserThemeCatalog) => void = () => undefined;
+  @state() private themeCatalogLoading = false;
+  @state() private themeCatalogError = "";
+  private themeCatalogRequested = false;
+  @property({ attribute: false }) fileIconThemes: readonly QualifiedFileIconThemeContribution[] = [];
+  @property({ attribute: false }) fileIconPreference: string | undefined;
+  @property({ attribute: false }) onSelectFileIconTheme?: (id: string) => void;
+  @property({ attribute: false }) onResetFileIconTheme?: () => void;
+  @property({ attribute: false }) themePreference: ThemePreference = DEFAULT_THEME_PREFERENCE;
+  @property() activeThemeId = "";
+  @property({ type: Boolean }) hasLocalThemeOverride = false;
+  @property({ attribute: false }) onUseLocalTheme?: (preference: ThemePreference) => void;
+  @property({ attribute: false }) onUseDefaultTheme?: () => void;
+  @property({ attribute: false }) mcpContext: McpAuthContext | undefined;
+  @property({ attribute: false }) onMcpAuth?: McpAuthHandler;
   @property({ attribute: false }) machine: Machine | undefined;
   @property({ attribute: false }) machineRuntime: MachineRuntime | undefined;
+  @property({ attribute: false }) machines: Machine[] = [];
+  @property({ attribute: false }) machineStatuses: Record<string, MachineHealth> = {};
+  @property({ attribute: false }) machineRuntimes: Record<string, MachineRuntime> = {};
+  @state() private settingsMachineId: string | undefined;
+  @state() private pendingMachineId: string | undefined;
+  private generalPanel: SettingsGeneralPanel | undefined;
   @property({ attribute: false }) attentionAlertsPermission: AttentionAlertPermission = "unsupported";
   @property({ attribute: false }) onEnableAttentionAlerts?: () => void | Promise<void>;
   @property({ attribute: false }) onNavigate?: (section: SettingsSection) => void;
   @property({ attribute: false }) onClose?: () => void;
+  @property({ attribute: false }) onRestart?: (machineId: string, services: RestartServices) => Promise<void>;
+  @state() private restartRequest: { machineId: string; services: RestartServices } | undefined;
+  private get restarting(): boolean { return this.restartRequest !== undefined; }
+  @state() private restartFailure: { machineId: string; services: RestartServices; error: string } | undefined;
+  @property({ attribute: false }) onMachineConfigSaved?: (machineId: string) => void;
+  @property({ attribute: false }) onGatewayConfigLoaded?: (response: PiWebConfigResponse) => void;
+  /** A completed write from a closed dialog requires an authoritative refresh. */
+  @property({ attribute: false }) onGatewayConfigInvalidated?: () => void;
+  private gatewayPublisherRetired = false;
   @property({ attribute: false }) onConfigSaved?: (config: PiWebConfigValues) => void;
   @property({ attribute: false }) onRefreshMachineRuntime?: (machineId: string) => void | Promise<void>;
   @state() private configResponse: PiWebConfigResponse | undefined;
@@ -42,14 +112,30 @@ export class SettingsDialog extends LitElement {
   @state() private pluginLoading = true;
   @state() private packageLoading = true;
   @state() private saving = false;
+  private gatewayConfirmationPending = false;
   @state() private packageOperation: PiPackageOperationState | undefined;
-  @state() private error = "";
-  @state() private accessError = "";
-  @state() private sessiondError = "";
-  @state() private pluginError = "";
-  @state() private packageError = "";
-  @state() private savedMessage = "";
-  @state() private packageMessage = "";
+  @state() private errorPresentation: DisplayText = "";
+  private get error(): string { return displayText(this.errorPresentation); }
+  private set error(value: DisplayText) { this.errorPresentation = value; }
+  @state() private accessErrorPresentation: DisplayText = "";
+  private get accessError(): string { return displayText(this.accessErrorPresentation); }
+  private set accessError(value: DisplayText) { this.accessErrorPresentation = value; }
+  @state() private sessiondErrorPresentation: DisplayText = "";
+  private get sessiondError(): string { return displayText(this.sessiondErrorPresentation); }
+  private set sessiondError(value: DisplayText) { this.sessiondErrorPresentation = value; }
+  @state() private pluginErrorPresentation: DisplayText = "";
+  private get pluginError(): string { return displayText(this.pluginErrorPresentation); }
+  private set pluginError(value: DisplayText) { this.pluginErrorPresentation = value; }
+  @state() private packageErrorPresentation: DisplayText = "";
+  private get packageError(): string { return displayText(this.packageErrorPresentation); }
+  private set packageError(value: DisplayText) { this.packageErrorPresentation = value; }
+  @state() private savedMessagePresentation: DisplayText = "";
+  private get savedMessage(): string { return displayText(this.savedMessagePresentation); }
+  private set savedMessage(value: DisplayText) { this.savedMessagePresentation = value; }
+  @state() private savedSection: SettingsSection | undefined;
+  @state() private packageMessagePresentation: DisplayText = "";
+  private get packageMessage(): string { return displayText(this.packageMessagePresentation); }
+  private set packageMessage(value: DisplayText) { this.packageMessagePresentation = value; }
   private savedMessageTimer: number | undefined;
   private loadRequestSeq = 0;
   private accessLoadRequestSeq = 0;
@@ -59,7 +145,9 @@ export class SettingsDialog extends LitElement {
   private packageMutationSeq = 0;
 
   override connectedCallback(): void {
+    this.gatewayPublisherRetired = false;
     super.connectedCallback();
+    this.loadThemeCatalogForGeneral();
     void this.loadConfig();
     void this.loadAccessConfigForTarget();
     void this.reloadSessiondState();
@@ -68,64 +156,191 @@ export class SettingsDialog extends LitElement {
   }
 
   override disconnectedCallback(): void {
+    this.gatewayPublisherRetired = true;
+    // A closed dialog must not publish an old read over a newer dialog's save.
+    this.loadRequestSeq += 1;
     if (this.savedMessageTimer !== undefined) window.clearTimeout(this.savedMessageTimer);
     this.savedMessageTimer = undefined;
     super.disconnectedCallback();
   }
 
   protected override updated(changed: PropertyValues<this>): void {
+    if (changed.has("target") || changed.has("section")) this.revealedTarget = undefined;
+    void this.revealTarget();
+    if (changed.has("section")) {
+      this.loadThemeCatalogForGeneral();
+      // The surface must render its slot before the mobile tab row has layout.
+      const surface = this.renderRoot.querySelector<ModalSurface>("modal-surface");
+      void surface?.updateComplete.then(() => {
+        if (this.isConnected) this.renderRoot.querySelector(".settings-nav button.selected")?.scrollIntoView({ block: "nearest", inline: "nearest" });
+      });
+    }
+    if (this.isConnected) {
+      const generalPanel = this.renderRoot.querySelector<SettingsGeneralPanel>("settings-general-panel");
+      if (generalPanel !== null) this.generalPanel = generalPanel;
+    }
     const currentTarget = this.settingsTarget();
-    if (changed.has("machine")) {
-      const previousTarget = settingsMachineTarget(changed.get("machine"));
+    if (changed.has("machine") || changed.has("machines")) {
+      const previousTarget = settingsMachineTarget(this.selectedSettingsMachine(
+        changed.has("machines") ? changed.get("machines") ?? [] : this.machines,
+        changed.has("machine") ? changed.get("machine") : this.machine,
+        this.settingsMachineId,
+      ));
       if (previousTarget.id !== currentTarget.id) {
-        this.resetAccessStateForTargetChange();
-        if (this.isConnected) void this.loadAccessConfigForTarget(currentTarget);
-        this.resetSessiondStateForTargetChange();
-        if (this.isConnected) void this.loadSessiondConfigForTarget(currentTarget);
-        this.resetPluginStateForTargetChange();
-        if (this.isConnected) void this.loadPluginsForTarget(currentTarget);
-        this.resetPackageStateForTargetChange();
-        if (this.isConnected) void this.loadPackagesForTarget(currentTarget);
+        this.reloadForTargetChange(currentTarget);
         return;
       }
     }
 
-    if (!changed.has("machineRuntime")) return;
-    if (!this.pluginLifecycleSupportNeedsReload(changed.get("machineRuntime"), currentTarget)) return;
+    if (!changed.has("machineRuntime") && !changed.has("machineRuntimes")) return;
+    const previousRuntime = this.settingsRuntime(
+      changed.has("machineRuntimes") ? changed.get("machineRuntimes") ?? {} : this.machineRuntimes,
+      changed.has("machineRuntime") ? changed.get("machineRuntime") : this.machineRuntime,
+      currentTarget,
+    );
+    if (!this.pluginLifecycleSupportNeedsReload(previousRuntime, currentTarget)) return;
     this.resetPluginStateForTargetChange();
     if (this.isConnected) void this.loadPluginsForTarget(currentTarget);
   }
 
+  private async revealTarget(): Promise<void> {
+    const request = ++this.targetRequest;
+    const target = this.target;
+    if (target === undefined || target === this.revealedTarget || !this.isConnected) return;
+    const isCurrent = () => this.isConnected && request === this.targetRequest && this.target === target;
+    if (await revealSettingsTarget(this.renderRoot, target, isCurrent)) this.revealedTarget = target;
+    // Missing targets can appear after a configuration load. The next render
+    // retries; a successful reveal is one-shot so saves do not steal focus.
+  }
+
+  private loadThemeCatalogForGeneral(): void {
+    if (this.isConnected && this.section === "general" && !this.themeCatalogRequested) void this.loadThemeInventory();
+  }
+
+  private async loadThemeInventory(): Promise<void> {
+    if (this.themeCatalogLoading) return;
+    this.themeCatalogRequested = true;
+    this.themeCatalogLoading = true;
+    this.themeCatalogError = "";
+    try {
+      const catalog = await loadThemeCatalog();
+      if (this.isConnected) this.onThemeCatalogLoaded(catalog);
+    } catch (error) {
+      if (this.isConnected) this.themeCatalogError = error instanceof Error ? error.message : String(error);
+    } finally {
+      this.themeCatalogLoading = false;
+    }
+  }
+
   override render(): TemplateResult {
     return html`
-      <modal-surface .onClose=${() => this.onClose?.()} .label=${"PI WEB settings"}>
-        <header class="settings-header">
-          <div>
-            <span class="eyebrow">Settings</span>
-            <h1>PI WEB</h1>
-          </div>
-          <button class="close-button" title="Close settings" aria-label="Close settings" @click=${() => this.onClose?.()}>×</button>
+      <modal-surface .onClose=${() => this.onClose?.()} .label=${settingsDialogMessages.t("label")}>
+        <header class="settings-header ui-dialog-header">
+          <h1 class="ui-dialog-title">${settingsDialogMessages.t("heading")}</h1>
+          <button class="close-button ui-button ui-button--icon" title=${settingsDialogMessages.t("close")} aria-label=${settingsDialogMessages.t("close")} @click=${() => this.onClose?.()}>×</button>
         </header>
         <div class="settings-body">
-          <nav class="settings-nav" aria-label="Settings sections">
-            ${this.renderNavButton("general", "General", "Gateway + selected machine")}
-            ${this.renderNavButton("sessiond", "Session daemon", "Selected machine")}
-            ${this.renderNavButton("packages", "Pi packages", "Selected machine")}
-            ${this.renderNavButton("plugins", "PI WEB plugins", "Selected machine")}
-            ${this.renderNavButton("shortcuts", "Keyboard", "Gateway shortcuts")}
+          <nav class="settings-nav" aria-label=${settingsDialogMessages.t("sections")}>
+            ${this.renderNavButton("general", settingsDialogMessages.t("general"), settingsDialogMessages.t("generalDetail"))}
+            ${this.renderNavButton("sessiond", settingsDialogMessages.t("sessiond"), settingsDialogMessages.t("selectedMachine"))}
+            ${this.renderNavButton("packages", settingsDialogMessages.t("packages"), settingsDialogMessages.t("selectedMachine"))}
+            ${this.renderNavButton("plugins", settingsDialogMessages.t("plugins"), settingsDialogMessages.t("selectedMachine"))}
+            ${this.renderNavButton("mcp", settingsDialogMessages.t("mcp"), settingsDialogMessages.t("selectedSession"))}
+            ${this.renderNavButton("shortcuts", settingsDialogMessages.t("shortcuts"), settingsDialogMessages.t("gateway"))}
           </nav>
-          <main class="settings-content">
-            ${this.renderActiveSection()}
+          <main class="settings-main">
+            ${this.renderMachineSelector()}
+            ${this.renderMachineSwitchConfirmation()}
+            <div class="settings-content">${cache(this.renderActiveSection())}</div>
           </main>
         </div>
       </modal-surface>
+      <confirmation-dialog></confirmation-dialog>
+    `;
+  }
+
+  private renderMachineSelector(): TemplateResult | null {
+    if (this.machines.length <= 1) return null;
+    const target = this.settingsTarget();
+    const health = this.machineStatuses[target.id];
+    const machine = this.machines.find((candidate) => candidate.id === target.id);
+    const runtime = this.settingsRuntime(this.machineRuntimes, this.machineRuntime, target);
+    const status = health?.status ?? (health === undefined ? machine?.status ?? (runtime === undefined ? "unknown" : runtime.ok ? "online" : "offline") : health.ok ? "online" : "offline");
+    const statusLabel = settingsDialogMessages.t(status === "online" ? "connected" : status === "unknown" ? "unchecked" : "unavailable");
+    const unavailable = status === "offline" || status === "error";
+    const statusMessage = unavailable ? health?.error ?? machine?.statusMessage ?? runtime?.error : undefined;
+    return html`
+      <div class="settings-machine">
+        <label for="settings-machine">${settingsDialogMessages.t("configure")}</label>
+        <select class="ui-select" id="settings-machine" aria-describedby=${unavailable ? "settings-machine-help settings-machine-status settings-machine-error" : "settings-machine-help settings-machine-status"} .value=${live(target.id)} ?disabled=${this.saving || this.restarting} @change=${(event: Event) => {
+          if (event.target instanceof HTMLSelectElement) this.requestMachineSwitch(event.target.value);
+        }}>
+          ${this.machines.map((candidate) => html`<option value=${candidate.id}>${settingsDialogMessages.t("machineOption", { name: candidate.name, kind: candidate.kind })}</option>`)}
+        </select>
+        <small id="settings-machine-status" class=${unavailable ? "machine-status unavailable" : "machine-status"} role="status">${statusLabel}</small>
+        <details class="machine-scope">
+          <summary>${settingsDialogMessages.t("scopeHeading")}</summary>
+          <p id="settings-machine-help">${settingsDialogMessages.t("scopeHelp")}</p>
+        </details>
+        ${unavailable ? html`<p id="settings-machine-error" class="machine-connection-error" role="status"><span dir="auto">${statusMessage ?? settingsDialogMessages.t("machineUnavailable")}</span><br>${settingsDialogMessages.t("connectionHelp")}</p>` : null}
+      </div>
+    `;
+  }
+
+  private requestMachineSwitch(machineId: string): void {
+    if (this.saving || this.restarting || !this.machines.some((machine) => machine.id === machineId)) return;
+    if (machineId === this.settingsTarget().id) {
+      this.pendingMachineId = undefined;
+    } else if (this.generalPanel?.hasUnsavedMachineChanges === true) {
+      this.pendingMachineId = machineId;
+    } else {
+      this.switchSettingsMachine(machineId);
+    }
+    // A pending confirmation keeps the native select on the current target.
+    this.requestUpdate();
+  }
+
+  private switchSettingsMachine(machineId: string): void {
+    this.settingsMachineId = machineId;
+    this.pendingMachineId = undefined;
+    this.reloadForTargetChange(this.settingsTarget());
+  }
+
+  private reloadForTargetChange(target: SettingsMachineTarget): void {
+    this.resetAccessStateForTargetChange();
+    this.resetSessiondStateForTargetChange();
+    this.resetPluginStateForTargetChange();
+    this.resetPackageStateForTargetChange();
+    if (!this.isConnected) return;
+    void this.loadAccessConfigForTarget(target);
+    void this.reloadSessiondState(target);
+    void this.loadPluginsForTarget(target);
+    void this.loadPackagesForTarget(target);
+  }
+
+  private renderMachineSwitchConfirmation(): TemplateResult | null {
+    const pending = this.machines.find((machine) => machine.id === this.pendingMachineId);
+    if (pending === undefined) return null;
+    return html`
+      <section class="machine-switch-confirmation" role="alert" aria-label=${settingsDialogMessages.t("unsaved")}>
+        <p>${settingsDialogMessages.t("switchPrompt", { current: this.settingsTarget().name, next: pending.name })}</p>
+        <button class="ui-button ui-button--action danger" ?disabled=${this.saving} @click=${() => { this.generalPanel?.discardMachineChanges(); this.switchSettingsMachine(pending.id); }}>${settingsDialogMessages.t("discard")}</button>
+        <button class="ui-button ui-button--action" @click=${() => { this.pendingMachineId = undefined; }}>${settingsDialogMessages.t("keepEditing")}</button>
+      </section>
     `;
   }
 
   private renderActiveSection(): TemplateResult {
-    // Keep the section -> panel routing in sync with the public
-    // `activeSettingsPanelTag` seam below, which tests assert against instead of
-    // scraping this template's markup.
+    if (this.section === "mcp") {
+      const target = this.settingsTarget();
+      return html`
+        <settings-mcp-panel
+          .context=${this.mcpContext?.machineId === target.id ? this.mcpContext : undefined}
+          .targetLabel=${settingsFeedbackTargetLabel(target)}
+          .onMcpAuth=${this.onMcpAuth}
+        ></settings-mcp-panel>
+      `;
+    }
     if (this.section === "sessiond") {
       return html`
         <settings-sessiond-panel
@@ -133,10 +348,12 @@ export class SettingsDialog extends LitElement {
           .loading=${this.sessiondLoading}
           .saving=${this.saving}
           .error=${this.sessiondError}
-          .savedMessage=${this.savedMessage}
-          .targetLabel=${settingsMachineTargetLabel(this.settingsTarget())}
+          .savedMessage=${this.savedSection === "sessiond" ? this.savedMessage : ""}
+          .restartAction=${this.renderRestartAction(this.settingsTarget(), "sessiond", this.sessiondLoading)}
+          .targetLabel=${settingsFeedbackTargetLabel(this.settingsTarget())}
           .onReload=${() => this.reloadSessiondState()}
-          .onSave=${(config: PiWebConfigValues) => this.saveSessiondConfig(config)}
+          .onSave=${(config: PiWebConfigValues, unset?: string[]) => this.saveSessiondConfig(config, unset)}
+          .onReset=${(paths: string[]) => this.saveSessiondConfig({}, paths)}
         ></settings-sessiond-panel>
       `;
     }
@@ -148,9 +365,10 @@ export class SettingsDialog extends LitElement {
           .loading=${this.loading}
           .saving=${this.saving}
           .error=${this.error}
-          .savedMessage=${this.savedMessage}
+          .savedMessage=${this.savedSection === "shortcuts" ? this.savedMessage : ""}
           .onReload=${() => this.loadConfig()}
           .onSave=${(config: PiWebConfigValues) => this.saveConfig(config)}
+          .onReset=${(paths: string[]) => this.saveConfig({}, paths)}
         ></settings-shortcuts-panel>
       `;
     }
@@ -179,10 +397,12 @@ export class SettingsDialog extends LitElement {
           .saving=${this.saving}
           .recoveryCommandsSupported=${this.pluginLifecycleSupport().state === "supported"}
           .error=${this.pluginError}
-          .savedMessage=${this.savedMessage}
-          .targetLabel=${settingsMachineTargetLabel(this.settingsTarget())}
+          .savedMessage=${this.savedSection === "plugins" ? this.savedMessage : ""}
+          .restartAction=${this.renderRestartAction(this.settingsTarget(), "sessiond", this.pluginLoading)}
+          .targetLabel=${settingsFeedbackTargetLabel(this.settingsTarget())}
           .onReload=${() => this.loadPluginsForTarget()}
           .onTogglePlugin=${(pluginId: string, enabled: boolean) => this.togglePlugin(pluginId, enabled)}
+          .onResetPlugin=${(pluginId: string) => this.togglePlugin(pluginId)}
         ></settings-plugins-panel>
       `;
     }
@@ -195,22 +415,90 @@ export class SettingsDialog extends LitElement {
         .saving=${this.saving}
         .error=${this.error}
         .machineError=${this.accessError}
-        .savedMessage=${this.savedMessage}
-        .targetLabel=${settingsMachineTargetLabel(this.settingsTarget())}
+        .savedMessage=${this.savedSection === "general" ? this.savedMessage : ""}
+        .restartAction=${this.gatewayRestartAvailable() ? this.renderRestartAction(settingsMachineTarget(this.machines.find((machine) => machine.kind === "local")), "web", this.loading) : undefined}
+        .targetLabel=${settingsFeedbackTargetLabel(this.settingsTarget())}
+        .targetId=${this.settingsTarget().id}
         .attentionAlertsPermission=${this.attentionAlertsPermission}
         .onEnableAttentionAlerts=${this.onEnableAttentionAlerts}
         .onReload=${() => this.loadConfig()}
         .onReloadMachine=${() => this.loadAccessConfigForTarget()}
-        .onSave=${(config: PiWebConfigValues) => this.saveConfig(config)}
-        .onSaveMachineConfig=${(config: PiWebConfigValues) => this.saveMachineAccessConfig(config)}
-      ></settings-general-panel>
+        .onSave=${(config: PiWebConfigValues, unset?: string[]) => this.saveConfig(config, unset)}
+        .onReset=${(paths: string[]) => this.saveConfig({}, paths)}
+        .onResetMachine=${(paths: string[]) => this.saveMachineAccessConfig({}, paths)}
+        .onSetQuietMode=${(quietMode: boolean) => this.saveQuietMode(quietMode)}
+        .onSaveMachineConfig=${(config: PiWebConfigValues, unset?: string[]) => this.saveMachineAccessConfig(config, unset)}
+      >
+        <settings-theme-panel
+          slot="appearance"
+          .themes=${this.themes}
+          .catalogLoading=${this.themeCatalogLoading}
+          .catalogError=${this.themeCatalogError}
+          .onRetryCatalog=${() => this.loadThemeInventory()}
+          .configResponse=${this.configResponse}
+          .onReset=${(paths: string[]) => this.saveConfig({}, paths)}
+          .preference=${this.themePreference}
+          .defaultPreference=${this.configResponse?.effectiveConfig.defaultTheme ?? DEFAULT_THEME_PREFERENCE}
+          .activeThemeId=${this.activeThemeId}
+          .hasLocalOverride=${this.hasLocalThemeOverride}
+          .loading=${this.loading || this.configResponse === undefined}
+          .saving=${this.saving}
+          .onUseLocal=${this.onUseLocalTheme}
+          .onUseDefault=${this.onUseDefaultTheme}
+          .onSetDefault=${(preference: ThemePreference) => this.saveDefaultTheme(preference)}
+        ></settings-theme-panel>
+        <settings-file-icon-theme-panel
+          slot="appearance"
+          .themes=${this.fileIconThemes}
+          .preference=${this.fileIconPreference}
+          .onSelect=${this.onSelectFileIconTheme}
+          .onReset=${this.onResetFileIconTheme}
+        ></settings-file-icon-theme-panel>
+      </settings-general-panel>
     `;
+  }
+
+  private gatewayRestartAvailable(): boolean {
+    // The API reports active hostname policy, but not the running host/port.
+    // Matching policy cannot prove network settings are active, and tracking
+    // saves in this dialog would lose that evidence when Settings is recreated.
+    // Keep an explicit restart available without claiming one is required.
+    return this.configResponse !== undefined;
+  }
+
+  private renderRestartAction(target: SettingsMachineTarget, services: "web" | "sessiond", loading: boolean): TemplateResult | undefined {
+    if (this.onRestart === undefined) return undefined;
+    const failure = this.restartFailure;
+    return html`<settings-restart-action
+      .targetLabel=${settingsFeedbackTargetLabel(target)}
+      .services=${services}
+      .disabled=${loading || this.saving || this.restarting}
+      .pending=${this.restartRequest?.machineId === target.id && this.restartRequest.services === services}
+      .error=${failure?.machineId === target.id && failure.services === services ? failure.error : ""}
+      .onRestart=${() => this.restart(target.id, services)}
+    ></settings-restart-action>`;
+  }
+
+  private async restart(machineId: string, services: RestartServices): Promise<void> {
+    const onRestart = this.onRestart;
+    if (this.restarting || this.saving || onRestart === undefined) return;
+    this.restartRequest = { machineId, services };
+    this.restartFailure = undefined;
+    try {
+      // The parent owns terminal navigation and may close Settings after launch.
+      // Resolving the callback does not prove that services have restarted.
+      await onRestart(machineId, services);
+    } catch (error) {
+      this.restartFailure = { machineId, services, error: errorMessage(error) };
+    } finally {
+      this.restartRequest = undefined;
+    }
   }
 
   private renderNavButton(section: SettingsSection, label: string, detail: string): TemplateResult {
     const selected = this.section === section;
     return html`
-      <button class=${selected ? "selected" : ""} aria-current=${selected ? "page" : "false"} @click=${() => { this.navigate(section); }}>
+      <button class=${`ui-button ui-selection-option${selected ? " selected" : ""}`} aria-current=${selected ? "page" : "false"} @click=${() => { this.navigate(section); }}>
         <strong>${label}</strong>
         <small>${detail}</small>
       </button>
@@ -219,6 +507,28 @@ export class SettingsDialog extends LitElement {
 
   private navigate(section: SettingsSection): void {
     this.onNavigate?.(section);
+  }
+
+  private publishGatewayConfig(response: PiWebConfigResponse): void {
+    if (this.gatewayPublisherRetired) {
+      // The write still happened, but this dialog no longer owns the snapshot.
+      // In particular, a selected-machine save may have merged into old config.
+      this.onGatewayConfigInvalidated?.();
+      return;
+    }
+    // An accepted write also supersedes reads started while it was in flight.
+    this.loadRequestSeq += 1;
+    this.loading = false;
+    configureThemePolicy(response);
+    void configureLocalizationPolicy(response).catch((error: unknown) => {
+      console.warn("Failed to apply gateway localization policy", error);
+    });
+    this.onGatewayConfigLoaded?.(response);
+    this.onConfigSaved?.(response.effectiveConfig);
+  }
+
+  reloadGatewayConfig(): Promise<void> {
+    return this.loadConfig();
   }
 
   private async loadConfig(): Promise<void> {
@@ -232,9 +542,18 @@ export class SettingsDialog extends LitElement {
       });
       if (!this.isCurrentLoad(requestSeq)) return;
 
-      if (result.config !== undefined) this.configResponse = result.config;
+      if (result.config !== undefined) {
+        this.configResponse = result.config;
+        this.publishGatewayConfig(result.config);
+      }
       if (result.plugins !== undefined) this.pluginsResponse = result.plugins;
-      this.error = result.error;
+      const failure = result.failure;
+      this.error = failure === undefined ? "" : () => settingsDialogMessages.t("loadGateway", {
+        errors: localization.list([
+          ...(failure.config === undefined ? [] : [settingsDialogMessages.t("configDiagnostic", { error: failure.config })]),
+          ...(failure.plugins === undefined ? [] : [settingsDialogMessages.t("pluginsDiagnostic", { error: failure.plugins })]),
+        ]),
+      });
     } finally {
       if (this.isCurrentLoad(requestSeq)) this.loading = false;
     }
@@ -250,7 +569,8 @@ export class SettingsDialog extends LitElement {
       this.accessConfigResponse = response;
     } catch (error) {
       if (this.isCurrentAccessLoad(requestSeq, target)) {
-        this.accessError = `Failed to load file access/upload config from ${settingsMachineTargetLabel(target)}: ${friendlySelectedMachineSettingsErrorMessage(errorMessage(error), target)}`;
+        const diagnostic = errorMessage(error);
+        this.accessError = () => settingsDialogMessages.t("loadAccess", { target: settingsFeedbackTargetLabel(target), error: settingsFeedbackSelectedError(diagnostic, target) });
       }
     } finally {
       if (this.isCurrentAccessLoad(requestSeq, target)) this.accessLoading = false;
@@ -274,7 +594,8 @@ export class SettingsDialog extends LitElement {
       this.sessiondConfigResponse = response;
     } catch (error) {
       if (this.isCurrentSessiondLoad(requestSeq, target)) {
-        this.sessiondError = `Failed to load session-daemon config from ${settingsMachineTargetLabel(target)}: ${friendlySelectedMachineSettingsErrorMessage(errorMessage(error), target)}`;
+        const diagnostic = errorMessage(error);
+        this.sessiondError = () => settingsDialogMessages.t("loadSessiond", { target: settingsFeedbackTargetLabel(target), error: settingsFeedbackSelectedError(diagnostic, target) });
       }
     } finally {
       if (this.isCurrentSessiondLoad(requestSeq, target)) this.sessiondLoading = false;
@@ -293,10 +614,14 @@ export class SettingsDialog extends LitElement {
           if (!this.isCurrentPluginLoad(requestSeq, target)) return;
           this.selectedPluginConfigResponse = config;
           this.selectedPluginsResponse = undefined;
-          this.pluginError = lifecycleSupport.message ?? `Plugin lifecycle diagnostics are not available on ${settingsMachineTargetLabel(target)}.`;
+          this.pluginError = () => settingsFeedbackLifecycleUnavailable(target);
         } catch (error) {
           if (!this.isCurrentPluginLoad(requestSeq, target)) return;
-          this.pluginError = `Failed to load PI WEB plugin config from ${settingsMachineTargetLabel(target)}: ${friendlySelectedMachineSettingsErrorMessage(errorMessage(error), target)}; ${lifecycleSupport.message ?? "plugin lifecycle diagnostics are unsupported"}`;
+          const diagnostic = errorMessage(error);
+          this.pluginError = () => settingsDialogMessages.t("loadPluginConfigUnsupported", {
+            target: settingsFeedbackTargetLabel(target), error: settingsFeedbackSelectedError(diagnostic, target),
+            support: settingsFeedbackLifecycleUnavailable(target),
+          });
         }
         return;
       }
@@ -304,14 +629,14 @@ export class SettingsDialog extends LitElement {
       const [config, plugins] = await Promise.allSettled([configApi.config(target.id), pluginsApi.plugins(target.id)]);
       if (!this.isCurrentPluginLoad(requestSeq, target)) return;
 
-      const errors: string[] = [];
+      const errors: (() => string)[] = [];
       if (config.status === "fulfilled") this.selectedPluginConfigResponse = config.value;
-      else errors.push(`config: ${friendlySelectedMachineSettingsErrorMessage(errorMessage(config.reason), target)}`);
+      else errors.push(() => settingsDialogMessages.t("configDiagnostic", { error: settingsFeedbackSelectedError(errorMessage(config.reason), target) }));
 
       if (plugins.status === "fulfilled") this.selectedPluginsResponse = plugins.value;
-      else errors.push(`PI WEB plugins: ${friendlySelectedMachineSettingsErrorMessage(errorMessage(plugins.reason), target)}`);
+      else errors.push(() => settingsDialogMessages.t("pluginsDiagnostic", { error: settingsFeedbackSelectedError(errorMessage(plugins.reason), target) }));
 
-      this.pluginError = errors.length === 0 ? "" : `Failed to load PI WEB plugin settings from ${settingsMachineTargetLabel(target)}: ${errors.join("; ")}`;
+      this.pluginError = errors.length === 0 ? "" : () => settingsDialogMessages.t("loadPluginSettings", { target: settingsFeedbackTargetLabel(target), errors: localization.list(errors.map((error) => error())) });
     } finally {
       if (this.isCurrentPluginLoad(requestSeq, target)) this.pluginLoading = false;
     }
@@ -327,107 +652,190 @@ export class SettingsDialog extends LitElement {
       if (!this.isCurrentPackageLoad(requestSeq, target)) return;
 
       this.packagesResponse = result.packagesResponse;
-      this.packageError = result.error;
+      const failure = result.failure;
+      this.packageError = failure === undefined ? "" : () => settingsDialogMessages.t("loadPackages", { target: settingsFeedbackTargetLabel(target), error: settingsFeedbackPackageError(failure, target) });
     } finally {
       if (this.isCurrentPackageLoad(requestSeq, target)) this.packageLoading = false;
     }
   }
 
-  private async togglePlugin(pluginId: string, enabled: boolean): Promise<void> {
+  private async togglePlugin(pluginId: string, enabled?: boolean): Promise<void> {
     if (this.saving) return;
     const target = this.settingsTarget();
     const lifecycleSupport = this.pluginLifecycleSupport(target);
     if (this.selectedPluginConfigResponse === undefined) {
-      this.pluginError = `Plugin config is not loaded for ${settingsMachineTargetLabel(target)}. Reload before changing plugin enablement.`;
+      this.pluginError = () => settingsDialogMessages.t("pluginConfigMissing", { target: settingsFeedbackTargetLabel(target) });
       return;
     }
-    const patch = pluginEnabledConfigPatch(this.selectedPluginConfigResponse.config, pluginId, enabled);
+    const path = settingPath("plugins", pluginId, "enabled");
+    if (enforcedSetting(this.selectedPluginConfigResponse, path) !== undefined) return;
+    const update = enabled === undefined
+      ? resetConfigUpdate(this.selectedPluginConfigResponse, [path])
+      : { set: { plugins: { [pluginId]: { enabled } } } };
     this.saving = true;
     this.pluginError = "";
     this.savedMessage = "";
     try {
-      const response = await configApi.saveConfig(patch, target.id);
+      const response = await configApi.updateConfig(update, target.id);
       if (!this.isCurrentSettingsTarget(target)) return;
       this.selectedPluginConfigResponse = response;
       if (target.kind === "local" && this.configResponse !== undefined) {
         this.configResponse = mergeSelectedMachinePluginConfig(this.configResponse, response);
-        this.onConfigSaved?.(this.configResponse.effectiveConfig);
+        this.publishGatewayConfig(this.configResponse);
       }
-      let pluginRefreshError: string | undefined;
+      let pluginRefreshError: DisplayText | undefined;
       if (isSelectedMachineSettingsUnsupported(lifecycleSupport)) {
         this.selectedPluginsResponse = undefined;
-        pluginRefreshError = lifecycleSupport.message ?? `Plugin lifecycle diagnostics are not available on ${settingsMachineTargetLabel(target)}.`;
+        pluginRefreshError = () => settingsFeedbackLifecycleUnavailable(target);
       } else {
         pluginRefreshError = await this.refreshPluginsForTarget(target);
       }
       if (!this.isCurrentSettingsTarget(target)) return;
       if (pluginRefreshError !== undefined) this.pluginError = pluginRefreshError;
-      this.showSavedMessage();
+      this.showSavedMessage(() => settingsDialogMessages.t("pluginsSaved", { name: target.name }), "plugins");
     } catch (error) {
       if (this.isCurrentSettingsTarget(target)) {
-        this.pluginError = `Failed to save PI WEB plugin config on ${settingsMachineTargetLabel(target)}: ${friendlySelectedMachineSettingsErrorMessage(errorMessage(error), target)}`;
+        const diagnostic = errorMessage(error);
+        this.pluginError = () => settingsDialogMessages.t("savePlugins", { target: settingsFeedbackTargetLabel(target), error: settingsFeedbackSelectedError(diagnostic, target) });
       }
     } finally {
       this.saving = false;
     }
   }
 
-  private async saveConfig(config: PiWebConfigValues): Promise<void> {
+  private async saveConfig(config: PiWebConfigValues, unset: string[] = []): Promise<void> {
+    if (this.saving || this.gatewayConfirmationPending) return;
+    const section = this.section === "shortcuts" ? "shortcuts" : "general";
+    this.loadRequestSeq += 1;
+    this.loading = false;
+    this.error = "";
+    this.savedMessage = "";
+    try {
+      const snapshot = this.configResponse;
+      const update = { ...explicitConfigUpdate(snapshot, config), ...resetConfigUpdate(snapshot, unset) };
+      if (hostAccessChangeBlocksHostname(update, snapshot?.defaultsConfig, this.currentHostname)) {
+        const confirmation = this.renderRoot.querySelector<ConfirmationDialog>("confirmation-dialog");
+        if (confirmation === null) throw new Error("Settings confirmation is unavailable");
+        const hostname = this.currentHostname;
+        // Keep the opener enabled until approval so Cancel can restore focus.
+        // This guard still rejects duplicate submissions while the modal is open.
+        this.gatewayConfirmationPending = true;
+        const accepted = await confirmation.request({
+          title: () => settingsDialogMessages.t("hostAccessConfirmTitle"),
+          message: () => settingsDialogMessages.t("hostAccessConfirmMessage", { hostname }),
+          confirmLabel: () => settingsDialogMessages.t("saveAnyway"),
+          cancelLabel: () => settingsDialogMessages.t("cancelSave"),
+        });
+        // Approval belongs to this write and snapshot, never a refreshed policy
+        // or a settings dialog that has since closed.
+        if (!accepted || !this.isConnected || this.configResponse !== snapshot) return;
+      }
+      this.saving = true;
+      const response = await configApi.updateConfig(update);
+      this.configResponse = response;
+      this.publishGatewayConfig(response);
+      this.showSavedMessage(() => section === "shortcuts" ? settingsDialogMessages.t("shortcutsSaved")
+        : unset.length === 1 && unset[0] === "/defaultTheme" ? settingsDialogMessages.t("themeSaved")
+        : unset.length === 1 && unset[0] === "/quietMode" ? settingsDialogMessages.t("quietSaved", { enabled: String(response.effectiveConfig.quietMode === true) })
+        : settingsDialogMessages.t("gatewaySaved"), section);
+    } catch (error) {
+      const diagnostic = errorMessage(error);
+      this.error = () => settingsDialogMessages.t("settingsFailure", { error: diagnostic });
+    } finally {
+      this.gatewayConfirmationPending = false;
+      this.saving = false;
+    }
+  }
+
+  private async saveDefaultTheme(preference: ThemePreference): Promise<void> {
+    await this.saveFocusedGatewayConfig({ defaultTheme: preference }, () => settingsDialogMessages.t("themeSaved"), "themeFailure");
+  }
+
+  private async saveQuietMode(quietMode: boolean): Promise<void> {
+    await this.saveFocusedGatewayConfig({ quietMode }, () => settingsDialogMessages.t("quietSaved", { enabled: String(quietMode) }), "quietFailure");
+  }
+
+  /** PATCH changes supplied settings only; retire older refreshes before saving. */
+  private async saveFocusedGatewayConfig(patch: PiWebConfigValues, savedMessage: DisplayText, failure: "themeFailure" | "quietFailure"): Promise<void> {
     if (this.saving) return;
+    this.loadRequestSeq += 1;
+    this.loading = false;
     this.saving = true;
     this.error = "";
     this.savedMessage = "";
     try {
-      const response = await configApi.saveConfig(config);
+      const response = await configApi.updateConfig(explicitConfigUpdate(this.configResponse, patch));
       this.configResponse = response;
-      this.onConfigSaved?.(response.effectiveConfig);
-      this.showSavedMessage();
+      this.publishGatewayConfig(response);
+      this.showSavedMessage(savedMessage, "general");
     } catch (error) {
-      this.error = `Failed to save config: ${errorMessage(error)}`;
+      const diagnostic = errorMessage(error);
+      this.error = () => settingsDialogMessages.t(failure, { error: diagnostic });
     } finally {
       this.saving = false;
     }
   }
 
-  private async saveMachineAccessConfig(config: PiWebConfigValues): Promise<void> {
+  private async saveMachineAccessConfig(config: PiWebConfigValues, unset: string[] = []): Promise<void> {
     if (this.saving) return;
     const target = this.settingsTarget();
+    this.accessLoadRequestSeq += 1;
+    this.accessLoading = false;
+    if (target.kind === "local") {
+      this.loadRequestSeq += 1;
+      this.loading = false;
+    }
     this.saving = true;
     this.accessError = "";
     this.savedMessage = "";
     try {
-      const response = await configApi.saveConfig(config, target.id);
-      if (!this.isCurrentSettingsTarget(target)) return;
-      this.accessConfigResponse = response;
-      if (target.kind === "local" && this.configResponse !== undefined) {
-        this.configResponse = mergeSelectedMachineAccessConfig(this.configResponse, response);
-        this.onConfigSaved?.(this.configResponse.effectiveConfig);
+      const response = await configApi.updateConfig({ ...explicitConfigUpdate(this.accessConfigResponse, config), ...resetConfigUpdate(this.accessConfigResponse, unset) }, target.id);
+      // The save belongs to its captured target even if the dialog has moved on.
+      // Notify the owner, but never install that response into another target's draft.
+      this.onMachineConfigSaved?.(target.id);
+      if (target.kind === "local") {
+        // The gateway snapshot is not owned by the current settings target.
+        // Retire older loads so a later gateway save cannot restore the old name.
+        this.loadRequestSeq += 1;
+        this.loading = false;
+        if (this.configResponse !== undefined) {
+          this.configResponse = mergeSelectedMachineAccessConfig(this.configResponse, response);
+          this.publishGatewayConfig(this.configResponse);
+        }
       }
-      this.showSavedMessage();
+      if (!this.isCurrentSettingsTarget(target)) return;
+      this.accessLoadRequestSeq += 1;
+      this.accessLoading = false;
+      this.accessConfigResponse = response;
+      this.showSavedMessage(() => settingsDialogMessages.t("machineSaved", { name: target.name }), "general");
     } catch (error) {
       if (this.isCurrentSettingsTarget(target)) {
-        this.accessError = `Failed to save file access/upload config on ${settingsMachineTargetLabel(target)}: ${friendlySelectedMachineSettingsErrorMessage(errorMessage(error), target)}`;
+        const diagnostic = errorMessage(error);
+        this.accessError = () => settingsDialogMessages.t("saveAccess", { target: settingsFeedbackTargetLabel(target), error: settingsFeedbackSelectedError(diagnostic, target) });
       }
     } finally {
       this.saving = false;
     }
   }
 
-  private async saveSessiondConfig(config: PiWebConfigValues): Promise<void> {
+  private async saveSessiondConfig(config: PiWebConfigValues, unset: string[] = []): Promise<void> {
     if (this.saving) return;
     const target = this.settingsTarget();
+    this.sessiondLoadRequestSeq += 1;
+    this.sessiondLoading = false;
     this.saving = true;
     this.sessiondError = "";
     this.savedMessage = "";
     try {
-      const response = await configApi.saveConfig(config, target.id);
+      const response = await configApi.updateConfig({ ...explicitConfigUpdate(this.sessiondConfigResponse, config), ...resetConfigUpdate(this.sessiondConfigResponse, unset) }, target.id);
       if (!this.isCurrentSettingsTarget(target)) return;
       this.sessiondConfigResponse = response;
       if (target.kind === "local" && this.configResponse !== undefined) this.configResponse = mergeSelectedMachineSessiondConfig(this.configResponse, response);
-      this.showSavedMessage();
+      this.showSavedMessage(() => settingsDialogMessages.t("sessiondSaved", { name: target.name }), "sessiond");
     } catch (error) {
       if (this.isCurrentSettingsTarget(target)) {
-        this.sessiondError = `Failed to save session-daemon config on ${settingsMachineTargetLabel(target)}: ${friendlySelectedMachineSettingsErrorMessage(errorMessage(error), target)}`;
+        const diagnostic = errorMessage(error);
+        this.sessiondError = () => settingsDialogMessages.t("saveSessiond", { target: settingsFeedbackTargetLabel(target), error: settingsFeedbackSelectedError(diagnostic, target) });
       }
     } finally {
       this.saving = false;
@@ -436,21 +844,21 @@ export class SettingsDialog extends LitElement {
 
   private async installPiPackage(source: string): Promise<void> {
     const target = this.packageTarget();
-    await this.runPiPackageMutation({ kind: "install", source }, "install Pi package", target, () => piPackagesApi.install(source, target.id));
+    await this.runPiPackageMutation({ kind: "install", source }, target, () => piPackagesApi.install(source, target.id));
   }
 
   private async removePiPackage(source: string, scope: PiPackageScope): Promise<void> {
     const target = this.packageTarget();
-    await this.runPiPackageMutation({ kind: "remove", source }, "remove Pi package", target, () => piPackagesApi.remove(source, scope, target.id));
+    await this.runPiPackageMutation({ kind: "remove", source }, target, () => piPackagesApi.remove(source, scope, target.id));
   }
 
   private async updatePiPackage(source?: string): Promise<void> {
     const target = this.packageTarget();
-    await this.runPiPackageMutation(source === undefined ? { kind: "update-all" } : { kind: "update", source }, "update Pi packages", target, () => piPackagesApi.update(source, target.id));
+    await this.runPiPackageMutation(source === undefined ? { kind: "update-all" } : { kind: "update", source }, target, () => piPackagesApi.update(source, target.id));
   }
 
-  private async runPiPackageMutation(operation: PiPackageOperationState, label: string, target: PiPackageTargetContext, mutate: () => Promise<PiPackageMutationResponse>): Promise<void> {
-    if (this.saving) throw new Error("A settings operation is already running.");
+  private async runPiPackageMutation(operation: PiPackageOperationState, target: PiPackageTargetContext, mutate: () => Promise<PiPackageMutationResponse>): Promise<void> {
+    if (this.saving) throw new Error(settingsDialogMessages.t("operationRunning"));
     const requestSeq = ++this.packageMutationSeq;
     this.packageLoadRequestSeq += 1;
     this.packageLoading = false;
@@ -461,13 +869,16 @@ export class SettingsDialog extends LitElement {
     try {
       const response = await mutate();
       if (!this.isCurrentPackageMutation(requestSeq, target)) return;
-      this.packagesResponse = { packages: response.packages };
+      this.packagesResponse = piPackagesResponseAfterMutation(response);
       const pluginRefreshError = shouldRefreshGatewayPluginsAfterPiPackageMutation(target) ? await this.refreshGatewayPlugins() : undefined;
       if (!this.isCurrentPackageMutation(requestSeq, target)) return;
       if (pluginRefreshError !== undefined) this.packageError = pluginRefreshError;
-      this.packageMessage = piPackageMutationFollowUpMessage(response.action, target);
+      this.packageMessage = () => settingsFeedbackPackageFollowUp(response.action, target);
     } catch (error) {
-      if (this.isCurrentPackageMutation(requestSeq, target)) this.packageError = `Failed to ${label} on ${piPackageTargetLabel(target)}: ${friendlyPiPackageErrorMessage(errorMessage(error), target)}`;
+      if (this.isCurrentPackageMutation(requestSeq, target)) {
+        const diagnostic = errorMessage(error);
+        this.packageError = () => settingsDialogMessages.t("packageMutationFailure", { operation: operation.kind, target: settingsFeedbackTargetLabel(target), error: settingsFeedbackPackageError(diagnostic, target) });
+      }
       throw error;
     } finally {
       if (this.packageMutationSeq === requestSeq) {
@@ -477,28 +888,41 @@ export class SettingsDialog extends LitElement {
     }
   }
 
-  private async refreshGatewayPlugins(): Promise<string | undefined> {
+  private async refreshGatewayPlugins(): Promise<DisplayText | undefined> {
     try {
       this.pluginsResponse = await pluginsApi.plugins();
       return undefined;
     } catch (error) {
-      return `Failed to refresh gateway PI WEB plugins: ${errorMessage(error)}`;
+      const diagnostic = errorMessage(error);
+      return () => settingsDialogMessages.t("refreshGatewayFailure", { error: diagnostic });
     }
   }
 
-  private async refreshPluginsForTarget(target: SettingsMachineTarget): Promise<string | undefined> {
+  private async refreshPluginsForTarget(target: SettingsMachineTarget): Promise<DisplayText | undefined> {
     try {
       const response = await pluginsApi.plugins(target.id);
       if (this.isCurrentSettingsTarget(target)) this.selectedPluginsResponse = response;
       return undefined;
     } catch (error) {
       if (this.isCurrentSettingsTarget(target)) this.selectedPluginsResponse = undefined;
-      return `Config saved, but failed to refresh PI WEB plugins from ${settingsMachineTargetLabel(target)}: ${friendlySelectedMachineSettingsErrorMessage(errorMessage(error), target)}`;
+      const diagnostic = errorMessage(error);
+      return () => settingsDialogMessages.t("refreshPluginsFailure", { target: settingsFeedbackTargetLabel(target), error: settingsFeedbackSelectedError(diagnostic, target) });
     }
   }
 
+  private selectedSettingsMachine(machines: Machine[], machine: Machine | undefined, selectedId: string | undefined): Machine | undefined {
+    if (machines.length === 0) return machine;
+    return machines.find((candidate) => candidate.id === (selectedId ?? machine?.id))
+      ?? machines.find((candidate) => candidate.kind === "local")
+      ?? machines[0];
+  }
+
   private settingsTarget(): SettingsMachineTarget {
-    return settingsMachineTarget(this.machine);
+    return settingsMachineTarget(this.selectedSettingsMachine(this.machines, this.machine, this.settingsMachineId));
+  }
+
+  private settingsRuntime(runtimes: Record<string, MachineRuntime>, runtime: MachineRuntime | undefined, target: SettingsMachineTarget): MachineRuntime | undefined {
+    return runtimes[target.id] ?? (runtime?.machineId === target.id ? runtime : undefined);
   }
 
   private packageTarget(): PiPackageTargetContext {
@@ -506,7 +930,7 @@ export class SettingsDialog extends LitElement {
   }
 
   private pluginLifecycleSupport(target = this.settingsTarget()): PluginLifecycleSupport {
-    return pluginLifecycleSupport(target, this.machineRuntime);
+    return pluginLifecycleSupport(target, this.settingsRuntime(this.machineRuntimes, this.machineRuntime, target));
   }
 
   private pluginLifecycleSupportNeedsReload(previousRuntime: MachineRuntime | undefined, target: SettingsMachineTarget): boolean {
@@ -584,73 +1008,61 @@ export class SettingsDialog extends LitElement {
     if (hadPackageOperation) this.saving = false;
   }
 
-  private showSavedMessage(): void {
-    this.savedMessage = "Config saved.";
+  private showSavedMessage(message: DisplayText, section: SettingsSection): void {
+    this.savedMessage = message;
+    this.savedSection = section;
     if (this.savedMessageTimer !== undefined) window.clearTimeout(this.savedMessageTimer);
     this.savedMessageTimer = window.setTimeout(() => {
-      if (this.savedMessage === "Config saved.") this.savedMessage = "";
+      this.savedMessage = "";
       this.savedMessageTimer = undefined;
     }, 3000);
   }
 
-  static override styles = css`
-    :host { position: fixed; inset: 0; z-index: 30; color: var(--pi-text); font: 14px system-ui, sans-serif; }
+  static override styles = [uiDialogStyles, uiSelectionStyles, css`
+    @layer pi-web-base {
+    :host { position: fixed; inset: 0; color: var(--pi-text); font: 14px var(--pi-font, system-ui, sans-serif); }
     modal-surface { --modal-surface-backdrop-padding: max(20px, env(safe-area-inset-top)) max(20px, env(safe-area-inset-right)) max(20px, env(safe-area-inset-bottom)) max(20px, env(safe-area-inset-left)); --modal-surface-width: min(980px, 100%); --modal-surface-max-height: min(760px, 100%); --modal-surface-min-height: min(620px, 100%); --modal-surface-radius: 14px; }
-    .settings-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 16px; border-bottom: 1px solid var(--pi-border); }
-    .eyebrow { display: block; color: var(--pi-muted); font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
-    h1 { margin: 0; font-size: 20px; line-height: 1.2; }
-    button { border: 1px solid var(--pi-border); border-radius: 8px; background: var(--pi-surface); color: var(--pi-text); padding: 7px 9px; font: inherit; cursor: pointer; }
-    .close-button { width: 34px; height: 34px; display: grid; place-items: center; border: 0; background: transparent; color: var(--pi-muted); padding: 0; font-size: 24px; }
-    .close-button:hover, .close-button:focus { color: var(--pi-text); background: var(--pi-surface-hover); }
+    .settings-machine { display: flex; flex: 0 0 auto; flex-wrap: wrap; align-items: center; gap: 8px; padding: 12px 18px; border-bottom: 1px solid var(--pi-border); }
+    .settings-machine label { font-size: 12px; font-weight: 700; }
+    .settings-machine select { flex: 1 1 160px; max-width: 280px; background: var(--pi-bg); }
+    .machine-status { color: var(--pi-muted); line-height: 1.35; }
+    .machine-status.unavailable { color: var(--pi-warning); }
+    .machine-scope { color: var(--pi-muted); font-size: 12px; }
+    .machine-scope summary { cursor: pointer; }
+    .machine-scope[open] { flex-basis: 100%; }
+    .machine-scope p { margin: 8px 0 0; line-height: 1.45; }
+    .machine-connection-error { flex-basis: 100%; margin: 0; font-size: 12px; line-height: 1.45; color: var(--pi-warning); overflow-wrap: anywhere; }
+    .machine-scope summary:focus-visible { outline: 2px solid var(--pi-accent); outline-offset: 2px; }
+    .machine-switch-confirmation { flex: 0 0 auto; padding: 12px 16px; border-bottom: 1px solid var(--pi-warning-border); background: var(--pi-warning-surface); }
+    .machine-switch-confirmation p { margin: 0 0 8px; }
+    .machine-switch-confirmation button + button { margin-inline-start: 8px; }
     .settings-body { flex: 1 1 auto; min-height: 0; display: grid; grid-template-columns: 220px minmax(0, 1fr); }
-    .settings-nav { min-height: 0; padding: 10px; border-right: 1px solid var(--pi-border); background: var(--pi-surface); overflow: auto; }
-    .settings-nav button { display: grid; gap: 2px; width: 100%; margin: 0 0 6px; text-align: left; border-color: transparent; background: transparent; }
-    .settings-nav button:hover, .settings-nav button:focus { background: var(--pi-surface-hover); }
-    .settings-nav button.selected { border-color: var(--pi-accent); background: var(--pi-selection-bg); }
+    .settings-nav { min-height: 0; border-inline-end: 1px solid var(--pi-border); background: var(--pi-surface); overflow: auto; }
+    .settings-nav button { display: grid; justify-content: stretch; gap: 2px; }
+    .settings-machine, .machine-switch-confirmation, .settings-nav button { overflow-wrap: anywhere; }
+    .settings-machine select { min-width: 0; }
+    .settings-nav strong, .settings-nav small { min-width: 0; }
     .settings-nav small { color: var(--pi-muted); }
-    .settings-content { min-width: 0; min-height: 0; overflow: auto; padding: 18px; }
+    .settings-main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+    .settings-content { flex: 1 1 auto; min-width: 0; min-height: 0; overflow: auto; padding: 0; }
 
     @media (max-width: 760px) {
       modal-surface { --modal-surface-backdrop-padding: 0; --modal-surface-place-items: stretch; --modal-surface-width: 100%; --modal-surface-max-height: none; --modal-surface-min-height: 0; --modal-surface-border: 0; --modal-surface-radius: 0; }
-      .settings-header { padding: max(12px, env(safe-area-inset-top)) 12px 12px; }
+      .settings-header { padding-top: env(safe-area-inset-top); }
+      .settings-machine { padding: 10px 12px; }
+      .settings-machine label { flex-basis: 100%; }
+      .settings-machine select { max-width: none; }
+      .machine-scope { flex-basis: 100%; }
       .settings-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
-      .settings-nav { display: flex; gap: 8px; padding: 8px; border-right: 0; border-bottom: 1px solid var(--pi-border); overflow-x: auto; overflow-y: hidden; }
-      .settings-nav button { flex: 0 0 auto; width: auto; min-width: 128px; margin: 0; }
-      .settings-content { padding: 14px 12px calc(18px + env(safe-area-inset-bottom)); }
+      .settings-nav { display: flex; gap: 0; padding: 0; border-inline-end: 0; border-bottom: 1px solid var(--pi-border); overflow-x: auto; overflow-y: hidden; }
+      .settings-nav button { flex: 0 0 auto; width: auto; white-space: nowrap; border-inline-end: 1px solid var(--pi-border-muted); }
+      .settings-nav small { display: none; }
+      .settings-content { padding-bottom: env(safe-area-inset-bottom); }
     }
-  `;
+    }
+  `];
 }
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-export type SettingsPanelTag =
-  | "settings-general-panel"
-  | "settings-sessiond-panel"
-  | "settings-packages-panel"
-  | "settings-plugins-panel"
-  | "settings-shortcuts-panel";
-
-/**
- * The single custom-element panel the settings dialog renders for a section.
- *
- * This is the public routing contract behind `renderActiveSection`: each section
- * maps to exactly one panel element and nothing else (no per-tab "scope note"
- * wrapper). Tests assert this mapping instead of inspecting the rendered
- * `TemplateResult`'s markup.
- */
-export function activeSettingsPanelTag(section: SettingsSection): SettingsPanelTag {
-  switch (section) {
-    case "sessiond":
-      return "settings-sessiond-panel";
-    case "packages":
-      return "settings-packages-panel";
-    case "plugins":
-      return "settings-plugins-panel";
-    case "shortcuts":
-      return "settings-shortcuts-panel";
-    case "general":
-      return "settings-general-panel";
-  }
 }

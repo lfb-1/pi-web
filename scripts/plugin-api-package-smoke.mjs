@@ -1,19 +1,33 @@
 import { cp, mkdir, readFile, readdir, symlink, writeFile } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
+import { pathToFileURL } from "node:url";
 import ts from "typescript";
 
 const publicApiDeclarationPaths = [
   "plugin-api.d.ts",
   "server-plugin-api.d.ts",
   "shared/pluginApiTypes.d.ts",
+  "shared/pluginCatalogTypes.d.ts",
+  "shared/pluginSessionLifecycleTypes.d.ts",
+  "shared/pluginSessionStateTypes.d.ts",
+  "shared/pluginProjectTrustTypes.d.ts",
+  "shared/sessionState.d.ts",
+  "shared/localization.d.ts",
+  "shared/markdownTypes.d.ts",
+  "shared/serverNoticePresentation.d.ts",
+  "shared/terminalTitlePresentation.d.ts",
+  "shared/thinkingLevels.d.ts",
+  "shared/workspaceRemovalPresentation.d.ts",
 ];
 const expectedPackageDeclarationPaths = [
   ...publicApiDeclarationPaths.map((path) => `dist/${path}`),
+  // Emitted for the shared runtime validator, but not part of either public type graph.
+  "dist/shared/boundedJson.d.ts",
   "plugin-api.d.ts",
   "server-plugin-api.d.ts",
 ].sort();
-const firstBrowserPluginApiV2Version = "1.202608.1";
-const workspaceProviderExamplePiWebRange = `^${firstBrowserPluginApiV2Version}`;
+const minimalPluginPlatformReleaseFloor = "1.202609.1";
+const workspaceProviderExamplePiWebRange = `^${minimalPluginPlatformReleaseFloor}`;
 const pluginConsumerCompilerModes = [
   {
     name: "NodeNext",
@@ -48,8 +62,10 @@ export async function smokeInstalledPluginApi({ packageRoot, fixtureRoot, repoRo
   ]);
   await Promise.all([
     symlink(packageRoot, join(consumerRoot, "node_modules", "@jmfederico", "pi-web"), "dir"),
+    symlink(join(repoRoot, "node_modules", "@earendil-works"), join(consumerRoot, "node_modules", "@earendil-works"), "dir"),
     symlink(join(repoRoot, "node_modules", "@types", "node"), join(consumerRoot, "node_modules", "@types", "node"), "dir"),
   ]);
+  await assertServerRuntimeApi(consumerRoot);
 
   const browserPath = join(consumerRoot, "browser.ts");
   const serverPath = join(consumerRoot, "server.ts");
@@ -63,15 +79,28 @@ export async function smokeInstalledPluginApi({ packageRoot, fixtureRoot, repoRo
     assertStrictPluginConsumer("browser-only", [browserPath], mode, packageRoot, repoRoot, [
       "dist/plugin-api.d.ts",
       "dist/shared/pluginApiTypes.d.ts",
+      "dist/shared/pluginCatalogTypes.d.ts",
+      "dist/shared/pluginSessionLifecycleTypes.d.ts",
+      "dist/shared/localization.d.ts",
+      "dist/shared/markdownTypes.d.ts",
+      "dist/shared/terminalTitlePresentation.d.ts",
+      "dist/shared/workspaceRemovalPresentation.d.ts",
     ]);
     assertStrictPluginConsumer("server-only", [serverPath], mode, packageRoot, repoRoot, [
       "dist/server-plugin-api.d.ts",
+      "dist/shared/pluginSessionStateTypes.d.ts",
+      "dist/shared/pluginProjectTrustTypes.d.ts",
+      "dist/shared/sessionState.d.ts",
+      "dist/shared/thinkingLevels.d.ts",
       "dist/shared/pluginApiTypes.d.ts",
+      "dist/shared/pluginCatalogTypes.d.ts",
+      "dist/shared/pluginSessionLifecycleTypes.d.ts",
+      "dist/shared/serverNoticePresentation.d.ts",
+      "dist/shared/terminalTitlePresentation.d.ts",
+      "dist/shared/workspaceRemovalPresentation.d.ts",
     ]);
     assertStrictPluginConsumer("dual-entry example", dualEntryPaths, mode, packageRoot, repoRoot, [
-      "dist/plugin-api.d.ts",
-      "dist/server-plugin-api.d.ts",
-      "dist/shared/pluginApiTypes.d.ts",
+      ...publicApiDeclarationPaths.map((path) => `dist/${path}`),
     ], ["node"]);
   }
 }
@@ -101,6 +130,70 @@ async function assertExampleCompatibilityFloor(packageRoot) {
   const actualRange = manifest?.devDependencies?.["@jmfederico/pi-web"];
   if (actualRange !== workspaceProviderExamplePiWebRange) {
     throw new Error(`Installed workspace-provider example must require @jmfederico/pi-web ${workspaceProviderExamplePiWebRange}; received ${JSON.stringify(actualRange)}`);
+  }
+}
+
+async function assertServerRuntimeApi(consumerRoot) {
+  const fixturePath = join(consumerRoot, "server-runtime.mjs");
+  await writeFile(fixturePath, `
+    export { createCompanionBackend } from "@jmfederico/pi-web/server-plugin-api";
+    import {
+      PI_WEB_HOST_PI_SESSIONS_CAPABILITY,
+      PI_WEB_HOST_PI_SESSION_EVENTS_CAPABILITY,
+      PI_WEB_HOST_WORKSPACES_CAPABILITY,
+      PI_WEB_HOST_CATALOG_CAPABILITY,
+      PI_WEB_HOST_SESSION_LIFECYCLE_CAPABILITY,
+      PI_WEB_HOST_SESSION_STATE_CAPABILITY,
+      PI_WEB_HOST_PROJECT_TRUST_CAPABILITY,
+      PI_WEB_HOST_SESSION_LIFECYCLE_V2_CAPABILITY,
+    } from "@jmfederico/pi-web/server-plugin-api";
+    export default [PI_WEB_HOST_WORKSPACES_CAPABILITY, PI_WEB_HOST_PI_SESSIONS_CAPABILITY, PI_WEB_HOST_PI_SESSION_EVENTS_CAPABILITY, PI_WEB_HOST_CATALOG_CAPABILITY, PI_WEB_HOST_SESSION_LIFECYCLE_CAPABILITY, PI_WEB_HOST_SESSION_STATE_CAPABILITY, PI_WEB_HOST_PROJECT_TRUST_CAPABILITY, PI_WEB_HOST_SESSION_LIFECYCLE_V2_CAPABILITY];
+  `, "utf8");
+  const serverApi = await import(pathToFileURL(fixturePath).href);
+  if (typeof serverApi.createCompanionBackend !== "function") throw new Error("Installed companion backend helper is missing");
+  const backend = { machineId: "local", forScope: () => ({ request: async () => null }) };
+  if (serverApi.createCompanionBackend({ emit: (_channel, query) => query.accept(() => backend) }, "fixture.server") !== backend) {
+    throw new Error("Installed companion helper did not return the hosted v5 backend");
+  }
+  const [workspacesCapability, piSessionsCapability, sessionEventsCapability, catalogCapability, lifecycleCapability, stateCapability, trustCapability, lifecycleV2Capability] = serverApi.default;
+  for (const [capability, id] of [[stateCapability, "session-state"], [trustCapability, "project-trust"]]) {
+    if (!Object.isFrozen(capability) || capability?.pluginId !== "pi-web.host" || capability?.id !== id || capability?.version !== 1 || typeof capability?.parse !== "function") {
+      throw new Error(`Installed ${id} capability is invalid`);
+    }
+  }
+  if (!Object.isFrozen(lifecycleV2Capability) || lifecycleV2Capability?.pluginId !== "pi-web.host"
+    || lifecycleV2Capability?.id !== "session-lifecycle" || lifecycleV2Capability?.version !== 2
+    || typeof lifecycleV2Capability?.parse !== "function") {
+    throw new Error("Installed server plugin API does not expose the exact pi-web.host/session-lifecycle v2 token");
+  }
+  if (!Object.isFrozen(lifecycleCapability) || lifecycleCapability?.pluginId !== "pi-web.host"
+    || lifecycleCapability?.id !== "session-lifecycle" || lifecycleCapability?.version !== 1
+    || typeof lifecycleCapability?.parse !== "function") {
+    throw new Error("Installed server plugin API does not expose the exact pi-web.host/session-lifecycle v1 token");
+  }
+  if (!Object.isFrozen(catalogCapability) || catalogCapability?.pluginId !== "pi-web.host"
+    || catalogCapability?.id !== "catalog" || catalogCapability?.version !== 1
+    || typeof catalogCapability?.parse !== "function") {
+    throw new Error("Installed server plugin API does not expose the exact pi-web.host/catalog v1 token");
+  }
+  if (!Object.isFrozen(sessionEventsCapability) || sessionEventsCapability?.pluginId !== "pi-web.host"
+    || sessionEventsCapability?.id !== "pi-session-events" || sessionEventsCapability?.version !== 1
+    || typeof sessionEventsCapability?.parse !== "function") {
+    throw new Error("Installed server plugin API does not expose the exact pi-web.host/pi-session-events v1 token");
+  }
+  if (!Object.isFrozen(workspacesCapability)
+    || workspacesCapability?.pluginId !== "pi-web.host"
+    || workspacesCapability?.id !== "workspaces"
+    || workspacesCapability?.version !== 1
+    || typeof workspacesCapability?.parse !== "function") {
+    throw new Error("Installed server plugin API does not expose the exact pi-web.host/workspaces v1 token");
+  }
+  if (!Object.isFrozen(piSessionsCapability)
+    || piSessionsCapability?.pluginId !== "pi-web.host"
+    || piSessionsCapability?.id !== "pi-sessions"
+    || piSessionsCapability?.version !== 1
+    || typeof piSessionsCapability?.parse !== "function") {
+    throw new Error("Installed server plugin API does not expose the exact pi-web.host/pi-sessions v1 token");
   }
 }
 

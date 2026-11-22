@@ -4,8 +4,91 @@ export type JsonValue = JsonPrimitive | JsonObject | readonly JsonValue[];
 export interface JsonObject {
     readonly [key: string]: JsonValue;
 }
+export type PluginBackendScope = {
+    readonly kind: "machine";
+} | {
+    readonly kind: "project";
+    readonly projectId: string;
+} | {
+    readonly kind: "workspace";
+    readonly projectId: string;
+    readonly workspaceId: string;
+};
+/** Exact package-paired backend on the captured machine. */
+export interface PluginBackend {
+    readonly machineId: string;
+    forScope(scope: PluginBackendScope): PluginPeer;
+}
+export interface PluginPeerRequestOptions {
+    /** Cancels this bounded request through local or federated host transport. */
+    readonly signal?: AbortSignal;
+}
+/** Callbacks and cancellation for one bounded package-peer channel. */
+export interface PluginPeerChannelOptions {
+    /** Cancels the channel open or closes the live channel through every host hop. */
+    readonly signal?: AbortSignal;
+    /** Receives one plugin-authored JSON frame after the channel is ready. */
+    readonly onData: (data: JsonValue) => void;
+}
+export interface PluginPeerChannelClose {
+    readonly code: number;
+    readonly reason: string;
+    readonly wasClean: boolean;
+    /** Attributed host or server-plugin failure when one preceded the close. */
+    readonly error?: Readonly<{
+        code: string;
+        message: string;
+    }>;
+}
+export interface PluginPeerChannel {
+    readonly closed: Promise<PluginPeerChannelClose>;
+    /** Queue one bounded JSON frame or throw. Success means queue acceptance, not remote receipt. */
+    send(data: JsonValue): void;
+    close(reason?: string): void;
+}
+/**
+ * Exact revision-paired path to this package's active server entry.
+ * A peer supplies at least one request, channel, or resource capability.
+ * `resourceUrl` returns a browser-ready authenticated URL, not a public share link.
+ * Its small JSON selector is visible in URLs; keep secrets in ordinary requests.
+ */
+export type PluginPeer = {
+    request(operation: string, input: JsonValue, options?: PluginPeerRequestOptions): Promise<JsonValue>;
+    resourceUrl?(operation: string, input: JsonValue): string;
+    openChannel?(operation: string, input: JsonValue, options: PluginPeerChannelOptions): Promise<PluginPeerChannel>;
+} | {
+    request?: undefined;
+    openChannel(operation: string, input: JsonValue, options: PluginPeerChannelOptions): Promise<PluginPeerChannel>;
+    resourceUrl?(operation: string, input: JsonValue): string;
+} | {
+    request?: undefined;
+    openChannel?: undefined;
+    resourceUrl(operation: string, input: JsonValue): string;
+};
+/** Explicitly browser-public session data, keyed by owning package/plugin namespace. */
+export type SessionUiMetadata = Readonly<Record<string, JsonObject>>;
+/**
+ * Typed token for one exact host/plugin capability version. The provider id
+ * and package-local id together with the version form the stable capability
+ * identity; matching keys do not imply matching parsers. `parse` validates and
+ * may snapshot values at provider, declared-requirement, and resolution boundaries.
+ * Parsers must be pure (no input mutation or lifecycle side effects) and tolerate
+ * repeated calls; invocation counts and returned object identity are not guaranteed.
+ * A resolver's parser receives the provider-parsed value, not the discarded result
+ * of declared-requirement validation.
+ */
+export interface PluginCapability<Value = unknown, Version extends number = number> {
+    readonly pluginId: string;
+    readonly id: string;
+    readonly version: Version;
+    readonly parse: (value: unknown) => Value;
+}
+/** One capability value declaratively published by its owning plugin. */
+export interface PluginCapabilityProvision<Value = unknown, Version extends number = number> {
+    readonly capability: PluginCapability<Value, Version>;
+    readonly value: Value;
+}
 export interface WorkspaceProviderCapabilities {
-    readonly request: boolean;
     /** True only when this specific workspace advertises removal. */
     readonly remove: boolean;
 }
@@ -19,6 +102,8 @@ export interface WorkspaceProviderMetadata {
 export interface WorkspaceRemovalPresentation {
     readonly actionLabel: string;
     readonly confirmation: string;
+    /** Optional provenance for host-localized removal chrome; raw wording remains the fallback. */
+    readonly localization?: import("./workspaceRemovalPresentation.js").WorkspaceRemovalLocalization;
 }
 export interface FileTreeEntry {
     name: string;
@@ -71,12 +156,12 @@ export interface MoveWorkspaceFileResponse {
     modifiedAt: string;
 }
 export type TerminalCommandRunStatus = "queued" | "running" | "succeeded" | "failed";
-export interface TerminalCommandRun {
+interface TerminalCommandRunFields {
     id: string;
     origin: string;
-    projectId: string;
-    workspaceId: string;
     terminalId: string;
+    /** Generated title provenance; title remains the compatible fallback. */
+    titlePresentation?: import("./terminalTitlePresentation.js").TerminalTitlePresentation;
     title: string;
     command: string;
     status: TerminalCommandRunStatus;
@@ -86,9 +171,20 @@ export interface TerminalCommandRun {
     completedAt?: string;
     metadata: Record<string, string>;
 }
-export interface TerminalCommandRunHandle {
-    run: TerminalCommandRun;
-    completed: Promise<TerminalCommandRun>;
+export interface TerminalCommandRun extends TerminalCommandRunFields {
+    scope?: "workspace";
+    projectId: string;
+    workspaceId: string;
+}
+export interface MaintenanceTerminalCommandRun extends TerminalCommandRunFields {
+    scope: "maintenance";
+    projectId?: never;
+    workspaceId?: never;
+}
+export type AnyTerminalCommandRun = TerminalCommandRun | MaintenanceTerminalCommandRun;
+export interface TerminalCommandRunHandle<Run extends AnyTerminalCommandRun = TerminalCommandRun> {
+    run: Run;
+    completed: Promise<Run>;
 }
 export type PiWebServiceComponent = "web" | "sessiond";
 export type PiWebStatusSeverity = "info" | "warning" | "error";
@@ -102,11 +198,19 @@ export interface PiWebInstallationInfo {
     npmRoot?: string;
     dockerMode?: PiWebDockerMode;
 }
+export interface PiWebRuntimeIdentity {
+    name: "node" | "bun";
+    version: string;
+}
 export interface PiWebComponentStatus {
+    /** Actual JavaScript engine of the reporting process, absent on older peers. */
+    runtime?: PiWebRuntimeIdentity;
     component: PiWebServiceComponent;
     label: string;
     runtimeVersion?: string;
     installedVersion?: string;
+    /** Version of the Pi coding agent library loaded by this component's process; omitted when the component does not report it. */
+    piVersion?: string;
     stale: boolean;
     available: boolean;
     installation?: PiWebInstallationInfo;
@@ -146,3 +250,4 @@ export interface PiWebStatusResponse extends PiWebVersionResponse {
     };
     messages: PiWebStatusMessage[];
 }
+export {};

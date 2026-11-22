@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Community plugins · PI WEB</title>
+    <meta
+      name="description"
+      content="Find community-contributed PI WEB plugins on npm and learn how to publish your own."
+    />
+    <link rel="canonical" href="https://pi-web.dev/community-plugins" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="PI WEB" />
+    <meta property="og:title" content="Community plugins · PI WEB" />
+    <meta
+      property="og:description"
+      content="Find community-contributed PI WEB plugins on npm and learn how to publish your own."
+    />
+    <meta property="og:url" content="https://pi-web.dev/community-plugins" />
+    <meta property="og:image" content="https://pi-web.dev/assets/pi-web-banner.png" />
+    <meta property="og:image:type" content="image/png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="PI WEB — A remote-first runtime for AI coding agents. Teal bar mark and uppercase wordmark on dark navy." />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Community plugins · PI WEB" />
+    <meta
+      name="twitter:description"
+      content="Find community-contributed PI WEB plugins on npm and learn how to publish your own."
+    />
+    <meta name="twitter:image" content="https://pi-web.dev/assets/pi-web-banner.png" />
+    <meta name="twitter:image:alt" content="PI WEB — A remote-first runtime for AI coding agents. Teal bar mark and uppercase wordmark on dark navy." />
+    <link rel="icon" type="image/svg+xml" href="assets/favicon.svg" />
+    <script>
+      (() => {
+        const theme = window.localStorage.getItem("pi-web-theme");
+        if (theme === "light" || theme === "dark") document.documentElement.dataset.theme = theme;
+      })();
+    </script>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body class="docs-page community-page">
+    <a class="skip-link" href="#main">Skip to content</a>
+    <header class="site-header">
+      <nav class="container nav" aria-label="Main navigation">
+        <a class="brand" href="./" aria-label="PI WEB home">PI WEB</a>
+        <div class="nav-links">
+          <div class="nav-pages">
+            <a href="install">Docs</a>
+            <a href="community-plugins" aria-current="page">Plugins</a>
+            <a href="https://github.com/jmfederico/pi-web">GitHub</a>
+          </div>
+          <div class="nav-actions">
+            <button class="theme-toggle" type="button" data-theme-toggle aria-label="Change theme">
+              <span data-theme-icon aria-hidden="true">◐</span>
+              <span data-theme-label>Theme</span>
+            </button>
+            <a class="button primary nav-start" href="install">Get started <span aria-hidden="true">↗</span></a>
+          </div>
+        </div>
+      </nav>
+    </header>
+    <nav class="doc-nav" aria-label="Documentation">
+      <div class="container">
+        <a href="install">Install</a>
+        <a href="remote-first">Remote access</a>
+        <a href="machines">Machines</a>
+        <a href="config">Configuration</a>
+        <a href="plugins">Plugin guide</a>
+        <a href="faq">FAQ</a>
+      </div>
+    </nav>
+
+    <main id="main">
+      <section class="page-hero">
+        <div class="container">
+          <p class="overline">Extend PI WEB</p>
+          <h1>Community plugins</h1>
+          <p>Discover packages shared by other users. Search npm packages here, then install the packages you trust in PI WEB.</p>
+          <p><a href="plugins">Plugin guide</a> · <a href="plugins#agent-development">Build a plugin</a></p>
+        </div>
+      </section>
+      <section class="section compact">
+        <div class="container plugin-directory">
+          <div class="doc-content">
+            <section id="discover">
+              <h2>Community packages</h2>
+              <p class="plugin-trust-notice"><strong>Community-contributed, not reviewed or endorsed.</strong> Packages can run with your user permissions. Install only from authors you trust.</p>
+              <div data-plugin-search>
+                <form class="plugin-search-form" role="search">
+                  <label for="plugin-query">Search community plugins</label>
+                  <div class="plugin-search-row">
+                    <input id="plugin-query" type="search" maxlength="200" placeholder="Name or description" aria-describedby="plugin-search-help" />
+                    <button class="button" type="submit">Search</button>
+                  </div>
+                </form>
+                <p id="plugin-search-help">Search by name or description, or leave empty to browse all.</p>
+                <div class="plugin-sort">
+                  <label for="plugin-sort">Sort by</label>
+                  <select id="plugin-sort" aria-describedby="plugin-sort-help">
+                    <option value="popular">Popular</option>
+                    <option value="updated">Recently updated</option>
+                    <option value="newest">Newest packages</option>
+                  </select>
+                </div>
+                <p id="plugin-sort-help">Only packages tagged <code>pi-web.dev-plugin</code> are listed. Tags are author-provided, not a compatibility check. Popularity uses downloads from the past month.</p>
+                <p role="status" aria-live="polite">Enable JavaScript to search here, or browse directly on npm below.</p>
+                <ul class="plugin-results" data-plugin-results aria-label="Community plugin results" aria-busy="false"></ul>
+                <button class="button secondary" type="button" data-plugin-more hidden>Load more</button>
+              </div>
+              <p>Browse directly on npm: <a href="https://www.npmjs.com/search?q=keywords%3Api-web.dev-plugin">PI WEB plugins</a>.</p>
+            </section>
+            <details id="install" class="config-details plugin-guide">
+              <summary>Install a plugin</summary>
+              <ol>
+                <li>Copy the package name from npm.</li>
+                <li>In PI WEB, open <strong>Settings → Pi packages</strong> on the machine where you want to install it.</li>
+                <li>Enter <code>npm:package-name</code> (or <code>npm:@scope/package-name</code>) and choose <strong>Install</strong>.</li>
+                <li>Open <strong>Settings → PI WEB plugins</strong> to check the integration and enable it if needed. Follow any reload or restart guidance shown there.</li>
+              </ol>
+              <p>Installing a package and enabling its web integration are separate decisions. See <a href="plugins#install-and-manage">Install and manage</a> for details.</p>
+            </details>
+            <details id="publish" class="config-details plugin-guide">
+              <summary>Share your plugin</summary>
+              <p>Publish a public npm package with a working <code>piWeb.plugins</code> declaration and add these keywords to its <code>package.json</code>:</p>
+              <div class="code-card"><pre><code>{
+  "keywords": ["pi-web.dev-plugin", "pi-package"]
+}</code></pre></div>
+              <p>The directory searches only for <code>pi-web.dev-plugin</code>. Add this keyword even if your package already uses the broader <code>pi-web-plugin</code> tag.</p>
+              <p>No keyword registration or submission to PI WEB is needed. Publish a new package version with the keywords; discovery depends on npm search indexing and may not be immediate.</p>
+              <p>Include a useful description, repository link, installation instructions, and supported PI WEB versions so users can evaluate your package. The keyword makes it discoverable; it does not replace the plugin manifest.</p>
+              <p><a href="plugins.md#agent-development">Publishing contracts and examples →</a></p>
+            </details>
+          </div>
+        </div>
+      </section>
+    </main>
+    <footer class="site-footer">
+      <div class="container footer-inner">
+        <div><a class="brand" href="./">PI WEB</a><p>A web interface for Pi Coding Agent.</p></div>
+        <div class="footer-links">
+          <a href="install">Documentation</a>
+          <a href="community-plugins">Plugins</a>
+          <a href="faq">FAQ</a>
+          <a href="https://github.com/jmfederico/pi-web">GitHub</a>
+          <span class="version-switcher" role="group" aria-label="Documentation version">
+            <a class="version-switcher-option" data-version-option="stable" href="https://pi-web.dev/community-plugins" aria-current="true">Stable</a>
+            <a class="version-switcher-option" data-version-option="dev" href="https://pi-web.dev/dev/community-plugins">Dev</a>
+          </span>
+        </div>
+      </div>
+    </footer>
+    <script src="site.js"></script>
+    <script src="plugin-search.js"></script>
+  </body>
+</html>

@@ -1,31 +1,44 @@
 import { html, type TemplateResult } from "lit";
 import { CORE_STATUS_FLAGS, type StatusFlags } from "../../../shared/machineStatus";
+import { localization } from "../localization/browser";
+import definitions from "./activityBadge.messages";
+
+const messages = localization.registerMessages("core.activityBadge", definitions);
+
+export function interventionRequiredLabel(): string {
+  return messages.t("needsInput");
+}
 
 /**
- * Work signals a row can show. At most one kind renders at a time; call sites
- * resolve precedence (sending > session > terminal) before rendering.
+ * Primary signal for navigation state hooks. Intervention takes priority,
+ * but its ring can contain a separate work mark.
  */
-export type ActivityIndicatorKind = "session" | "terminal" | "sending";
+export type ActivityIndicatorKind = "session" | "terminal" | "sending" | "intervention-required";
 
 /**
  * Render the single indicator mark for a row.
  *
- * Unread is an attention flag, not a work signal, so it never competes with
- * the activity kinds for the slot: pass `unreadLabel` and it renders as a
- * static accent ring around the work dot (which keeps its own color, shape,
- * and pulse), or as a filled static accent dot when the row is idle. The label
- * is the flag — pass undefined when the row has nothing unread.
+ * Unread is independent of activity and intervention: pass `unreadLabel` and
+ * it renders as a static accent ring around the activity mark (which keeps its
+ * own color, shape, and animation), or as a filled static accent dot when the
+ * row is idle. Intervention is a static hollow ring, not an unread mark; pass
+ * `workKind` to retain concurrent work inside it. The unread label is the flag
+ * — pass undefined when the row has nothing unread.
  */
-export function renderActivityIndicator(kind: ActivityIndicatorKind | undefined, label = "Active", unreadLabel?: string): TemplateResult | undefined {
+export function renderActivityIndicator(kind: ActivityIndicatorKind | undefined, label = "Active", unreadLabel?: string, workKind?: "session" | "terminal"): TemplateResult | undefined {
+  const interventionWork = kind === "intervention-required" ? workKind : undefined;
+  if (kind === "intervention-required") label = interventionWork === undefined ? interventionRequiredLabel() : `${interventionRequiredLabel()} · ${label}`;
   if (kind === undefined) {
     if (unreadLabel === undefined) return undefined;
     return html`<span class="activity-indicator unread" role="img" aria-label=${unreadLabel} title=${unreadLabel}></span>`;
   }
+  const markClass = `activity-indicator ${kind}${interventionWork === undefined ? "" : " with-work"}`;
+  const innerMark = interventionWork === undefined ? undefined : html`<span class=${`activity-indicator ${interventionWork}`} aria-hidden="true"></span>`;
   if (unreadLabel === undefined) {
-    return html`<span class=${`activity-indicator ${kind}`} role="img" aria-label=${label} title=${label}></span>`;
+    return html`<span class=${markClass} role="img" aria-label=${label} title=${label}>${innerMark}</span>`;
   }
   const combinedLabel = `${unreadLabel} · ${label}`;
-  return html`<span class="unread-ring" role="img" aria-label=${combinedLabel} title=${combinedLabel}><span class=${`activity-indicator ${kind}`} aria-hidden="true"></span></span>`;
+  return html`<span class=${`unread-ring${interventionWork === undefined ? "" : " with-intervention-work"}`} role="img" aria-label=${combinedLabel} title=${combinedLabel}><span class=${markClass} aria-hidden="true">${innerMark}</span></span>`;
 }
 
 /**
@@ -38,9 +51,16 @@ export function renderActivityIndicator(kind: ActivityIndicatorKind | undefined,
  */
 export function statusActivityKind(flags: StatusFlags | undefined): ActivityIndicatorKind | undefined {
   if (flags === undefined) return undefined;
+  if (flags[CORE_STATUS_FLAGS.interventionRequired] === true) return "intervention-required";
+  return statusWorkKind(flags);
+}
+
+/** Work remains independent of attention flags, including rolled-up intervention. */
+export function statusWorkKind(flags: StatusFlags | undefined): "session" | "terminal" | undefined {
+  if (flags === undefined) return undefined;
   if (flags[CORE_STATUS_FLAGS.working] === true) return "session";
   if (flags[CORE_STATUS_FLAGS.terminal] === true) return "terminal";
-  const hasOtherFlag = Object.entries(flags).some(([flagId, isSet]) => isSet && flagId !== CORE_STATUS_FLAGS.unread);
+  const hasOtherFlag = Object.entries(flags).some(([flagId, isSet]) => isSet && flagId !== CORE_STATUS_FLAGS.unread && flagId !== CORE_STATUS_FLAGS.interventionRequired);
   return hasOtherFlag ? "session" : undefined;
 }
 
@@ -49,8 +69,8 @@ export function hasStatusUnread(flags: StatusFlags | undefined): boolean {
   return flags?.[CORE_STATUS_FLAGS.unread] === true;
 }
 
-export function renderActionActivityIndicator(kind: ActivityIndicatorKind | undefined, label = "Active", unreadLabel?: string): TemplateResult | undefined {
-  const indicator = renderActivityIndicator(kind, label, unreadLabel);
+export function renderActionActivityIndicator(kind: ActivityIndicatorKind | undefined, label = "Active", unreadLabel?: string, workKind?: "session" | "terminal"): TemplateResult | undefined {
+  const indicator = renderActivityIndicator(kind, label, unreadLabel, workKind);
   if (indicator === undefined) return undefined;
-  return html`<span class="action-activity">${indicator}</span>`;
+  return html`<span class="action-activity ui-nav-row-leading">${indicator}</span>`;
 }

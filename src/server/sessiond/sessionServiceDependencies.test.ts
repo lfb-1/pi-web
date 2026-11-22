@@ -4,6 +4,7 @@ import { SessionNotificationStore } from "../sessions/sessionNotificationStore.j
 import { SessionUnreadStore } from "../sessions/sessionUnreadStore.js";
 import { PiSessionService, type PiSessionServiceDependencies } from "../sessions/piSessionService.js";
 import { CapturingSessionEventHub, emptyArchiveStore, fakeRuntime, sessionGateway, testModelRuntime } from "../sessions/piSessionService.testSupport.js";
+import { PiSessionEventConnections } from "../sessions/piSessionEventConnections.js";
 import { sessionServiceDependencies, type SessionServiceDependencyInput } from "./sessionServiceDependencies.js";
 
 const AGENT_DIR = "/tmp/pi-web-test-agent";
@@ -16,7 +17,9 @@ const AGENT_DIR = "/tmp/pi-web-test-agent";
 function daemonCollaborators(patch: Partial<SessionServiceDependencyInput> = {}): SessionServiceDependencyInput {
   return {
     agentDir: AGENT_DIR,
+    sessionEvents: new PiSessionEventConnections(),
     archiveStore: emptyArchiveStore(),
+    sessionPins: { pinnedSessionIds: () => Promise.resolve([]) },
     modelRuntime: testModelRuntime,
     sessionManager: sessionGateway([]),
     workspaceActivity: new WorkspaceActivityService(),
@@ -24,8 +27,13 @@ function daemonCollaborators(patch: Partial<SessionServiceDependencyInput> = {})
     notificationStore: new SessionNotificationStore(),
     unreadStore: new SessionUnreadStore(),
     onUnreadChanged: () => { /* no-op */ },
+    onSessionArchived: () => { /* no-op */ },
     catalogRefreshStatus: { isRefreshInFlight: () => false },
+    config: { read: () => Promise.reject(new Error("config read not expected in this test")) },
     subsessionsEnabled: false,
+    sessionMessagesEnabled: true,
+    crossProjectSessionMessages: false,
+    messageTargets: { resolveSpawnTarget: () => Promise.reject(new Error("messaging not expected in this test")) },
     askUserEnabled: true,
     appendSystemPromptSections: [],
     extensionDialogsTimeoutMs: 300_000,
@@ -92,9 +100,43 @@ describe("sessiond session service dependency assembly", () => {
     expect(withSpawnTargets.subsessionsEnabled).toBe(true);
   });
 
+  it("retains the messaging boundary independently of spawning and subsession flags", () => {
+    const messageTargets = { resolveSpawnTarget: () => Promise.reject(new Error("not used")) };
+    const deps = sessionServiceDependencies(daemonCollaborators({ messageTargets, subsessionsEnabled: false }));
+    expect(deps.messageTargets).toBe(messageTargets);
+    expect(deps.spawnTargets).toBeUndefined();
+    expect(deps.subsessionsEnabled).toBe(false);
+  });
+
+  it("passes session-local event and companion bindings through to the session service", () => {
+    const sessionEvents = new PiSessionEventConnections();
+    expect(sessionServiceDependencies(daemonCollaborators({ sessionEvents })).sessionEvents).toBe(sessionEvents);
+  });
+
+  it("passes the messaging preference independently of spawning", () => {
+    const spawnTargets = { resolveSpawnTarget: () => Promise.reject(new Error("not used")) };
+    const deps = sessionServiceDependencies(daemonCollaborators({ sessionMessagesEnabled: false, spawnTargets }));
+    expect(deps.sessionMessagesEnabled).toBe(false);
+    expect(deps.spawnTargets).toBe(spawnTargets);
+    expect(sessionServiceDependencies(daemonCollaborators()).sessionMessagesEnabled).toBe(true);
+  });
+
+  it.each([false, true])("passes cross-project messaging policy %s independently of spawning", (crossProjectSessionMessages) => {
+    const deps = sessionServiceDependencies(daemonCollaborators({ crossProjectSessionMessages }));
+    expect(deps.crossProjectSessionMessages).toBe(crossProjectSessionMessages);
+    expect(deps.spawnTargets).toBeUndefined();
+    expect(deps.subsessionsEnabled).toBe(false);
+  });
+
   it("passes the ask-user preference through to the session service", () => {
     expect(sessionServiceDependencies(daemonCollaborators({ askUserEnabled: true })).askUserEnabled).toBe(true);
     expect(sessionServiceDependencies(daemonCollaborators({ askUserEnabled: false })).askUserEnabled).toBe(false);
+  });
+
+  it("passes the live config reader through to the session service", () => {
+    const config = { read: () => Promise.reject(new Error("not used")) };
+
+    expect(sessionServiceDependencies(daemonCollaborators({ config })).config).toBe(config);
   });
 
   it("passes the extension-dialog timeout through to the session service", () => {

@@ -1,0 +1,176 @@
+import { describe, expect, it, vi } from "vitest";
+import type { JsonValue, PluginPeerChannel, PluginPeer } from "@jmfederico/pi-web/plugin-api";
+import { TERMINAL_CHANNEL_DATA_JSON_MAX_BYTES, TerminalPeerClient, parseTerminalInfo, parseTerminalCommandRun, parseTerminalServerFrame, terminalChannelFailureMessage, terminalInputFrames } from "./terminalProtocol";
+
+const terminal = {
+  id: "terminal-1",
+  cwd: "/repo",
+  name: "Shell",
+  createdAt: "2026-08-01T00:00:00.000Z",
+  exited: false,
+};
+
+const run = {
+  id: "run-1",
+  origin: "tasks",
+  projectId: "project-1",
+  workspaceId: "workspace-1",
+  terminalId: "terminal-1",
+  title: "Build",
+  command: "npm run build",
+  status: "running",
+  createdAt: "2026-08-01T00:00:00.000Z",
+  metadata: { source: "task" },
+};
+
+describe("Terminal peer protocol", () => {
+  it("retains generated title provenance on runs and tabs, with cosmetic fallback", () => {
+    const titlePresentation = { kind: "workspaceRemoval", label: "feature/<img>" };
+    expect(parseTerminalInfo({ ...terminal, titlePresentation }).titlePresentation).toEqual(titlePresentation);
+    expect(parseTerminalCommandRun({ ...run, titlePresentation }).titlePresentation).toEqual(titlePresentation);
+    for (const invalid of [undefined, null, [], {}, { kind: "future", label: "x" }, { kind: "workspaceRemoval", label: 1 }, { kind: "workspaceRemoval", label: "x".repeat(4097) }]) {
+      expect(parseTerminalInfo({ ...terminal, titlePresentation: invalid })).toEqual(terminal);
+      expect(parseTerminalCommandRun({ ...run, titlePresentation: invalid })).toEqual(run);
+    }
+    titlePresentation.label = "changed";
+    const parsed = parseTerminalCommandRun({ ...run, titlePresentation });
+    titlePresentation.label = "mutated";
+    expect(parsed.titlePresentation?.label).toBe("changed");
+  });
+
+  it("preserves terminal scope and workspace identity and rejects ambiguous maintenance identity", () => {
+    const workspace = { ...terminal, scope: "workspace", projectId: "project-1", workspaceId: "workspace-1" };
+    expect(parseTerminalInfo(workspace)).toEqual(workspace);
+    expect(parseTerminalInfo({ ...workspace, defaultShellNumber: 1234 }).defaultShellNumber).toBe(1234);
+    expect(parseTerminalInfo({ ...terminal, scope: "maintenance" })).toEqual({ ...terminal, scope: "maintenance" });
+    expect(() => parseTerminalInfo({ ...workspace, scope: "maintenance" })).toThrow("must not contain workspace identity");
+    expect(() => parseTerminalInfo({ ...terminal, scope: "invalid" })).toThrow("Invalid Terminal info scope");
+  });
+  it("maps list/create/close/continue and command operations without host scope fields", async () => {
+    const request = vi.fn<NonNullable<PluginPeer["request"]>>((operation: string): Promise<JsonValue> => {
+      if (operation === "terminal.list") return Promise.resolve([terminal]);
+      if (operation === "terminal.close") return Promise.resolve({ closed: true });
+      if (operation === "terminal.get-run") return Promise.resolve(null);
+      if (operation === "terminal.list-runs") return Promise.resolve([run]);
+      if (operation === "terminal.create" || operation === "terminal.continue") return Promise.resolve(terminal);
+      return Promise.resolve(run);
+    });
+    const client = new TerminalPeerClient({ scope: "workspace", peer: { request } });
+
+    await expect(client.list()).resolves.toEqual([terminal]);
+    await expect(client.create({ cols: 120, rows: 40 })).resolves.toEqual(terminal);
+    await expect(client.close("terminal-1")).resolves.toBeUndefined();
+    await expect(client.continue("terminal-1")).resolves.toEqual(terminal);
+    await expect(client.runCommand("tasks", { title: "Build", command: "npm run build" })).resolves.toEqual(run);
+    await expect(client.listCommandRuns({ statuses: ["running"] })).resolves.toEqual([run]);
+    await expect(client.getCommandRun("missing")).resolves.toBeUndefined();
+    await expect(client.cancelCommandRun("run-1")).resolves.toEqual(run);
+
+    expect(request).toHaveBeenCalledWith("terminal.create", { cols: 120, rows: 40 }, undefined);
+    expect(request).toHaveBeenCalledWith("terminal.run", {
+      origin: "tasks",
+      title: "Build",
+      command: "npm run build",
+      metadata: {},
+    }, undefined);
+    expect(JSON.stringify(request.mock.calls)).not.toContain("workspaceId");
+  });
+
+  it.each(["workspace", "maintenance"] as const)("enforces %s binding scope on every terminal and command response", async (scope) => {
+    const workspaceRun: JsonValue = { ...run };
+    const machineRun: JsonValue = {
+      id: run.id, origin: run.origin, scope: "maintenance", terminalId: run.terminalId,
+      title: run.title, command: run.command, status: run.status, createdAt: run.createdAt, metadata: run.metadata,
+    };
+    const oppositeTerminal: JsonValue = scope === "workspace" ? { ...terminal, scope: "maintenance" } : terminal;
+    const oppositeRun = scope === "workspace" ? machineRun : workspaceRun;
+    const matchingTerminal: JsonValue = scope === "workspace" ? terminal : { ...terminal, scope: "maintenance" };
+    const matchingRun = scope === "workspace" ? workspaceRun : machineRun;
+    let wrongScope = true;
+    const request = vi.fn<NonNullable<PluginPeer["request"]>>((operation): Promise<JsonValue> => {
+      const info = wrongScope ? oppositeTerminal : matchingTerminal;
+      const result = wrongScope ? oppositeRun : matchingRun;
+      if (operation === "terminal.list") return Promise.resolve([info]);
+      if (operation === "terminal.create" || operation === "terminal.continue") return Promise.resolve(info);
+      return Promise.resolve(operation === "terminal.list-runs" ? [result] : result);
+    });
+    const client = new TerminalPeerClient({ scope, peer: { request } });
+    const operations = [
+      () => client.list(),
+      () => client.create(),
+      () => client.continue("terminal-1"),
+      () => client.runCommand("tasks", { title: "Build", command: "true" }),
+      () => client.listCommandRuns(),
+      () => client.getCommandRun("run-1"),
+      () => client.cancelCommandRun("run-1"),
+    ];
+    for (const operation of operations) await expect(operation()).rejects.toThrow("scope does not match");
+    wrongScope = false;
+    for (const operation of operations) await expect(operation()).resolves.toBeDefined();
+  });
+
+  it("opens the bounded attach channel and validates plugin-private frames", async () => {
+    const channel: PluginPeerChannel = {
+      closed: Promise.resolve({ code: 1000, reason: "done", wasClean: true }),
+      send: vi.fn(),
+      close: vi.fn(),
+    };
+    const openChannel = vi.fn<NonNullable<PluginPeer["openChannel"]>>((_operation, _input, options) => {
+      options.onData({ type: "output", data: "hello", replay: true, replayComplete: true });
+      return Promise.resolve(channel);
+    });
+    const frames: unknown[] = [];
+    const client = new TerminalPeerClient({ scope: "workspace", peer: { request: vi.fn(), openChannel } });
+
+    await expect(client.attach({ terminalId: "terminal-1", size: { cols: 80, rows: 24 }, onFrame: (frame) => { frames.push(frame); } })).resolves.toBe(channel);
+
+    const openCall = openChannel.mock.calls[0];
+    expect(openCall?.slice(0, 2)).toEqual(["terminal.attach", { terminalId: "terminal-1", cols: 80, rows: 24 }]);
+    expect(typeof openCall?.[2].onData).toBe("function");
+    expect(frames).toEqual([{ type: "output", data: "hello", replay: true, replayComplete: true }]);
+    expect(parseTerminalServerFrame({ type: "output", data: "live", replay: false })).toEqual({ type: "output", data: "live", replay: false });
+    expect(parseTerminalServerFrame({ type: "exit", exitCode: 0 })).toEqual({ type: "exit", exitCode: 0 });
+    expect(parseTerminalServerFrame({ type: "error", message: "pty failed" })).toEqual({ type: "error", message: "pty failed" });
+    expect(() => parseTerminalServerFrame({ type: "output", data: "bad" })).toThrow("replay must be a boolean");
+    expect(() => parseTerminalServerFrame({ type: "output", data: "bad", replay: true })).toThrow("replayComplete must be a boolean");
+    expect(() => parseTerminalServerFrame({ type: "output", data: "bad", replay: false, replayComplete: true }))
+      .toThrow("must not declare replay completion");
+  });
+
+  it("splits large Unicode input into ordered JSON-byte-safe channel frames", () => {
+    const input = `${"paste😀\\\n".repeat(9_000)}${"\u0000".repeat(2_000)}tail`;
+    const frames = terminalInputFrames(input);
+
+    expect(frames.length).toBeGreaterThan(1);
+    expect(frames.map(({ data }) => data).join("")).toBe(input);
+    for (const frame of frames) {
+      expect(new TextEncoder().encode(JSON.stringify(frame)).byteLength).toBeLessThanOrEqual(TERMINAL_CHANNEL_DATA_JSON_MAX_BYTES);
+      const first = frame.data.charCodeAt(0);
+      const last = frame.data.charCodeAt(frame.data.length - 1);
+      expect(first >= 0xdc00 && first <= 0xdfff).toBe(false);
+      expect(last >= 0xd800 && last <= 0xdbff).toBe(false);
+    }
+  });
+
+  it("parses maintenance runs without accepting workspace or unknown scope identities", () => {
+    const maintenance = { ...run, scope: "maintenance", projectId: undefined, workspaceId: undefined };
+    expect(parseTerminalCommandRun(maintenance)).toEqual(expect.objectContaining({ scope: "maintenance", id: "run-1" }));
+    expect(parseTerminalCommandRun(maintenance)).not.toHaveProperty("projectId");
+    expect(() => parseTerminalCommandRun({ ...run, scope: "maintenance" })).toThrow("must not contain workspace identity");
+    expect(() => parseTerminalCommandRun({ ...run, scope: "other" })).toThrow("Invalid Terminal command run scope");
+  });
+
+  it("rejects malformed command records and attributes channel closure", () => {
+    expect(() => parseTerminalCommandRun({ ...run, status: "done" })).toThrow("Invalid Terminal command run status");
+    expect(() => parseTerminalCommandRun({ ...run, metadata: { source: 2 } })).toThrow("must be a string");
+    expect(terminalChannelFailureMessage({ code: 1011, reason: "", wasClean: false, error: { code: "plugin-error", message: "failed" } }))
+      .toBe("plugin-error: failed");
+    expect(terminalChannelFailureMessage({ code: 1000, reason: "done", wasClean: true })).toBeUndefined();
+  });
+
+  it("fails closed when the peer has no channel capability", async () => {
+    const client = new TerminalPeerClient({ scope: "workspace", peer: { request: vi.fn() } });
+    await expect(client.attach({ terminalId: "terminal-1", onFrame: vi.fn() }))
+      .rejects.toThrow("Required Terminal peer channel capability is unavailable");
+  });
+});

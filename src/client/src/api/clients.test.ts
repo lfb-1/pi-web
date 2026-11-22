@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PiWebConfigValues, TerminalCommandRun, Workspace } from "../../../shared/apiTypes";
-import { configApi, filesApi, machinesApi, piPackagesApi, piWebApi, pluginsApi, SessionTreeForkUnavailableError, sessionsApi, terminalsApi, workspacesApi } from "./clients";
+import { configApi, filesApi, machinesApi, noticesApi, piPackagesApi, piWebApi, pluginsApi, SessionTreeForkUnavailableError, sessionsApi, workspacesApi } from "./clients";
 
 const workspace: Workspace = {
   id: "w/1",
@@ -48,6 +48,59 @@ afterEach(() => {
 });
 
 describe("machine-scoped runtime API", () => {
+  it("starts and controls a scoped MCP auth flow with encoded identifiers", async () => {
+    const flow = { flowId: "flow /1", target: "mcp", providerId: "mcp", providerName: "MCP server", status: "running", progress: [] };
+    const fetchMock = stubSequenceFetch(Array.from({ length: 4 }, () => jsonResponse(flow)));
+    const session = { id: "session /1", cwd: "/repo" };
+    await sessionsApi.startMcpAuth(session, "login", "remote a", "Budgeter");
+    await sessionsApi.mcpAuthFlow(flow.flowId, "remote a");
+    await sessionsApi.respondMcpAuthFlow(flow.flowId, "request-1", "http://localhost/callback?code=abc", "remote a");
+    await sessionsApi.cancelMcpAuthFlow(flow.flowId, "remote a");
+    expect(fetchMock.mock.calls.map((call) => call[0])).toEqual([
+      "https://pi.example.test/api/machines/remote%20a/sessions/session%20%2F1/mcp/auth",
+      "https://pi.example.test/api/machines/remote%20a/auth/mcp/flow%20%2F1",
+      "https://pi.example.test/api/machines/remote%20a/auth/mcp/flow%20%2F1/respond",
+      "https://pi.example.test/api/machines/remote%20a/auth/mcp/flow%20%2F1/cancel",
+    ]);
+    expect(JSON.parse(requestBody(fetchCall(fetchMock, 0)[1]))).toEqual({ cwd: "/repo", mode: "login", serverName: "Budgeter" });
+    expect(JSON.parse(requestBody(fetchCall(fetchMock, 2)[1]))).toEqual({ requestId: "request-1", value: "http://localhost/callback?code=abc" });
+  });
+
+  it("lists MCP authentication candidates for the exact session and machine", async () => {
+    const response = { servers: [{ name: "Budgeter", description: "connected" }] };
+    const fetchMock = stubJsonFetch(response);
+    await expect(sessionsApi.mcpAuthServers({ id: "session /1", cwd: "/work repo" }, "remote a")).resolves.toEqual(response);
+    expect(fetchCall(fetchMock, 0)[0]).toBe("https://pi.example.test/api/machines/remote%20a/sessions/session%20%2F1/mcp/auth/servers?cwd=%2Fwork+repo");
+  });
+
+  it("reads scoped notices and dismisses them through the selected machine route", async () => {
+    const snapshot = {
+      daemonInstanceId: "daemon-a",
+      revision: 1,
+      notices: [{
+        id: "notice-1",
+        severity: "warning",
+        message: "Remote warning",
+        createdAt: "2026-08-01T00:00:00.000Z",
+        source: "plugin:remote",
+        scope: { projectId: "project-1" },
+        context: { projectId: "metadata-only" },
+      }],
+    };
+    const fetchMock = stubSequenceFetch([jsonResponse(snapshot), jsonResponse({ ...snapshot, revision: 2, notices: [] })]);
+
+    await expect(noticesApi.snapshot("remote a")).resolves.toEqual(snapshot);
+    await noticesApi.dismiss("remote a", "daemon-a", "notice-1");
+
+    expect(fetchMock.mock.calls.map((call) => call[0])).toEqual([
+      "https://pi.example.test/api/machines/remote%20a/notices",
+      "https://pi.example.test/api/machines/remote%20a/notices/dismiss",
+    ]);
+    expect(fetchCall(fetchMock, 0)[1]?.cache).toBe("no-store");
+    expect(fetchCall(fetchMock, 1)[1]?.method).toBe("POST");
+    expect(JSON.parse(requestBody(fetchCall(fetchMock, 1)[1]))).toEqual({ daemonInstanceId: "daemon-a", noticeId: "notice-1" });
+  });
+
   it("reads machine PI WEB status through the gateway route", async () => {
     const fetchMock = stubJsonFetch(piWebStatusResponse());
 
@@ -92,6 +145,34 @@ describe("machine-scoped runtime API", () => {
 });
 
 describe("settings config and plugin APIs", () => {
+  it("updates and resets settings in one PATCH at the gateway or selected machine", async () => {
+    const response = { ...piWebConfigResponse({ quietMode: false }), enforcedSettings: { "/host": "PI_WEB_HOST" }, configSources: { "/quietMode": "defaults" }, defaultsConfig: { quietMode: false }, defaultsPath: "/etc/defaults.json" };
+    const fetchMock = stubSequenceFetch([jsonResponse(response), jsonResponse(response)]);
+    const update = { set: { quietMode: true }, unset: ["/defaultTheme"] };
+    await expect(configApi.updateConfig(update)).resolves.toEqual(response);
+    await configApi.updateConfig({ unset: ["/uploads"] }, "remote /a");
+    expect(fetchMock.mock.calls.map((call) => call[0])).toEqual([
+      "https://pi.example.test/api/config", "https://pi.example.test/api/machines/remote%20%2Fa/config",
+    ]);
+    expect(fetchCall(fetchMock, 0)[1]?.method).toBe("PATCH");
+    expect(JSON.parse(requestBody(fetchCall(fetchMock, 0)[1]))).toEqual(update);
+    expect(JSON.parse(requestBody(fetchCall(fetchMock, 1)[1]))).toEqual({ unset: ["/uploads"] });
+  });
+  it("loads naming models through the selected machine under the application base", async () => {
+    vi.stubEnv("BASE_URL", "./");
+    vi.stubGlobal("document", { baseURI: "https://pi.example.test/nested/" });
+    const response = { models: [{ provider: "provider", id: "naming", name: "Naming" }] };
+    const fetchMock = stubSequenceFetch([jsonResponse(response), jsonResponse({ models: [] })]);
+
+    await expect(configApi.namingModels("remote /a")).resolves.toEqual(response);
+    await expect(configApi.namingModels()).resolves.toEqual({ models: [] });
+
+    expect(fetchMock.mock.calls.map((call) => call[0])).toEqual([
+      "https://pi.example.test/nested/api/machines/remote%20%2Fa/models",
+      "https://pi.example.test/nested/api/machines/local/models",
+    ]);
+  });
+
   it("preserves gateway config and plugin routes by default", async () => {
     const fetchMock = stubSequenceFetch([
       jsonResponse(piWebConfigResponse({ host: "127.0.0.1" })),
@@ -194,6 +275,15 @@ describe("Pi package API", () => {
 });
 
 describe("session API compatibility", () => {
+  it("marks unread through encoded machine and session routes", async () => {
+    const snapshot = { catalogId: "catalog-a", catalogRevision: 1, sessions: [] };
+    const fetchMock = stubSequenceFetch([jsonResponse(snapshot)]);
+    await expect(sessionsApi.markUnread({ id: "s /?", cwd: "/repo" }, "remote a")).resolves.toEqual(snapshot);
+    expect(fetchCall(fetchMock, 0)[0]).toBe("https://pi.example.test/api/machines/remote%20a/sessions/s%20%2F%3F/unread");
+    expect(fetchCall(fetchMock, 0)[1]?.method).toBe("POST");
+    expect(JSON.parse(requestBody(fetchCall(fetchMock, 0)[1]))).toEqual({ cwd: "/repo" });
+  });
+
   it("reads and acknowledges daemon-owned unread state through encoded machine routes", async () => {
     const unread = {
       catalogId: "catalog-a",
@@ -292,6 +382,7 @@ describe("session API compatibility", () => {
 
     await expect(sessionsApi.clearQueue({ id: "s /?", cwd: "/repo with spaces" }, "remote /?")).resolves.toEqual({
       sessionId: "s /?",
+      recentlyActiveElsewhere: false,
       isStreaming: true,
       isCompacting: false,
       isBashRunning: false,
@@ -306,6 +397,33 @@ describe("session API compatibility", () => {
     expect(url).toBe("https://pi.example.test/api/machines/remote%20%2F%3F/sessions/s%20%2F%3F/queue/clear");
     expect(init?.method).toBe("POST");
     expect(JSON.parse(requestBody(init))).toEqual({ cwd: "/repo with spaces" });
+  });
+
+  it("serializes queue mutations with their expected snapshot on encoded machine routes", async () => {
+    const fetchMock = stubJsonFetch({ sessionId: "s /?", isStreaming: true, isCompacting: false, isBashRunning: false, pendingMessageCount: 0, tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 });
+    const mutation = { action: "toggle" as const, index: 0, expectedQueue: [{ kind: "steer" as const, text: "adjust" }] };
+    await sessionsApi.mutateQueuedMessage({ id: "s /?", cwd: "/repo with spaces" }, mutation, "remote /?");
+    const [url, init] = fetchCall(fetchMock, 0);
+    expect(url).toBe("https://pi.example.test/api/machines/remote%20%2F%3F/sessions/s%20%2F%3F/queue/message");
+    expect(init?.method).toBe("POST");
+    expect(JSON.parse(requestBody(init))).toEqual({ cwd: "/repo with spaces", ...mutation });
+  });
+
+  it("submits question answers and skips through encoded machine routes with ordinary status responses", async () => {
+    const wireStatus = { sessionId: "s /?", isStreaming: true, isCompacting: false, isBashRunning: false, pendingMessageCount: 0, tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cost: 0 };
+    const fetchMock = stubSequenceFetch([jsonResponse(wireStatus), jsonResponse(wireStatus)]);
+    const ref = { id: "s /?", cwd: "/repo with spaces" };
+    const answers = [{ id: "q1", values: ["pg"] }];
+
+    await expect(sessionsApi.submitAsk(ref, "ask 1", { answers }, "remote /?")).resolves.toMatchObject(wireStatus);
+    await expect(sessionsApi.cancelAsk(ref, "ask 1", "remote /?")).resolves.toMatchObject(wireStatus);
+
+    expect(fetchMock.mock.calls.map((call) => call[0])).toEqual([
+      "https://pi.example.test/api/machines/remote%20%2F%3F/sessions/s%20%2F%3F/ask/submit",
+      "https://pi.example.test/api/machines/remote%20%2F%3F/sessions/s%20%2F%3F/ask/cancel",
+    ]);
+    expect(JSON.parse(requestBody(fetchCall(fetchMock, 0)[1]))).toEqual({ cwd: ref.cwd, askId: "ask 1", answers });
+    expect(JSON.parse(requestBody(fetchCall(fetchMock, 1)[1]))).toEqual({ cwd: ref.cwd, askId: "ask 1" });
   });
 
   it("answers and cancels extension dialogs through encoded machine routes", async () => {
@@ -336,7 +454,7 @@ describe("session API compatibility", () => {
     expect(JSON.parse(requestBody(cancelInit))).toEqual({ cwd: "/repo with spaces", dialogId: "dialog 1" });
   });
 
-  it("posts session tree navigation through an encoded cwd-scoped machine route", async () => {
+  it("posts exact-entry session tree navigation without retainCheckpoint through an encoded machine route", async () => {
     const fetchMock = stubJsonFetch({ cancelled: false, editorText: "edit this" });
     const navigation = { targetId: "entry /?", expectedLeafId: "leaf-1", summary: { mode: "custom" as const, instructions: "focus on tests" } };
 
@@ -347,6 +465,24 @@ describe("session API compatibility", () => {
     expect(url).toBe("https://pi.example.test/api/machines/remote%20%2F%3F/sessions/s%20%2F%3F/tree/navigate");
     expect(init?.method).toBe("POST");
     expect(JSON.parse(requestBody(init))).toEqual({ cwd: "/repo with spaces", ...navigation });
+  });
+
+  it.each([true, false])("serializes retainCheckpoint=%s for session tree navigation", async (retainCheckpoint) => {
+    const fetchMock = stubJsonFetch({ cancelled: false });
+
+    await sessionsApi.navigateTree(
+      { id: "s-1", cwd: "/repo" },
+      { targetId: "entry-1", expectedLeafId: "leaf-1", summary: { mode: "none" }, retainCheckpoint },
+    );
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(JSON.parse(requestBody(fetchCall(fetchMock, 0)[1]))).toEqual({
+      cwd: "/repo",
+      targetId: "entry-1",
+      expectedLeafId: "leaf-1",
+      summary: { mode: "none" },
+      retainCheckpoint,
+    });
   });
 
   it("keeps session tree navigation under a canonical nested deployment base", async () => {
@@ -364,7 +500,7 @@ describe("session API compatibility", () => {
     expect(fetchCall(fetchMock, 0)[0]).toBe("https://pi.example.test/nested/pi-web/api/machines/remote%20%2F%3F/sessions/session%20%2F%3F/tree/navigate");
   });
 
-  it("posts session tree forks through an encoded cwd-scoped machine route", async () => {
+  it("posts exact-entry session tree forks without retainCheckpoint through an encoded machine route", async () => {
     const fetchMock = stubJsonFetch({ cancelled: true });
     const fork = { entryId: "entry /?", expectedLeafId: "leaf-1" };
 
@@ -377,13 +513,21 @@ describe("session API compatibility", () => {
     expect(JSON.parse(requestBody(init))).toEqual({ cwd: "/repo with spaces", ...fork });
   });
 
-  it("omits the stale-tree guard for direct assistant-response forks", async () => {
+  it.each([true, false])("serializes retainCheckpoint=%s for session tree forks", async (retainCheckpoint) => {
     const fetchMock = stubJsonFetch({ cancelled: true });
 
-    await sessionsApi.forkTree({ id: "s1", cwd: "/repo" }, { entryId: "assistant-9" });
+    await sessionsApi.forkTree(
+      { id: "s-1", cwd: "/repo" },
+      { entryId: "entry-1", expectedLeafId: "leaf-1", retainCheckpoint },
+    );
 
-    const [, init] = fetchCall(fetchMock, 0);
-    expect(JSON.parse(requestBody(init))).toEqual({ cwd: "/repo", entryId: "assistant-9" });
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(JSON.parse(requestBody(fetchCall(fetchMock, 0)[1]))).toEqual({
+      cwd: "/repo",
+      entryId: "entry-1",
+      expectedLeafId: "leaf-1",
+      retainCheckpoint,
+    });
   });
 
   it("recognizes an old daemon only from the missing tree/fork route response", async () => {
@@ -415,6 +559,64 @@ describe("session API compatibility", () => {
     await expect(request).rejects.not.toBeInstanceOf(SessionTreeForkUnavailableError);
   });
 
+  it("requests reference images in paginated history while preserving reference and legacy inline payloads", async () => {
+    vi.stubEnv("BASE_URL", "./");
+    vi.stubGlobal("document", { baseURI: "https://pi.example.test/nested/pi-web/" });
+    const page = { messages: [{ role: "user", content: [
+      { type: "image", mediaId: "a".repeat(64), mimeType: "image/png", byteSize: 3 },
+      { type: "image", mimeType: "image/png", data: "QUJD" },
+    ] }], start: 5, total: 15 };
+    const fetchMock = stubJsonFetch(page);
+    await expect(sessionsApi.messages({ id: "s /?", cwd: "/repo with spaces" }, { limit: 10, before: 15 }, "remote /?")).resolves.toEqual(page);
+    expect(fetchCall(fetchMock, 0)[0]).toBe("https://pi.example.test/nested/pi-web/api/machines/remote%20%2F%3F/sessions/s%20%2F%3F/messages?cwd=%2Frepo+with+spaces&limit=10&before=15&media=reference");
+  });
+
+  it("reads a consistent transcript snapshot through a nested encoded machine route with cwd and limit", async () => {
+    vi.stubEnv("BASE_URL", "./");
+    vi.stubGlobal("document", { baseURI: "https://pi.example.test/nested/pi-web/" });
+    const page = { messages: [{ role: "user", content: "hello", entryId: "entry-1" }], start: 10, total: 11 };
+    const partial = { role: "assistant", content: [
+      { type: "text", text: "streaming" },
+      { type: "image", mediaId: "b".repeat(64), mimeType: "image/png", byteSize: 3 },
+    ] };
+    const fetchMock = stubJsonFetch({ page, status: dialogStatusWire(), seq: 12, partial });
+
+    await expect(sessionsApi.transcriptSnapshot({ id: "s /?", cwd: "/repo with spaces" }, { limit: 25 }, "remote /?")).resolves.toEqual({
+      page, status: parsedDialogStatus(), seq: 12, partial,
+    });
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const [url, init] = fetchCall(fetchMock, 0);
+    expect(url).toBe("https://pi.example.test/nested/pi-web/api/machines/remote%20%2F%3F/sessions/s%20%2F%3F/transcript-snapshot?cwd=%2Frepo+with+spaces&limit=25&media=reference");
+    expect(init?.method ?? "GET").toBe("GET");
+  });
+
+  it.each([undefined, {}])("defaults transcript snapshots to local without an unspecified limit (%j)", async (options) => {
+    const fetchMock = stubJsonFetch({ page: { messages: [], start: 0, total: 0 }, status: dialogStatusWire(), seq: 0, partial: null });
+
+    await sessionsApi.transcriptSnapshot({ id: "s-1", cwd: "/repo" }, options);
+
+    expect(fetchCall(fetchMock, 0)[0]).toBe("https://pi.example.test/api/machines/local/sessions/s-1/transcript-snapshot?cwd=%2Frepo&media=reference");
+  });
+
+  it("passes transcript cancellation to HTTP without adding transport options to the query", async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockReturnValue(new Promise(() => undefined));
+    vi.stubGlobal("fetch", fetchMock);
+    const controller = new AbortController();
+    const pending = sessionsApi.transcriptSnapshot({ id: "s-1", cwd: "/repo" }, { limit: 25, signal: controller.signal, timeoutMs: 1000 });
+    controller.abort();
+    await expect(pending).rejects.toBe(controller.signal.reason);
+    expect(fetchCall(fetchMock, 0)[0]).toBe("https://pi.example.test/api/machines/local/sessions/s-1/transcript-snapshot?cwd=%2Frepo&limit=25&media=reference");
+    expect(fetchCall(fetchMock, 0)[1]?.signal?.aborted).toBe(true);
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("rejects an incomplete transcript snapshot instead of returning a partial response", async () => {
+    stubJsonFetch({ page: { messages: [], start: 0, total: 0 }, status: dialogStatusWire(), seq: 0 });
+
+    await expect(sessionsApi.transcriptSnapshot({ id: "s-1", cwd: "/repo" })).rejects.toThrow("Expected field: partial");
+  });
+
   it("reads a session stream snapshot through an encoded machine route with cwd context", async () => {
     const fetchMock = stubJsonFetch({ seq: 12, partial: { role: "assistant", content: [{ type: "text", text: "streaming" }] } });
 
@@ -425,7 +627,7 @@ describe("session API compatibility", () => {
 
     expect(fetchMock).toHaveBeenCalledOnce();
     const [url, init] = fetchCall(fetchMock, 0);
-    expect(url).toBe("https://pi.example.test/api/machines/remote%20%2F%3F/sessions/s%20%2F%3F/stream-snapshot?cwd=%2Frepo+with+spaces");
+    expect(url).toBe("https://pi.example.test/api/machines/remote%20%2F%3F/sessions/s%20%2F%3F/stream-snapshot?cwd=%2Frepo+with+spaces&media=reference");
     expect(init?.method ?? "GET").toBe("GET");
   });
 
@@ -493,7 +695,7 @@ describe("machine-scoped workspace API", () => {
   });
 });
 
-describe("machine-scoped terminal command-run API", () => {
+describe("machine-scoped workspace removal API", () => {
   it("deletes workspaces through the selected machine scope with the confirmed host precondition", async () => {
     const fetchMock = stubJsonFetch(commandRun);
 
@@ -506,81 +708,53 @@ describe("machine-scoped terminal command-run API", () => {
     expect(init?.body).toBe(JSON.stringify({ precondition: "v1.confirmed" }));
   });
 
-  it("creates command runs through the selected machine scope", async () => {
-    const fetchMock = stubJsonFetch(commandRun);
+});
 
-    await terminalsApi.runTerminalCommand("core", { workspace, title: "Build", command: "npm test", open: true }, "remote a");
-
-    expect(fetchMock).toHaveBeenCalledOnce();
-    const [url, init] = fetchCall(fetchMock, 0);
-    expect(url).toBe("https://pi.example.test/api/machines/remote%20a/projects/p%201/workspaces/w%2F1/terminal-command-runs");
-    expect(init?.method).toBe("POST");
-    expect(JSON.parse(requestBody(init))).toEqual({ origin: "core", title: "Build", command: "npm test", metadata: {} });
-  });
-
-  it("closes all workspace terminals through the selected machine scope", async () => {
-    const fetchMock = stubJsonFetch({ closed: true });
-
-    await terminalsApi.closeWorkspaceTerminals("p 1", "w/1", "remote a");
-
-    expect(fetchMock).toHaveBeenCalledOnce();
-    const [url, init] = fetchCall(fetchMock, 0);
-    expect(url).toBe("https://pi.example.test/api/machines/remote%20a/projects/p%201/workspaces/w%2F1/terminals");
-    expect(init?.method).toBe("DELETE");
-  });
-
-  it("lists, reads, and cancels command runs through the selected machine scope", async () => {
+describe("workspace file read API", () => {
+  it("forwards caller cancellation through selected-machine tree and file requests", async () => {
     const fetchMock = stubSequenceFetch([
-      jsonResponse([commandRun]),
-      jsonResponse(commandRun),
-      jsonResponse(commandRun),
+      jsonResponse({ path: "src", entries: [], scannedAt: "2026-06-25T00:00:00.000Z", truncated: false }),
+      jsonResponse({ path: "README.md", encoding: "utf8", size: 2, modifiedAt: "2026-06-25T00:00:00.000Z", content: "hi", truncated: false, binary: false }),
     ]);
+    const controller = new AbortController();
 
-    await terminalsApi.listCommandRuns({ projectId: "p 1", workspaceId: "w/1", statuses: ["running"], metadata: { "pi.operation": "workspace.delete" } }, "remote a");
-    await terminalsApi.getCommandRun("run 1", "remote a");
-    await terminalsApi.cancelCommandRun("run 1", "remote a");
+    await workspacesApi.workspaceTree("p 1", "w/1", "src", "remote a", { signal: controller.signal });
+    await workspacesApi.workspaceFile("p 1", "w/1", "README.md", "remote a", { signal: controller.signal });
 
-    expect(fetchMock.mock.calls.map((call) => call[0])).toEqual([
-      "https://pi.example.test/api/machines/remote%20a/terminal-command-runs?projectId=p+1&workspaceId=w%2F1&statuses=running&metadata=%7B%22pi.operation%22%3A%22workspace.delete%22%7D",
-      "https://pi.example.test/api/machines/remote%20a/terminal-command-runs/run%201",
-      "https://pi.example.test/api/machines/remote%20a/terminal-command-runs/run%201/cancel",
-    ]);
-    expect(fetchCall(fetchMock, 2)[1]?.method).toBe("POST");
-  });
-
-  it("returns undefined for missing command runs in the selected machine scope", async () => {
-    const fetchMock = stubResponseFetch(new Response("{}", { status: 404 }));
-
-    await expect(terminalsApi.getCommandRun("missing", "remote-a")).resolves.toBeUndefined();
-
-    expect(fetchCall(fetchMock, 0)[0]).toBe("https://pi.example.test/api/machines/remote-a/terminal-command-runs/missing");
+    expect(fetchCall(fetchMock, 0)[0]).toBe("https://pi.example.test/api/machines/remote%20a/projects/p%201/workspaces/w%2F1/tree?path=src");
+    expect(fetchCall(fetchMock, 1)[0]).toBe("https://pi.example.test/api/machines/remote%20a/projects/p%201/workspaces/w%2F1/file?path=README.md");
+    expect(fetchCall(fetchMock, 0)[1]?.signal).toBe(controller.signal);
+    expect(fetchCall(fetchMock, 1)[1]?.signal).toBe(controller.signal);
   });
 });
 
 describe("workspace file write API", () => {
-  it("sends text content with Content-Type text/plain", async () => {
-    const fetchMock = stubJsonFetch({ path: "hello.txt", size: 11, modifiedAt: "2026-06-10T00:00:00.000Z", created: true });
+  it("writes text on the local route and parses the file response", async () => {
+    const response = { path: "hello.txt", size: 11, modifiedAt: "2026-06-10T00:00:00.000Z", created: true };
+    const fetchMock = stubJsonFetch(response);
 
-    await workspacesApi.writeWorkspaceFile("p 1", "w/1", "hello.txt", "hello world");
+    await expect(workspacesApi.writeWorkspaceFile("p 1", "w/1", "hello.txt", "hello world")).resolves.toEqual(response);
 
     expect(fetchMock).toHaveBeenCalledOnce();
     const [url, init] = fetchCall(fetchMock, 0);
     expect(url).toBe("https://pi.example.test/api/machines/local/projects/p%201/workspaces/w%2F1/file?path=hello.txt");
     expect(init?.method).toBe("PUT");
     expect(new Headers(init?.headers).get("content-type")).toBe("text/plain");
+    expect(init?.body).toEqual(new TextEncoder().encode("hello world"));
   });
 
-  it("sends binary content with Content-Type application/octet-stream", async () => {
+  it("writes binary bytes through the encoded remote route", async () => {
     const fetchMock = stubJsonFetch({ path: "image.png", size: 4, modifiedAt: "2026-06-10T00:00:00.000Z", created: true });
     const binary = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
 
-    await workspacesApi.writeWorkspaceFile("p 1", "w/1", "image.png", binary);
+    await workspacesApi.writeWorkspaceFile("p 1", "w/1", "image.png", binary, undefined, "remote a");
 
     expect(fetchMock).toHaveBeenCalledOnce();
     const [url, init] = fetchCall(fetchMock, 0);
-    expect(url).toBe("https://pi.example.test/api/machines/local/projects/p%201/workspaces/w%2F1/file?path=image.png");
+    expect(url).toBe("https://pi.example.test/api/machines/remote%20a/projects/p%201/workspaces/w%2F1/file?path=image.png");
     expect(init?.method).toBe("PUT");
     expect(new Headers(init?.headers).get("content-type")).toBe("application/octet-stream");
+    expect(init?.body).toEqual(binary);
   });
 
   it("sends createDirs and overwrite query parameters", async () => {
@@ -592,31 +766,6 @@ describe("workspace file write API", () => {
     const [url] = fetchCall(fetchMock, 0);
     expect(url).toContain("createDirs=false");
     expect(url).toContain("overwrite=false");
-  });
-
-  it("parses WriteWorkspaceFileResponse correctly", async () => {
-    const fetchMock = stubJsonFetch({ path: "output/result.txt", size: 42, modifiedAt: "2026-06-10T12:00:00.000Z", created: true });
-
-    const result = await workspacesApi.writeWorkspaceFile("p 1", "w/1", "output/result.txt", "content");
-
-    expect(fetchMock).toHaveBeenCalledOnce();
-
-    expect(result).toEqual({
-      path: "output/result.txt",
-      size: 42,
-      modifiedAt: "2026-06-10T12:00:00.000Z",
-      created: true,
-    });
-  });
-
-  it("routes through machine prefix for remote machines", async () => {
-    const fetchMock = stubJsonFetch({ path: "file.txt", size: 5, modifiedAt: "2026-06-10T00:00:00.000Z", created: false });
-
-    await workspacesApi.writeWorkspaceFile("p 1", "w/1", "file.txt", "data", undefined, "remote a");
-
-    expect(fetchMock).toHaveBeenCalledOnce();
-    const [url] = fetchCall(fetchMock, 0);
-    expect(url).toContain("api/machines/remote%20a/");
   });
 });
 
@@ -670,9 +819,9 @@ function dialogStatusWire() {
   };
 }
 
-// The parsed status normalizes the wire shape (queuedMessages defaults to []).
+// The parsed status normalizes older wire snapshots without queue/activity fields.
 function parsedDialogStatus() {
-  return { ...dialogStatusWire(), queuedMessages: [] };
+  return { ...dialogStatusWire(), queuedMessages: [], recentlyActiveElsewhere: false };
 }
 
 function piWebConfigResponse(config: PiWebConfigValues) {
@@ -681,17 +830,18 @@ function piWebConfigResponse(config: PiWebConfigValues) {
     exists: true,
     config,
     effectiveConfig: config,
-    envOverrides: { host: false, port: false, allowedHosts: false, spawnSessions: false, subsessions: false, askUser: false },
+    envOverrides: { host: false, port: false, allowedHosts: false, spawnSessions: false, subsessions: false, sessionMessages: false, askUser: false },
   };
 }
 
 function piWebPluginsResponse() {
   return {
-    lifecycleVersion: 1,
+    lifecycleVersion: 2,
     plugins: [{ id: "info", module: "/pi-web-plugins/info/plugin.js", source: "test", scope: "local", machineSpecific: false, enabled: true, discovered: true, conflict: false }],
     diagnostics: [],
     serverRuntime: {
       status: "available",
+      terminalMode: "required",
       desiredSafeStart: "off",
       restartRequired: false,
       recovery: {

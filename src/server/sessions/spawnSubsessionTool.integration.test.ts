@@ -1,8 +1,9 @@
 import type { Api, AssistantMessage, Message, Model } from "@earendil-works/pi-ai";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { runAgentLoop, type AgentEvent, type AgentMessage, type AgentTool, type StreamFn } from "@earendil-works/pi-agent-core";
-import type { ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
+import { ExtensionToolContext, ToolDefinition } from "../../piSdk.js";
+import { stubExtensionToolContext } from "./piSessionService.testSupport.js";
+import { Type } from "pi-web-typebox";
 import { describe, expect, it, vi } from "vitest";
 import { createSubsessionToolDefinitions, type SubsessionSummary, type SubsessionToolDeps } from "./spawnSubsessionTool.js";
 
@@ -19,17 +20,17 @@ const model: Model<Api> = {
   maxTokens: 100,
 };
 
-function extensionContext(): ExtensionContext {
-  const sessionManager = {
-    getSessionId: () => "parent-1",
-    getSessionFile: () => "/sessions/parent-1.jsonl",
-  };
+function extensionContext(): ExtensionToolContext {
   // The wrapped yield definition only reads the two session-manager methods above.
-  // eslint-disable-next-line @typescript-eslint/consistent-type-assertions -- minimal integration boundary for a Pi tool definition.
-  return { sessionManager } as unknown as ExtensionContext;
+  return stubExtensionToolContext({
+    sessionManager: {
+      getSessionId: () => "parent-1",
+      getSessionFile: () => "/sessions/parent-1.jsonl",
+    },
+  });
 }
 
-function wrapDefinition(definition: ToolDefinition, ctx: ExtensionContext): AgentTool {
+function wrapDefinition(definition: ToolDefinition, ctx: ExtensionToolContext): AgentTool {
   return {
     name: definition.name,
     label: definition.label,
@@ -81,10 +82,14 @@ function streamSequence(messages: AssistantMessage[]): StreamFn {
 }
 
 async function runYieldBatch(subsessions: SubsessionSummary[], includeSentinel = false) {
-  const list = vi.fn(() => Promise.resolve(subsessions));
+  const list = vi.fn<SubsessionToolDeps["list"]>(() => Promise.resolve(subsessions));
   const deps: SubsessionToolDeps = {
     spawn: vi.fn(() => Promise.resolve({ sessionId: "child-1", cwd: "/workspace" })),
+    stop: vi.fn(() => Promise.reject(new Error("unused"))),
+    resume: vi.fn(() => Promise.reject(new Error("unused"))),
+    archive: vi.fn(() => Promise.reject(new Error("unused"))),
     list,
+    join: async (parentId, parentFile) => ({ subsessions: await list(parentId, parentFile), completions: [] }),
     check: vi.fn(() => Promise.resolve({ sessionId: "child-1", cwd: "/workspace", status: "idle" as const, finalText: "", messageCount: 0 })),
     read: vi.fn(() => Promise.resolve({ sessionId: "child-1", cwd: "/workspace", status: "idle" as const, entries: [], total: 0, matched: 0, start: 0, hasMore: false })),
   };
@@ -115,7 +120,6 @@ async function runYieldBatch(subsessions: SubsessionSummary[], includeSentinel =
   const messages = await runAgentLoop(
     [{ role: "user", content: "join now", timestamp: 0 }],
     {
-      systemPrompt: "",
       messages: [],
       tools: [wrapDefinition(yieldDefinition, extensionContext()), sentinelTool],
     },

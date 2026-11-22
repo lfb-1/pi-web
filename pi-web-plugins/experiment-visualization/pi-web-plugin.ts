@@ -4,8 +4,8 @@ import {
   refreshExperimentHistoryPanel,
 } from "./experimentHistoryPanelElement.js";
 
-const plugin: PiWebPlugin = {
-  apiVersion: 2,
+const plugin = {
+  apiVersion: 4,
   name: "Experiment Visualization",
   activate: ({ runtimePluginId, html, svg }) => {
     defineExperimentHistoryPanelElement();
@@ -43,6 +43,6 @@ const plugin: PiWebPlugin = {
       },
     };
   },
-};
+} satisfies PiWebPlugin;
 
 export default plugin;

@@ -5,13 +5,16 @@ import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
   ProviderWorkspace,
+  ServerPluginActivation,
   ServerPluginActivationContext,
   ServerPluginExecFileResult,
+  ServerPluginPeer,
   WorkspaceProvider,
 } from "@jmfederico/pi-web/server-plugin-api";
 import type { Project } from "../../src/shared/apiTypes.js";
+import { PluginBackendRegistry } from "../../src/server/plugins/pluginBackendRegistry.js";
 import { createServerPluginExecFile } from "../../src/server/plugins/serverPluginExec.js";
-import type { ServerPluginProviderContribution } from "../../src/server/plugins/serverPluginRuntime.js";
+import type { ServerPluginPairedBackendContribution, ServerPluginProviderContribution } from "../../src/server/plugins/serverPluginRuntime.js";
 import { WorkspaceProviderRegistry } from "../../src/server/workspaces/workspaceProviderRegistry.js";
 import {
   GIT_DIFF_OPERATION,
@@ -83,6 +86,7 @@ describe("bundled Git workspace provider", () => {
         isMain: false,
         publicMetadata: { isGitRepo: true, isGitWorktree: true, branch: "feature/with-space" },
         removal: {
+          localization: { kind: "gitWorktree", label: "feature/with-space", path: linked },
           actionLabel: "Delete workspace",
           confirmation: `Delete workspace feature/with-space?\n\nThis will run git worktree remove and delete:\n${linked}\n\nThe Git branch will not be deleted.`,
         },
@@ -126,13 +130,13 @@ describe("bundled Git workspace provider", () => {
     expect(resolution.workspaces.filter(({ isMain }) => isMain)).toHaveLength(1);
   });
 
-  it("serves status and diff schemas through provider request using sanitized bounded commands", async () => {
+  it("serves status and diff schemas through its package peer using sanitized bounded commands", async () => {
     const repository = await createRepository("changes repo");
     await Promise.all([
       writeFile(join(repository.path, "tracked.txt"), "tracked\nchanged\n", "utf8"),
       writeFile(join(repository.path, "new file.txt"), "new\n", "utf8"),
     ]);
-    const workspaceProvider = await providerFor(createServerPluginExecFile({
+    const activation = await activationFor(createServerPluginExecFile({
       env: {
         ...cleanGitEnvironment(),
         GIT_DIR: "/missing/poisoned-git-dir",
@@ -140,11 +144,15 @@ describe("bundled Git workspace provider", () => {
       },
     }));
     const input = project(repository.path);
-    const registry = new WorkspaceProviderRegistry({
-      contributions: [contribution("git", workspaceProvider)],
+    const workspaces = new WorkspaceProviderRegistry({
+      contributions: [contribution("git", requiredProvider(activation))],
       logger: { warn: vi.fn() },
     });
-    const workspaceId = (await registry.resolve(input)).workspaces[0]?.id;
+    const registry = new PluginBackendRegistry({
+      contributions: [peerContribution("git", requiredPeer(activation))],
+      workspaces,
+    });
+    const workspaceId = (await workspaces.resolve(input)).workspaces[0]?.id;
     if (workspaceId === undefined) throw new Error("Expected Git workspace backend");
 
     const status = await registry.request({
@@ -176,18 +184,18 @@ describe("bundled Git workspace provider", () => {
   });
 
   it("preserves the Git command timeout, environment sanitization, and diff truncation signal", async () => {
-    const execFile = vi.fn<ServerPluginActivationContext["execFile"]>(() => Promise.resolve(commandResult({
-      stdout: "diff --git a/tracked.txt b/tracked.txt\n",
-      stdoutTruncated: true,
-    })));
-    const workspaceProvider = await providerFor(execFile);
-    const request = workspaceProvider.request?.bind(workspaceProvider);
-    if (request === undefined) throw new Error("Expected Git workspace backend");
+    const execFile = vi.fn<ServerPluginActivationContext["execFile"]>(({ args }) => Promise.resolve(commandResult(
+      args?.includes("--show-toplevel") === true
+        ? { stdout: "/repo\n" }
+        : { stdout: "diff --git a/tracked.txt b/tracked.txt\n", stdoutTruncated: true },
+    )));
+    const activation = await activationFor(execFile);
+    const request = requiredPeerRequest(activation);
     const signal = new AbortController().signal;
 
     await expect(request({
       project: project("/repo"),
-      workspace: providerWorkspace("root", "/repo", true),
+      workspace: peerWorkspace("root", "/repo", true),
       operation: GIT_DIFF_OPERATION,
       input: {},
       signal,
@@ -202,14 +210,13 @@ describe("bundled Git workspace provider", () => {
     });
   });
 
-  it("rejects unknown operations and malformed private inputs before command execution", async () => {
+  it("rejects unknown operations and malformed inputs before command execution", async () => {
     const execFile = vi.fn<ServerPluginActivationContext["execFile"]>();
-    const workspaceProvider = await providerFor(execFile);
-    const request = workspaceProvider.request?.bind(workspaceProvider);
-    if (request === undefined) throw new Error("Expected Git workspace backend");
+    const activation = await activationFor(execFile);
+    const request = requiredPeerRequest(activation);
     const context = {
       project: project("/repo"),
-      workspace: providerWorkspace("root", "/repo", true),
+      workspace: peerWorkspace("root", "/repo", true),
       signal: new AbortController().signal,
     };
 
@@ -237,11 +244,12 @@ describe("bundled Git workspace provider", () => {
       signal: new AbortController().signal,
     })).resolves.toEqual({
       title: "Delete workspace: feature/remove",
+      titlePresentation: { kind: "workspaceRemoval", label: "feature/remove" },
       command: `git worktree remove '${linked.replaceAll("'", "'\\''")}'`,
     });
   });
 
-  it("keeps current raw worktree paths for a registered subdirectory", async () => {
+  it("declines workspace ownership for subdirectories of main and linked checkouts", async () => {
     const repository = await createRepository("monorepo", "packages/app/tracked.txt");
     const linked = join(repository.parent, "linked checkout");
     runGit(repository.path, ["worktree", "add", "-b", "feature", linked]);
@@ -249,16 +257,9 @@ describe("bundled Git workspace provider", () => {
     const input = project(projectPath);
     const workspaceProvider = await providerFor(createServerPluginExecFile({ env: cleanGitEnvironment() }));
 
-    const workspaces = await workspaceProvider.list(input, new AbortController().signal);
-
-    expect(workspaces).toEqual([
-      expect.objectContaining({ path: repository.path, isMain: true, label: "main" }),
-      expect.objectContaining({ path: linked, isMain: false, label: "feature" }),
-    ]);
-    expect(workspaces.map(({ path, label }) => ({ path, label }))).toEqual([
-      { path: repository.path, label: "main" },
-      { path: linked, label: "feature" },
-    ]);
+    await expect(workspaceProvider.probe(input, new AbortController().signal)).resolves.toBe("pass");
+    await expect(workspaceProvider.probe(project(join(linked, "packages", "app")), new AbortController().signal)).resolves.toBe("pass");
+    await expect(workspaceProvider.probe(project(linked), new AbortController().signal)).resolves.toBe("claim");
   });
 
   it("claims a Git submodule as its own repository", async () => {
@@ -280,7 +281,7 @@ describe("bundled Git workspace provider", () => {
     expect(workspaces[0]?.publicMetadata).toMatchObject({ isGitRepo: true, isGitWorktree: true });
   });
 
-  it("stays resolvable through the host registry when a linked branch lacks the registered subdirectory", async () => {
+  it("preserves a subdirectory as a folder workspace even when another worktree lacks it", async () => {
     const repository = await createRepository("changing monorepo", "packages/app/tracked.txt");
     const linked = join(repository.parent, "branch without app");
     runGit(repository.path, ["worktree", "add", "-b", "without-app", linked]);
@@ -295,8 +296,9 @@ describe("bundled Git workspace provider", () => {
 
     const resolution = await registry.resolve(input);
 
-    expect(resolution).toMatchObject({ status: "provider", ownerPluginId: "git" });
-    expect(resolution.workspaces.map(({ path }) => path)).toEqual([repository.path, linked]);
+    expect(resolution).toMatchObject({ status: "folder" });
+    expect(resolution.ownerPluginId).toBeUndefined();
+    expect(resolution.workspaces.map(({ path }) => path)).toEqual([input.path]);
   });
 
   it("allows a primary provider to suppress the real fallback Git provider without invoking Git", async () => {
@@ -314,17 +316,7 @@ describe("bundled Git workspace provider", () => {
 
     const input = project("/repo");
     const resolution = await registry.resolve(input);
-    const workspaceId = resolution.workspaces[0]?.id;
-    if (workspaceId === undefined) throw new Error("Expected primary workspace");
 
-    await expect(registry.request({
-      pluginId: "git",
-      moduleRevision: "1",
-      project: input,
-      workspaceId,
-      operation: GIT_STATUS_OPERATION,
-      input: null,
-    })).rejects.toMatchObject({ code: "owner-mismatch", statusCode: 409 });
     expect(resolution).toMatchObject({ status: "provider", ownerPluginId: "primary" });
     expect(execFile).not.toHaveBeenCalled();
   });
@@ -369,11 +361,12 @@ describe("parseGitWorktreeList", () => {
   });
 });
 
-async function providerFor(execFile: ServerPluginActivationContext["execFile"]): Promise<WorkspaceProvider> {
+async function activationFor(execFile: ServerPluginActivationContext["execFile"]): Promise<ServerPluginActivation> {
   const activation = await plugin.activate({
-    apiVersion: 1,
+    apiVersion: 3,
     pluginId: "git",
     packageRoot: resolve("pi-web-plugins/git"),
+    dataDirectory: "/data/plugin-data/git",
     logger: {
       debug() { /* no-op */ },
       info() { /* no-op */ },
@@ -383,10 +376,34 @@ async function providerFor(execFile: ServerPluginActivationContext["execFile"]):
     settings: {},
     execFile,
     signal: new AbortController().signal,
+    lifetimeSignal: new AbortController().signal,
   });
-  const workspaceProvider = activation.workspaceProvider;
-  if (workspaceProvider === undefined) throw new Error("Bundled Git did not activate its workspace provider");
-  return workspaceProvider;
+  requiredProvider(activation);
+  requiredPeer(activation);
+  return activation;
+}
+
+async function providerFor(execFile: ServerPluginActivationContext["execFile"]): Promise<WorkspaceProvider> {
+  return requiredProvider(await activationFor(execFile));
+}
+
+function requiredProvider(activation: ServerPluginActivation): WorkspaceProvider {
+  const provider = activation.workspaceProvider;
+  if (provider === undefined) throw new Error("Bundled Git did not activate its workspace provider");
+  return provider;
+}
+
+function requiredPeer(activation: ServerPluginActivation): ServerPluginPeer {
+  const peer = activation.peer;
+  if (peer?.request === undefined) throw new Error("Bundled Git did not activate its request peer");
+  return peer;
+}
+
+function requiredPeerRequest(activation: ServerPluginActivation): NonNullable<ServerPluginPeer["request"]> {
+  const peer = requiredPeer(activation);
+  const request = peer.request?.bind(peer);
+  if (request === undefined) throw new Error("Bundled Git request peer is unavailable");
+  return request;
 }
 
 async function createRepository(name: string, trackedPath = "tracked.txt"): Promise<{ parent: string; path: string }> {
@@ -445,8 +462,30 @@ function contribution(pluginId: string, workspaceProvider: WorkspaceProvider): S
   };
 }
 
+function peerContribution(pluginId: string, peer: ServerPluginPeer): ServerPluginPairedBackendContribution {
+  return {
+    pluginId,
+    pluginName: pluginId,
+    packageRoot: `/plugins/${pluginId}`,
+    source: "test fixture",
+    scope: "local",
+    moduleRevision: "1",
+    apiVersion: 3,
+    backend: {
+      request: ({ scope, ...context }) => {
+        if (scope.kind !== "workspace" || peer.request === undefined) throw new Error("Expected legacy workspace request");
+        return peer.request({ ...context, project: scope.project, workspace: scope.workspace });
+      },
+    },
+  };
+}
+
 function providerWorkspace(key: string, path: string, isMain: boolean): ProviderWorkspace {
   return { key, path, label: key, isMain };
+}
+
+function peerWorkspace(id: string, path: string, isMain: boolean) {
+  return { id, projectId: "project-1", path, label: id, isMain };
 }
 
 function requireRecord(value: unknown): Record<string, unknown> {

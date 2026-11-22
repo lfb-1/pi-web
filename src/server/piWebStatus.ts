@@ -3,19 +3,20 @@ import { existsSync, readFileSync } from "node:fs";
 import { readFile, realpath, stat } from "node:fs/promises";
 import { promisify } from "node:util";
 import { homedir } from "node:os";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { DefaultPackageManager, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { DefaultPackageManager, SettingsManager, VERSION as PI_CODING_AGENT_VERSION } from "../piSdk.js";
 import type { ActiveAgentProfileDescriptor, PiWebCapability, PiWebComponentStatus, PiWebDeprecatedAgentInput, PiWebInstallationInfo, PiWebReleaseStatus, PiWebRuntimeComponent, PiWebRuntimeResponse, PiWebServiceComponent, PiWebStatusMessage, PiWebStatusResponse, PiWebVersionResponse } from "../shared/apiTypes.js";
 import { effectivePiWebCapabilities, WEB_RUNTIME_CAPABILITIES } from "../shared/capabilities.js";
 import { piWebDockerCommand } from "../docker/piWebDockerCommandPlan.js";
+import { piWebRuntimeIdentity } from "../shared/piWebRuntime.js";
 import { parsePiWebRuntimeComponent } from "../shared/piWebStatusParsing.js";
 import { SessionDaemonClient } from "../sessiond/sessionDaemonClient.js";
 import { isHostAbsoluteAgentDir, loadPiWebConfig, PI_CODING_AGENT_DIR_ENV, type LoadedPiWebConfig } from "../config.js";
+import { versionChecksDisabled } from "../shared/versionCheckPolicy.js";
 import { createPiWebReleaseLookupCache, type PiWebReleaseLookup } from "./piWebReleaseLookupCache.js";
 
 const PI_WEB_PACKAGE_NAME = "@jmfederico/pi-web";
-const PI_WEB_NPM_SOURCE = `npm:${PI_WEB_PACKAGE_NAME}`;
 const DEFAULT_VERSION = "0.0.0-dev";
 const VERSION_CHECK_TIMEOUT_MS = 5000;
 
@@ -89,6 +90,8 @@ export function getPiWebRuntimeComponent(component: PiWebServiceComponent, capab
     component,
     label: component === "web" ? "Web/UI" : "Session daemon",
     runtimeVersion: runtimePackageInfo?.version ?? DEFAULT_VERSION,
+    runtime: piWebRuntimeIdentity(),
+    piVersion: PI_CODING_AGENT_VERSION,
     available: true,
     capabilities: [...capabilities],
     ...(deprecatedAgentInputs.length === 0 ? {} : { deprecatedAgentInputs }),
@@ -146,7 +149,9 @@ export async function getPiWebComponentStatus(component: PiWebServiceComponent, 
     component,
     label: component === "web" ? "Web/UI" : "Session daemon",
     runtimeVersion,
+    runtime: piWebRuntimeIdentity(),
     ...(installedVersion === undefined ? {} : { installedVersion }),
+    piVersion: PI_CODING_AGENT_VERSION,
     stale: isInstalledVersionNewer(installedVersion, runtimeVersion),
     available: true,
     installation,
@@ -227,7 +232,7 @@ function parsePackageInfo(value: unknown, path: string): PackageInfo | undefined
   return { name, version, path };
 }
 
-async function detectPiWebInstallation(agentDir?: string): Promise<PiWebInstallationInfo> {
+export async function detectPiWebInstallation(agentDir?: string): Promise<PiWebInstallationInfo> {
   const docker = detectDockerInstallation();
   if (docker !== undefined) return docker;
   const root = packageRootPath();
@@ -292,7 +297,11 @@ async function detectPiPackageInstallation(realRoot: string, displayPath: string
       const installedPath = configuredPackage.installedPath ?? packageManager.getInstalledPath(configuredPackage.source, configuredPackage.scope);
       if (installedPath === undefined) continue;
       const realInstalledPath = await realPathOrSelf(installedPath);
-      if (isSameOrWithin(realInstalledPath, realRoot) || isSameOrWithin(realRoot, realInstalledPath)) {
+      // PI WEB is a Pi package only when its own root is the installed package or
+      // sits inside it. The reverse never holds: a package vendored *inside* the
+      // checkout (PI WEB ships one at dist/pi-packages/relays) is a payload PI WEB
+      // carries, not the installation PI WEB was delivered by.
+      if (isSameOrWithin(realInstalledPath, realRoot)) {
         return { kind: "pi-package", path: displayPath, source: configuredPackage.source, scope: configuredPackage.scope };
       }
     }
@@ -358,10 +367,18 @@ async function getSessiondComponentStatus(daemon: PiWebStatusDaemon, options: Pi
     const runtime = parsePiWebRuntimeComponent(parsed);
     if (runtime?.available !== true) return unavailableSessiond(runtime?.error ?? "runtime response did not include valid runtime information");
     const status = await getPiWebComponentStatus("sessiond", options);
+    // A legacy daemon's engine is unknown, never this web process's engine.
+    delete status.runtime;
     const runtimeVersion = runtime.runtimeVersion ?? status.runtimeVersion;
     return {
       ...status,
+      ...(runtime.runtime === undefined ? {} : { runtime: runtime.runtime }),
       ...(runtimeVersion === undefined ? {} : { runtimeVersion }),
+      // The daemon reports the Pi version it has loaded in its own process;
+      // the spread of `status` already carries this process's Pi version as
+      // the fallback for daemons that predate Pi version reporting, mirroring
+      // the runtimeVersion fallback.
+      ...(runtime.piVersion === undefined ? {} : { piVersion: runtime.piVersion }),
       stale: isInstalledVersionNewer(status.installedVersion, runtimeVersion),
       available: true,
     };
@@ -436,10 +453,10 @@ async function commandsFor(components: PiWebStatusResponse["components"], option
     piWebCliCommands(installation),
   ]);
   const restart = restartCommandFor(installation, serviceCommands, cliCommands);
-  const restartWeb = serviceCommands.restartWeb ?? cliCommands.restart;
-  const restartSessiond = serviceCommands.restartSessiond ?? cliCommands.restart;
+  const restartWeb = serviceCommands.restartWeb;
+  const restartSessiond = serviceCommands.restartSessiond;
   const status = serviceCommands.status ?? cliCommands.status;
-  const update = await updateCommandFor(installation, restart, options);
+  const update = updateCommandFor(installation, options);
 
   return {
     ...(update === undefined ? {} : { update }),
@@ -460,7 +477,7 @@ function preferredInstallation(components: PiWebStatusResponse["components"]): P
 
 function dockerCommands(installation: PiWebInstallationInfo): PiWebStatusResponse["commands"] {
   return {
-    update: piWebDockerCommand(installation.dockerMode, "update"),
+    update: `${shellQuote(process.execPath)} ${shellQuote(join(packageRootPath(), "dist", "cli.js"))} update`,
     restart: piWebDockerCommand(installation.dockerMode, "restart"),
     restartWeb: piWebDockerCommand(installation.dockerMode, "restart-web"),
     restartSessiond: piWebDockerCommand(installation.dockerMode, "restart-sessiond"),
@@ -478,23 +495,25 @@ function restartCommandFor(installation: PiWebInstallationInfo | undefined, serv
   return cliCommands.restart ?? serviceCommands.restart;
 }
 
-export async function updateCommandFor(installation: PiWebInstallationInfo | undefined, restartCommand: string | undefined, options: {
+export function updateCommandFor(installation: PiWebInstallationInfo | undefined, options: {
   activeAgentProfile: ActiveAgentProfileDescriptor | undefined;
   hasCommand: (command: string) => Promise<boolean>;
-}): Promise<string | undefined> {
-  if (restartCommand === undefined) return undefined;
-  if (installation?.kind === "pi-package") {
-    const profile = options.activeAgentProfile;
-    if (profile === undefined || !isHostAbsoluteAgentDir(profile.dir)) return undefined;
-    if (!(await options.hasCommand("pi"))) return undefined;
-    return `${PI_CODING_AGENT_DIR_ENV}=${shellQuote(profile.dir)} pi update ${shellQuote(installation.source ?? PI_WEB_NPM_SOURCE)} && ${restartCommand}`;
+}): string | undefined {
+  const profile = options.activeAgentProfile;
+  if (profile !== undefined && !isHostAbsoluteAgentDir(profile.dir)) return undefined;
+  if (installation?.kind === "pi-package" && profile === undefined) return undefined;
+
+  let cli: string;
+  if (installation?.kind === "pi-package" || installation?.kind === "local" || installation?.kind === "npm-global") {
+    if (installation.path === undefined || !isAbsolute(installation.path)) return undefined;
+    // These installations need not expose pi-web on PATH. Invoke this exact
+    // installation, leaving update policy and safe restart planning to the CLI.
+    cli = `${shellQuote(process.execPath)} ${shellQuote(join(installation.path, "dist", "cli.js"))}`;
+  } else {
+    return undefined;
   }
-  if (installation?.kind === "local" && installation.path !== undefined) {
-    if (!(await hasCommand("npm")) || !(await isGitCheckoutWithUpstream(installation.path))) return undefined;
-    return `cd ${shellQuote(installation.path)} && git pull --ff-only && npm install && npm run build && ${restartCommand}`;
-  }
-  if (installation?.kind !== "npm-global" || !(await options.hasCommand("npm"))) return undefined;
-  return `npm install -g ${PI_WEB_PACKAGE_NAME} --allow-scripts=node-pty && ${restartCommand}`;
+  const profileEnv = profile === undefined ? "" : `${PI_CODING_AGENT_DIR_ENV}=${shellQuote(profile.dir)} `;
+  return `${profileEnv}${cli} update`;
 }
 
 async function nativeServiceCommands(): Promise<NativeServiceCommands> {
@@ -560,12 +579,6 @@ function statusNativeServicesCommand(backend: NativeServiceBackendKind, refs: Na
   return refs.map((ref) => `launchctl print gui/$(id -u)/${ref.launchdLabel}`).join(" && ");
 }
 
-async function isGitCheckoutWithUpstream(path: string): Promise<boolean> {
-  return await hasCommand("git")
-    && await commandSucceeds("git", ["-C", path, "rev-parse", "--is-inside-work-tree"])
-    && await commandSucceeds("git", ["-C", path, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]);
-}
-
 function hasCommand(command: string): Promise<boolean> {
   return commandSucceeds("/usr/bin/env", ["sh", "-c", `command -v ${shellQuote(command)}`]);
 }
@@ -594,7 +607,7 @@ function buildMessages(components: PiWebStatusResponse["components"], release: P
       title: "PI WEB update available",
       body: commands.update === undefined
         ? `PI WEB ${release.latestVersion} is available${installedVersion === undefined ? "" : `; installed version is ${installedVersion}`}. Update PI WEB, then restart the services or processes for this installation.`
-        : `PI WEB ${release.latestVersion} is available${installedVersion === undefined ? "" : `; installed version is ${installedVersion}`}. Run the update command to update PI WEB and restart its services.`,
+        : `PI WEB ${release.latestVersion} is available${installedVersion === undefined ? "" : `; installed version is ${installedVersion}`}. Run the update command to review the installation-specific plan and confirm. Updates may interrupt active sessions; if this terminal cannot safely run the update, the CLI will provide instructions.`,
       ...optionalMessageCommand(commands.update),
     });
   }
@@ -615,11 +628,9 @@ function buildMessages(components: PiWebStatusResponse["components"], release: P
   if (!components.sessiond.available) {
     messages.push({
       id: "sessiond-unavailable",
-      severity: "warning",
-      title: "Session daemon version unavailable",
-      body: commands.status === undefined
-        ? `PI WEB could not check the session daemon version${components.sessiond.error === undefined ? "." : `: ${components.sessiond.error}`}. Check the session daemon service or process that runs this installation.`
-        : `PI WEB could not check the session daemon version${components.sessiond.error === undefined ? "." : `: ${components.sessiond.error}`}`,
+      severity: "info",
+      title: "Session daemon version unknown",
+      body: `The last check could not determine the session daemon version. This can happen during an update or restart. If checks keep failing, check the session daemon service or process.${components.sessiond.error === undefined ? "" : ` Last check: ${components.sessiond.error}`}`,
       ...optionalMessageCommand(commands.status),
     });
   } else if (components.sessiond.stale) {
@@ -643,10 +654,7 @@ function optionalMessageCommand(command: string | undefined): Pick<PiWebStatusMe
 }
 
 function skipVersionCheck(): boolean {
-  return ["PI_WEB_SKIP_VERSION_CHECK", "PI_WEB_OFFLINE", "PI_SKIP_VERSION_CHECK", "PI_OFFLINE"].some((key) => {
-    const value = process.env[key];
-    return value !== undefined && value !== "";
-  });
+  return versionChecksDisabled(process.env);
 }
 
 function isInstalledVersionNewer(installedVersion: string | undefined, runtimeVersion: string | undefined): boolean {

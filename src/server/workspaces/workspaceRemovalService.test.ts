@@ -5,10 +5,11 @@ import type {
   ProviderWorkspace,
   WorkspaceProvider,
 } from "../../server-plugin-api.js";
-import type { TerminalCommandRun, WorkspaceListing } from "../../shared/apiTypes.js";
+import type { ServerNotice, TerminalCommandRun, WorkspaceListing } from "../../shared/apiTypes.js";
+import type { ServerNoticeCreator } from "../notices/serverNoticeService.js";
 import type { ServerPluginProviderContribution } from "../plugins/serverPluginRuntime.js";
 import type { Project } from "../types.js";
-import type { RunTerminalCommandOptions } from "../terminals/terminalService.js";
+import type { RunTerminalCommandOptions } from "../terminals/requiredTerminalService.js";
 import {
   WorkspaceProviderRegistry,
   type WorkspaceProviderRemovalTarget,
@@ -39,6 +40,40 @@ function hostPath(path: string): string {
 }
 
 describe("WorkspaceRemovalService", () => {
+  it("refreshes discovered workspaces again when a delayed removal command settles", async () => {
+    let listed = [
+      providerWorkspace("main", project.path, true),
+      providerWorkspace("linked", hostPath("/linked"), false, { removal: { actionLabel: "Remove", confirmation: "Remove?" } }),
+    ];
+    const registry = registryFor({
+      probe: () => Promise.resolve("claim"),
+      list: () => Promise.resolve(listed),
+      prepareRemove: () => Promise.resolve({ title: "Remove", command: "tool remove" }),
+    });
+    const target = (await registry.resolve(project)).workspaces.find(({ isMain }) => !isMain);
+    if (target === undefined) throw new Error("Expected removable workspace");
+    const terminals = terminalHost([]);
+    const removals = new WorkspaceRemovalService(registry, terminals, {
+      preRemoveHook: { isExecutable: () => Promise.resolve(false) },
+      onMutation: (projectId) => { registry.requestRefresh(projectId); },
+    });
+    try {
+      await removals.remove(project, target.id, removalPrecondition(target));
+      // Discovery may run while the command is still executing.
+      await registry.resolve(project);
+      expect((await registry.lookup(project))?.workspaces.some(({ id }) => id === target.id)).toBe(true);
+      listed = [providerWorkspace("main", project.path, true)];
+      const settled = terminals.runOptions[0]?.onSettled;
+      if (settled === undefined) throw new Error("Expected completion refresh");
+      settled();
+      await vi.waitFor(async () => {
+        expect((await registry.lookup(project))?.workspaces.some(({ id }) => id === target.id)).toBe(false);
+      });
+    } finally {
+      await removals.closeAll();
+      await registry.closeAll();
+    }
+  });
   it("runs a neutral provider's non-file-deleting plan after every validation and preserves host metadata", async () => {
     const calls: string[] = [];
     let preparedContext: ProviderRemoveContext | undefined;
@@ -114,12 +149,31 @@ describe("WorkspaceRemovalService", () => {
         "target.workspaceId": target.id,
         "target.workspacePath": hostPath("/board-views/roadmap"),
       },
+      failureNotice: {
+        message: "Workspace removal failed. See terminal output.",
+        presentation: { kind: "workspaceRemovalCommandFailed" },
+        context: { targetWorkspaceId: target.id },
+      },
     }]);
     expect(run).toMatchObject({
       title: "Disconnect board view: Roadmap",
       command: "boardctl view disconnect roadmap --keep-files",
       workspaceId: terminals.runOptions[0]?.workspaceId,
     });
+  });
+
+  it("forwards explicit provider title provenance to the required Terminal without deriving it from text", async () => {
+    const target = hostWorkspace("target", "/linked", false);
+    const titlePresentation = { kind: "workspaceRemoval" as const, label: "feature/<img>" };
+    const terminals = terminalHost();
+    const service = new WorkspaceRemovalService(removalProvider({
+      ownerPluginId: "neutral",
+      target,
+      workspaces: [target, hostWorkspace("main", "/repo", true)],
+      prepare: () => Promise.resolve({ title: "Delete workspace: feature/<img>", command: "tool remove", titlePresentation }),
+    }), terminals);
+    await service.remove(project, target.id, removalPrecondition(target));
+    expect(terminals.runOptions[0]?.titlePresentation).toEqual(titlePresentation);
   });
 
   it.each([
@@ -208,6 +262,92 @@ describe("WorkspaceRemovalService", () => {
 
     expect(terminals.closedCwds).toEqual([]);
     expect(terminals.runOptions).toEqual([]);
+  });
+
+  it("records one server notice when a removal fails before command creation", async () => {
+    const records: Parameters<ServerNoticeCreator["record"]>[0][] = [];
+    const notices: ServerNoticeCreator = {
+      record: (input) => {
+        records.push(input);
+        return { id: "notice-1", createdAt: "2026-08-01T00:00:00.000Z", ...input } satisfies ServerNotice;
+      },
+    };
+    const target = hostWorkspace("target", "/linked", false);
+    const removals = new WorkspaceRemovalService(removalProvider({
+      ownerPluginId: "neutral",
+      target,
+      workspaces: [hostWorkspace("main", "/repo", true), target],
+      prepare: () => Promise.reject(new Error("workspace has unsubmitted changes")),
+    }), terminalHost(), { notices });
+
+    await expect(removals.remove(project, target.id, removalPrecondition(target))).rejects.toThrow("workspace has unsubmitted changes");
+
+    expect(records).toEqual([{
+      severity: "error",
+      message: "Workspace removal failed: workspace has unsubmitted changes",
+      presentation: { kind: "workspaceRemovalFailed", detail: "workspace has unsubmitted changes" },
+      source: "workspace.delete",
+      scope: { projectId: project.id },
+      context: { targetWorkspaceId: target.id },
+    }]);
+  });
+
+  it("does not record a notice when all removal waiters cancel", async () => {
+    const records: Parameters<ServerNoticeCreator["record"]>[0][] = [];
+    const notices: ServerNoticeCreator = {
+      record: (input) => {
+        records.push(input);
+        return { id: "notice-1", createdAt: "2026-08-01T00:00:00.000Z", ...input } satisfies ServerNotice;
+      },
+    };
+    const target = hostWorkspace("target", "/linked", false);
+    let releaseResolution: ((value: WorkspaceProviderRemovalTarget) => void) | undefined;
+    const removals = new WorkspaceRemovalService({
+      resolveRemoval: () => new Promise<WorkspaceProviderRemovalTarget>((resolvePromise) => { releaseResolution = resolvePromise; }),
+    }, terminalHost(), { notices });
+    const controller = new AbortController();
+    const pending = removals.remove(project, target.id, removalPrecondition(target), controller.signal);
+
+    controller.abort(new DOMException("Request cancelled", "AbortError"));
+
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(records).toEqual([]);
+    releaseResolution?.({
+      ownerPluginId: "neutral",
+      target,
+      workspaces: [hostWorkspace("main", "/repo", true), target],
+      prepare: () => Promise.resolve({ title: "Too late", command: "must not run" }),
+    });
+  });
+
+  it("aborts admitted removals and rejects new Terminal consumers during shutdown", async () => {
+    const target = hostWorkspace("target", "/linked", false);
+    let operationSignal: AbortSignal | undefined;
+    const operationAborted = vi.fn();
+    const resolveRemoval = vi.fn((_project: Project, _workspaceId: string, signal: AbortSignal) => new Promise<WorkspaceProviderRemovalTarget>((_resolve, rejectPromise) => {
+      operationSignal = signal;
+      signal.addEventListener("abort", () => {
+        operationAborted();
+        const reason: unknown = signal.reason;
+        rejectPromise(reason instanceof Error ? reason : new Error("shutdown", { cause: reason }));
+      }, { once: true });
+    }));
+    const terminals = terminalHost();
+    const removals = new WorkspaceRemovalService({ resolveRemoval }, terminals);
+    const pending = removals.remove(project, target.id, removalPrecondition(target));
+    const rejected = expect(pending).rejects.toMatchObject({ name: "AbortError", message: "removal shutdown" });
+    await vi.waitFor(() => { expect(operationSignal).toBeInstanceOf(AbortSignal); });
+
+    const closing = removals.closeAll("removal shutdown");
+
+    await rejected;
+    await closing;
+    expect(operationSignal?.aborted).toBe(true);
+    expect(operationAborted).toHaveBeenCalledOnce();
+    expect(terminals.closedCwds).toEqual([]);
+    expect(terminals.runOptions).toEqual([]);
+    await expect(removals.remove(project, target.id, removalPrecondition(target)))
+      .rejects.toMatchObject({ name: "AbortError", message: "removal shutdown" });
   });
 
   it("rejects a stale host-issued confirmation before provider or terminal side effects", async () => {
@@ -439,7 +579,7 @@ function hostWorkspace(id: string, path: string, isMain: boolean): WorkspaceList
     path,
     label: id,
     isMain,
-    provider: { pluginId: "neutral", capabilities: { request: false, remove: true } },
+    provider: { pluginId: "neutral", capabilities: { remove: true } },
     removal: {
       actionLabel: "Disconnect",
       confirmation: "Disconnect this workspace?",

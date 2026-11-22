@@ -1,9 +1,10 @@
+// @vitest-environment happy-dom
 import type { TemplateResult } from "lit";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { SessionInfo, SessionTreeForkResult, SessionTreeNavigateResult, SessionTreeSnapshot, SessionTreeSummaryChoice } from "../api";
+import type { SessionTreeForkResult, SessionTreeNavigateResult, SessionTreeSnapshot, SessionTreeSummaryChoice } from "../api";
 import { initialAppState, type AppState } from "../appState";
 import { SessionController } from "../controllers/sessionController";
-// This node-environment test uses the shared, type-guarded template inspection
+// This unmounted state harness uses the shared, type-guarded template inspection
 // escape hatch only to verify PiWebApp's navigator callback boundary.
 import { templateValueAfterMarker } from "../templateInspection.testSupport";
 import { PiWebApp } from "./PiWebApp";
@@ -13,8 +14,6 @@ type ForkHandler = (entryId: string) => Promise<SessionTreeForkResult>;
 type AbortHandler = () => Promise<void>;
 type CancelHandler = () => void;
 type RenderSessionTreeNavigator = (this: PiWebApp, state: AppState) => TemplateResult | null;
-type RenderChatView = (this: PiWebApp, state: AppState, session: SessionInfo) => TemplateResult;
-type ResponseForkHandler = (entryId: string) => Promise<void>;
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -74,39 +73,22 @@ describe("PiWebApp session tree wiring", () => {
     expect(forkFromTree).toHaveBeenNthCalledWith(3, "failure");
   });
 
-  it("routes assistant response forks through SessionController", async () => {
+  it("does not steal focus after the user chooses another surface in the same conversation", async () => {
     const app = createApp();
     const state = setAppTree(app, tree());
-    const selected = state.selectedSession;
-    if (selected === undefined) throw new Error("Expected a selected session");
     const controller = appSessionController(app);
-    const forkFromMessage = vi.spyOn(controller, "forkFromMessage").mockResolvedValue({
-      cancelled: false,
-      session: { ...selected, id: "session-fork", parentSessionPath: selected.path, parentSessionRelation: "fork" },
-    });
-    const onForkMessage = chatResponseForkHandler(renderChatView(app, state, selected));
-
-    await onForkMessage("assistant-9");
-
-    expect(forkFromMessage).toHaveBeenCalledExactlyOnceWith("assistant-9");
-  });
-
-  it("hides response forks for archived sessions and subagent chats", () => {
-    const app = createApp();
-    const state = setAppTree(app, tree());
-    const selected = state.selectedSession;
-    if (selected === undefined) throw new Error("Expected a selected session");
-    const subagent: SessionInfo = {
-      ...selected,
-      id: "subagent-1",
-      path: "/tmp/subagent-1.jsonl",
-      parentSessionPath: selected.path,
-      parentSessionRelation: "subagent",
-    };
-    const archived: SessionInfo = { ...selected, archived: true, archivedAt: "2026-08-16T00:00:00.000Z" };
-
-    expect(templateValueAfterMarker(renderChatView(app, { ...state, selectedSession: subagent }, subagent), ".onForkMessage=")).toBeUndefined();
-    expect(templateValueAfterMarker(renderChatView(app, { ...state, selectedSession: archived }, archived), ".onForkMessage=")).toBeUndefined();
+    const result = deferred<SessionTreeNavigateResult>();
+    vi.spyOn(controller, "navigateTree").mockReturnValue(result.promise);
+    const focus = vi.fn(() => Promise.resolve());
+    Reflect.set(app, "focusChatComposer", focus);
+    const navigate = navigatorNavigateHandler(renderSessionTreeNavigator(app, state));
+    const navigating = navigate("side", { mode: "none" });
+    // A newer user surface selection retains the conversation but owns focus.
+    Reflect.set(app, "state", { ...state, mainView: "workspace" });
+    Reflect.set(app, "navigationSelectionSeq", 1);
+    result.resolve({ cancelled: false });
+    await navigating;
+    expect(focus).not.toHaveBeenCalled();
   });
 
   it("does not steal focus after the user selects another session during navigation", async () => {
@@ -168,18 +150,6 @@ function renderSessionTreeNavigator(app: PiWebApp, state: AppState): TemplateRes
   return rendered;
 }
 
-function renderChatView(app: PiWebApp, state: AppState, selected: SessionInfo): TemplateResult {
-  const method: unknown = Reflect.get(app, "renderChatView");
-  if (!isRenderChatView(method)) throw new Error("PiWebApp.renderChatView was unavailable");
-  return method.call(app, state, selected);
-}
-
-function chatResponseForkHandler(template: TemplateResult): ResponseForkHandler {
-  const value = templateValueAfterMarker(template, ".onForkMessage=");
-  if (!isResponseForkHandler(value)) throw new Error("Chat response fork callback was unavailable");
-  return value;
-}
-
 function appSessionController(app: PiWebApp): SessionController {
   const controller: unknown = Reflect.get(app, "sessions");
   if (!(controller instanceof SessionController)) throw new Error("PiWebApp SessionController was unavailable");
@@ -211,14 +181,6 @@ function navigatorCancelHandler(template: TemplateResult): CancelHandler {
 }
 
 function isRenderSessionTreeNavigator(value: unknown): value is RenderSessionTreeNavigator {
-  return typeof value === "function";
-}
-
-function isRenderChatView(value: unknown): value is RenderChatView {
-  return typeof value === "function";
-}
-
-function isResponseForkHandler(value: unknown): value is ResponseForkHandler {
   return typeof value === "function";
 }
 

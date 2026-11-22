@@ -1,9 +1,19 @@
+import { localization, LocalizationController } from "../../localization/browser";
+import { generalMessages as messages, generalConfigError, formatHostAccess } from "./settingsGeneralMessages";
+import { stylesheetIntegrationCapability } from "../../plugins/styles";
 import { css, html, LitElement, type PropertyValues, type TemplateResult } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
-import { DEFAULT_WORKSPACE_UPLOADS_FOLDER, type PiWebConfigEnvOverrides, type PiWebConfigResponse, type PiWebConfigValues } from "../../api";
+import { live } from "lit/directives/live.js";
+import { DEFAULT_WORKSPACE_ATTACHMENTS_FOLDER, DEFAULT_WORKSPACE_UPLOADS_FOLDER, type PiWebConfigEnvOverrides, type PiWebConfigResponse, type PiWebConfigValues } from "../../api";
+import { uiButtonStyles } from "../ui/controlStyles";
+import { uiFormStyles } from "../ui/formStyles";
+import { uiSettingsStyles } from "../ui/settingsStyles";
 import type { AttentionAlertPermission } from "../../attentionAlerts";
 import "./SettingsPanelFrame";
+import "./SettingsLocalizationPanel";
 import type { SettingsNotice } from "./SettingsPanelFrame";
+import { overlayPiWebConfig } from "../../../../shared/configResolution";
+import { enforcedSetting, explicitConfigUpdate, resetConfigUpdate, settingControls, type ResetSettings } from "./settingsConfigUpdate";
 import {
   emptyGatewayServerConfigDraft,
   emptyMachineAccessConfigDraft,
@@ -11,12 +21,13 @@ import {
   gatewayServerDraftFromConfig,
   machineAccessConfigPatchFromDraft,
   machineAccessDraftFromConfig,
+  reconcileConfigDraft,
   type GatewayServerConfigDraft,
   type MachineAccessConfigDraft,
 } from "./settingsConfigDraft";
 
 function generalDescription(targetLabel: string): TemplateResult {
-  return html`Browser attention alerts are local to this browser. Gateway server fields edit this local gateway. File access and upload defaults edit ${targetLabel}.`;
+  return html`${messages.t("description", { target: targetLabel })}`;
 }
 
 export interface AttentionAlertSettingsContent {
@@ -25,6 +36,7 @@ export interface AttentionAlertSettingsContent {
   action?: string;
 }
 
+/** Fork: browser attention alerts (sound + desktop notification) are local to this browser. */
 export function attentionAlertSettingsContent(permission: AttentionAlertPermission): AttentionAlertSettingsContent {
   if (permission === "granted") {
     return {
@@ -53,6 +65,12 @@ export function attentionAlertSettingsContent(permission: AttentionAlertPermissi
 
 @customElement("settings-general-panel")
 export class SettingsGeneralPanel extends LitElement {
+  constructor() {
+    super();
+    stylesheetIntegrationCapability.createController(this);
+    new LocalizationController(this);
+  }
+
   @property({ attribute: false }) configResponse: PiWebConfigResponse | undefined;
   @property({ attribute: false }) machineConfigResponse: PiWebConfigResponse | undefined;
   @property({ type: Boolean }) loading = false;
@@ -61,42 +79,88 @@ export class SettingsGeneralPanel extends LitElement {
   @property() error = "";
   @property() machineError = "";
   @property() savedMessage = "";
-  @property() targetLabel = "selected machine";
+  @property({ attribute: false }) restartAction: TemplateResult | undefined;
+  @property() targetLabel = "";
+  @property() targetId = "local";
   @property({ attribute: false }) attentionAlertsPermission: AttentionAlertPermission = "unsupported";
   @property({ attribute: false }) onEnableAttentionAlerts?: () => void | Promise<void>;
   @property({ attribute: false }) onReload?: () => void | Promise<void>;
   @property({ attribute: false }) onReloadMachine?: () => void | Promise<void>;
-  @property({ attribute: false }) onSave?: (config: PiWebConfigValues) => void | Promise<void>;
-  @property({ attribute: false }) onSaveMachineConfig?: (config: PiWebConfigValues) => void | Promise<void>;
+  @property({ attribute: false }) onSave?: (config: PiWebConfigValues, unset?: string[]) => void | Promise<void>;
+  @property({ attribute: false }) onSetQuietMode?: (quietMode: boolean) => void | Promise<void>;
+  @property({ attribute: false }) onSaveMachineConfig?: (config: PiWebConfigValues, unset?: string[]) => void | Promise<void>;
+  @property({ attribute: false }) onReset?: ResetSettings;
+  @property({ attribute: false }) onResetMachine?: ResetSettings;
   @state() private gatewayDraft: GatewayServerConfigDraft = emptyGatewayServerConfigDraft();
   @state() private machineDraft: MachineAccessConfigDraft = emptyMachineAccessConfigDraft();
-  @state() private gatewayLocalError = "";
-  @state() private machineLocalError = "";
+  @state() private gatewayLocalError: unknown = "";
+  @state() private machineLocalError: unknown = "";
   @state() private attentionAlertsError = "";
+
+  private gatewayBaseline = emptyGatewayServerConfigDraft();
+  private machineBaseline = emptyMachineAccessConfigDraft();
+  private gatewaySubmission: { draft: GatewayServerConfigDraft; expected: GatewayServerConfigDraft } | undefined;
+  private machineSubmission: { draft: MachineAccessConfigDraft; expected: MachineAccessConfigDraft } | undefined;
+
+  private get displayTarget(): string { return this.targetLabel || messages.t("selectedMachine"); }
+
+  get hasUnsavedMachineChanges(): boolean {
+    return !draftsEqual(this.machineDraft, this.machineBaseline);
+  }
+
+  discardMachineChanges(): void {
+    this.machineDraft = { ...this.machineBaseline };
+    this.machineLocalError = "";
+  }
 
   protected override willUpdate(changed: PropertyValues<this>): void {
     if (changed.has("configResponse") && this.configResponse !== undefined) {
-      this.gatewayDraft = gatewayServerDraftFromConfig(this.configResponse.config);
-      this.gatewayLocalError = "";
+      const incoming = gatewayServerDraftFromConfig(this.configResponse.effectiveConfig);
+      const submission = this.gatewaySubmission;
+      const acknowledged = submission !== undefined && draftsEqual(incoming, submission.expected);
+      this.gatewayDraft = reconcileConfigDraft(this.gatewayDraft, acknowledged ? submission.draft : this.gatewayBaseline, incoming);
+      for (const [field, setting] of [["host", "host"], ["port", "port"], ["hostAccessMode", "hostAccess"], ["hostAccessText", "hostAccess"]] as const) {
+        if (enforcedSetting(this.configResponse, `/${setting}`) !== undefined) Object.assign(this.gatewayDraft, { [field]: incoming[field] });
+      }
+      this.gatewayBaseline = incoming;
+      if (acknowledged) this.gatewaySubmission = undefined;
     }
-    if (changed.has("machineConfigResponse") && this.machineConfigResponse !== undefined) {
-      this.machineDraft = machineAccessDraftFromConfig(this.machineConfigResponse.config);
+    // Stable target identity, not its translated label, owns draft lifetime.
+    // Also reset cached panels whose unavailable transition happened disconnected.
+    if (changed.has("targetId") || (changed.has("machineConfigResponse") && this.machineConfigResponse === undefined)) {
+      this.machineDraft = emptyMachineAccessConfigDraft();
+      this.machineBaseline = emptyMachineAccessConfigDraft();
+      this.machineSubmission = undefined;
       this.machineLocalError = "";
+    }
+    if ((changed.has("machineConfigResponse") || changed.has("targetId")) && this.machineConfigResponse !== undefined) {
+      const incoming = machineAccessDraftFromConfig(this.machineConfigResponse.effectiveConfig);
+      const submission = this.machineSubmission;
+      const acknowledged = submission !== undefined && draftsEqual(incoming, submission.expected);
+      this.machineDraft = reconcileConfigDraft(this.machineDraft, acknowledged ? submission.draft : this.machineBaseline, incoming);
+      for (const [field, setting] of [["installationName", "installationName"], ["allowedPathsText", "pathAccess/allowedPaths"], ["uploadDefaultFolder", "uploads/defaultFolder"], ["attachmentDefaultFolder", "attachments/defaultFolder"]] as const) {
+        if (enforcedSetting(this.machineConfigResponse, `/${setting}`) !== undefined) Object.assign(this.machineDraft, { [field]: incoming[field] });
+      }
+      this.machineBaseline = incoming;
+      if (acknowledged) this.machineSubmission = undefined;
     }
   }
 
   override render(): TemplateResult {
     return html`
       <settings-panel-frame
-        heading="General configuration"
-        .description=${generalDescription(this.targetLabel)}
-        actionLabel="Reload"
-        .actionDisabled=${this.loading || this.machineLoading}
+        heading=${messages.t("heading")}
+        .description=${generalDescription(this.displayTarget)}
+        actionLabel=${messages.t("refresh")}
+        .actionDisabled=${this.loading || this.machineLoading || this.saving}
         .notices=${this.panelNotices()}
         .onAction=${() => { this.reloadAll(); }}
       >
-        <div class="settings-sections">
+        <div class="settings-sections ui-settings-list">
+          <slot name="appearance"></slot>
+          <settings-localization-panel .configResponse=${this.configResponse}></settings-localization-panel>
           ${this.renderAttentionAlerts()}
+          ${this.renderChatDisplaySettings()}
           ${this.renderGatewayServerSettings()}
           ${this.renderSelectedMachineAccessSettings()}
         </div>
@@ -104,23 +168,31 @@ export class SettingsGeneralPanel extends LitElement {
     `;
   }
 
-  private renderAttentionAlerts(): TemplateResult {
-    const content = attentionAlertSettingsContent(this.attentionAlertsPermission);
+  private renderChatDisplaySettings(): TemplateResult {
+    const config = this.configResponse;
+    const quietMode = config?.effectiveConfig.quietMode === true;
     return html`
-      <section class="settings-card" aria-label="Browser attention alerts">
-        <div class="card-heading">
-          <h3>Attention alerts</h3>
-          <p>Alerts are emitted for live questions, confirmation dialogs, and warning or error notifications in the selected session.</p>
+      <section class="settings-card ui-settings-section" aria-label=${messages.t("chatAria")}>
+        <div class="card-heading ui-settings-heading">
+          <h3>${messages.t("chat")}</h3>
+          <p>${messages.t("chatHelp")}</p>
         </div>
-        <dl class="attention-alert-status">
-          <div><dt>Status</dt><dd>${content.status}</dd></div>
-          <div><dt>Behavior</dt><dd>${content.detail}</dd></div>
-        </dl>
-        ${this.attentionAlertsError === "" ? null : html`<div class="message error-message" role="alert">${this.attentionAlertsError}</div>`}
-        ${content.action === undefined ? null : html`
-          <footer class="form-actions">
-            <button class="primary" ?disabled=${this.onEnableAttentionAlerts === undefined} @click=${() => { void this.enableAttentionAlerts(); }}>${content.action}</button>
-          </footer>
+        ${config === undefined ? html`<div class="loading-card">${this.loading ? messages.t("loadingGateway") : messages.t("chatUnavailable")}</div>` : html`
+          <div class="field ui-form-field">
+            <label class="ui-checkbox-field">
+              <input
+                type="checkbox"
+                id="quiet-mode"
+                aria-describedby="quiet-mode-help"
+                .checked=${live(quietMode)}
+                ?disabled=${this.loading || this.saving || enforcedSetting(config, "/quietMode") !== undefined}
+                @change=${(event: Event) => { this.setQuietMode(event); }}
+              >
+              <span>${messages.t("quiet")}</span>
+            </label>
+            <small id="quiet-mode-help">${messages.t("quietHelp")}</small>
+            ${settingControls(config, "/quietMode", this.loading || this.saving, this.onReset)}
+          </div>
         `}
       </section>
     `;
@@ -129,55 +201,64 @@ export class SettingsGeneralPanel extends LitElement {
   private renderGatewayServerSettings(): TemplateResult {
     const config = this.configResponse;
     return html`
-      <section class="settings-card" aria-label="Gateway server settings">
-        <div class="card-heading">
-          <h3>Gateway server</h3>
-          <p>Host, port, and allowed hosts are saved in the gateway config. Address changes require the web service to restart before the running server binds to the new address.</p>
+      <section class="settings-card ui-settings-section" aria-label=${messages.t("gatewayAria")}>
+        <div class="card-heading ui-settings-heading">
+          <h3>${messages.t("gateway")}</h3>
+          <p>${messages.t("gatewayHelp")}</p>
         </div>
-        ${config === undefined && this.loading ? html`<div class="loading-card">Loading gateway configuration…</div>` : html`
-          <div class="config-path-card">
-            <span>Gateway config file</span>
-            <code>${config?.path ?? "Unknown"}</code>
-            <small>${config?.exists === true ? "Existing file" : "This file will be created on save"}</small>
+        ${config === undefined ? html`<div class="loading-card">${this.loading ? messages.t("loadingGateway") : messages.t("gatewayUnavailable")}</div>` : html`
+          <div class="config-path-card ui-settings-path">
+            <span>${messages.t("gatewayFile")}</span>
+            <code dir="ltr">${config.path}</code>
+            <small>${config.exists ? messages.t("exists") : messages.t("createFile")}</small>
           </div>
-          <form class="config-form" @submit=${(event: Event) => { void this.saveGatewayConfig(event); }}>
-            <label class="field">
+          <form class="config-form ui-settings-fields" @submit=${(event: Event) => { void this.saveGatewayConfig(event); }}>
+            <label class="field ui-form-field">
               <span class="field-heading">
-                <span>Host</span>
-                ${this.renderOverrideBadge("host")}
+                <span>${messages.t("host")}</span>
               </span>
-              <input .value=${this.gatewayDraft.host} placeholder="127.0.0.1" autocomplete="off" spellcheck="false" @input=${(event: Event) => { this.updateGatewayDraft({ host: inputValue(event) }); }}>
-              <small>Address the web server should bind to. Leave empty to use PI WEB's default.</small>
+              <input class="ui-input" ?disabled=${enforcedSetting(config, "/host") !== undefined} .value=${this.gatewayDraft.host} placeholder="127.0.0.1" autocomplete="off" spellcheck="false" @input=${(event: Event) => { this.updateGatewayDraft({ host: inputValue(event) }); }}>
+              <small>${messages.t("hostHelp")}</small>
             </label>
+            ${this.renderOverrideBadge("host")}
 
-            <label class="field">
+            <label class="field ui-form-field">
               <span class="field-heading">
-                <span>Port</span>
-                ${this.renderOverrideBadge("port")}
+                <span>${messages.t("port")}</span>
               </span>
-              <input .value=${this.gatewayDraft.port} inputmode="numeric" pattern="[0-9]*" placeholder="8504" autocomplete="off" @input=${(event: Event) => { this.updateGatewayDraft({ port: inputValue(event) }); }}>
-              <small>TCP port from 1 to 65535. Leave empty to use PI WEB's default.</small>
+              <input class="ui-input" ?disabled=${enforcedSetting(config, "/port") !== undefined} .value=${this.gatewayDraft.port} inputmode="numeric" pattern="[0-9]*" placeholder="8504" autocomplete="off" @input=${(event: Event) => { this.updateGatewayDraft({ port: inputValue(event) }); }}>
+              <small>${messages.t("portHelp", { min: 1, max: 65535 })}</small>
             </label>
+            ${this.renderOverrideBadge("port")}
 
-            <div class="field">
-              <span class="field-heading">
-                <span>Allowed hosts</span>
-                ${this.renderOverrideBadge("allowedHosts")}
-              </span>
-              <select .value=${this.gatewayDraft.allowedHostsMode} @change=${(event: Event) => { this.updateGatewayDraft({ allowedHostsMode: selectValue(event) === "all" ? "all" : "list" }); }}>
-                <option value="list">Only listed hosts</option>
-                <option value="all">Allow every host</option>
+            <div class="field ui-form-field" data-settings-target="host-access" tabindex="-1" role="group" aria-labelledby="host-access-label">
+              <label id="host-access-label" for="host-access">${messages.t("hostAccess")}</label>
+              <select class="ui-input" id="host-access" aria-describedby="host-access-help" .value=${this.gatewayDraft.hostAccessMode} ?disabled=${enforcedSetting(config, "/hostAccess") !== undefined} @change=${(event: Event) => {
+                const value = selectValue(event);
+                if (value === "restricted" || value === "any") this.updateGatewayDraft({ hostAccessMode: value });
+              }}>
+                <option value="" disabled>${messages.t("hostAccessPending")}</option>
+                <option value="restricted">${messages.t("hostAccessRestricted")}</option>
+                <option value="any">${messages.t("hostAccessAny")}</option>
               </select>
-              <textarea .value=${this.gatewayDraft.allowedHostsText} ?disabled=${this.gatewayDraft.allowedHostsMode === "all"} rows="4" placeholder="example.local&#10;192.168.1.20" spellcheck="false" @input=${(event: Event) => { this.updateGatewayDraft({ allowedHostsText: textAreaValue(event) }); }}></textarea>
-              <small>Enter one host per line, or choose “Allow every host” to write <code>true</code>.</small>
+              <small id="host-access-help">${messages.t("hostAccessHelp")}</small>
+              ${settingControls(config, "/hostAccess", this.loading || this.saving, this.onReset)}
+              ${enforcedSetting(config, "/allowedHosts") !== undefined ? html`<small>${messages.t("hostAccessLegacyEnv", { variable: "PI_WEB_ALLOWED_HOSTS" })}</small>` : null}
+              ${this.gatewayDraft.hostAccessMode === "restricted" ? html`
+                <label for="host-access-list">${messages.t("hostList")}</label>
+                <textarea class="ui-input" id="host-access-list" aria-describedby="host-access-list-help" .value=${this.gatewayDraft.hostAccessText} ?disabled=${enforcedSetting(config, "/hostAccess") !== undefined} rows="4" placeholder="example.local&#10;192.168.1.20" spellcheck="false" @input=${(event: Event) => { this.updateGatewayDraft({ hostAccessText: textAreaValue(event) }); }}></textarea>
+                <small id="host-access-list-help">${messages.t("hostsHelp")}</small>
+              ` : null}
             </div>
 
             ${this.renderGatewayEffectiveConfig()}
 
-            <footer class="form-actions">
-              <button class="primary" ?disabled=${this.loading || this.saving}>${this.saving ? "Saving…" : "Save gateway server config"}</button>
+            <footer class="form-actions ui-settings-actions">
+              ${draftsEqual(this.gatewayDraft, this.gatewayBaseline) ? null : html`<small>${messages.t("unsaved")}</small>`}
+              <button class="primary ui-button ui-button--action ui-button--primary" ?disabled=${this.loading || this.saving}>${this.saving ? messages.t("saving") : messages.t("saveGateway")}</button>
             </footer>
           </form>
+          ${this.restartAction}
         `}
       </section>
     `;
@@ -186,39 +267,57 @@ export class SettingsGeneralPanel extends LitElement {
   private renderSelectedMachineAccessSettings(): TemplateResult {
     const config = this.machineConfigResponse;
     return html`
-      <section class="settings-card" aria-label="Selected machine file access and upload settings">
-        <div class="card-heading">
-          <h3>Selected machine file access and uploads</h3>
-          <p>External filesystem roots and upload defaults are saved on ${this.targetLabel}.</p>
+      <section class="settings-card ui-settings-section" aria-label=${messages.t("machine")}>
+        <div class="card-heading ui-settings-heading">
+          <h3>${messages.t("machine")}</h3>
+          <p>${messages.t("machineHelp", { target: this.displayTarget })}</p>
         </div>
         ${this.renderMachineMessages()}
-        ${config === undefined ? html`<div class="loading-card">${this.machineLoading ? "Loading selected-machine file access config…" : "Selected-machine file access config is unavailable. Reload before saving file/upload settings."}</div>` : html`
-          <div class="config-path-card">
-            <span>Selected machine config file</span>
-            <code>${config.path}</code>
-            <small>${config.exists ? "Existing file" : "This file will be created on save"}</small>
+        ${config === undefined ? html`<div class="loading-card">${this.machineLoading ? messages.t("loadingMachine") : messages.t("machineUnavailable")}</div>` : html`
+          <div class="config-path-card ui-settings-path">
+            <span>${messages.t("machineFile")}</span>
+            <code dir="ltr">${config.path}</code>
+            <small>${config.exists ? messages.t("exists") : messages.t("createFile")}</small>
           </div>
-          <form class="config-form" @submit=${(event: Event) => { void this.saveMachineAccessConfig(event); }}>
-            <label class="field">
-              <span class="field-heading">
-                <span>External filesystem roots</span>
-              </span>
-              <textarea .value=${this.machineDraft.allowedPathsText} rows="4" placeholder="~/SDKs&#10;/opt/reference" spellcheck="false" @input=${(event: Event) => { this.updateMachineDraft({ allowedPathsText: textAreaValue(event) }); }}></textarea>
-              <small>Allowlist for absolute <code>@</code> completions and file explorer reads outside a workspace on ${this.targetLabel}. Enter one absolute path, Windows absolute path, or <code>~</code>-prefixed path per line. Leave empty to deny external paths by default.</small>
+          <form class="config-form ui-settings-fields" @submit=${(event: Event) => { void this.saveMachineAccessConfig(event); }}>
+            <label class="field ui-form-field">
+              <span>${messages.t("name")}</span>
+              <input class="ui-input" ?disabled=${enforcedSetting(config, "/installationName") !== undefined} dir="auto" name="installationName" maxlength="120" .value=${this.machineDraft.installationName} placeholder="PI-WEB" autocomplete="off" @input=${(event: Event) => { this.updateMachineDraft({ installationName: inputValue(event) }); }}>
+              <small>${messages.t("nameHelp")}</small>
             </label>
+            ${settingControls(config, "/installationName", this.machineLoading || this.saving, this.onResetMachine)}
+            <label class="field ui-form-field">
+              <span class="field-heading">
+                <span>${messages.t("roots")}</span>
+              </span>
+              <textarea class="ui-input" ?disabled=${enforcedSetting(config, "/pathAccess/allowedPaths") !== undefined} .value=${this.machineDraft.allowedPathsText} rows="4" placeholder="~/SDKs&#10;/opt/reference" spellcheck="false" @input=${(event: Event) => { this.updateMachineDraft({ allowedPathsText: textAreaValue(event) }); }}></textarea>
+              <small>${messages.rich("rootsHelp", { target: this.displayTarget, code: codeTag })}</small>
+            </label>
+            ${settingControls(config, "/pathAccess/allowedPaths", this.machineLoading || this.saving, this.onResetMachine)}
 
-            <label class="field">
+            <label class="field ui-form-field">
               <span class="field-heading">
-                <span>Default upload folder</span>
+                <span>${messages.t("upload")}</span>
               </span>
-              <input .value=${this.machineDraft.uploadDefaultFolder} placeholder=${DEFAULT_WORKSPACE_UPLOADS_FOLDER} autocomplete="off" spellcheck="false" @input=${(event: Event) => { this.updateMachineDraft({ uploadDefaultFolder: inputValue(event) }); }}>
-              <small>Workspace-relative folder for manual file uploads on ${this.targetLabel}. Leave empty to use PI WEB's default <code>${DEFAULT_WORKSPACE_UPLOADS_FOLDER}</code>.</small>
+              <input class="ui-input" ?disabled=${enforcedSetting(config, "/uploads/defaultFolder") !== undefined} .value=${this.machineDraft.uploadDefaultFolder} placeholder=${DEFAULT_WORKSPACE_UPLOADS_FOLDER} autocomplete="off" spellcheck="false" @input=${(event: Event) => { this.updateMachineDraft({ uploadDefaultFolder: inputValue(event) }); }}>
+              <small>${messages.rich("uploadHelp", { target: this.displayTarget, folder: DEFAULT_WORKSPACE_UPLOADS_FOLDER, code: codeTag })}</small>
             </label>
+            ${settingControls(config, "/uploads/defaultFolder", this.machineLoading || this.saving, this.onResetMachine)}
+
+            <label class="field ui-form-field">
+              <span class="field-heading">
+                <span>${messages.t("attachment")}</span>
+              </span>
+              <input class="ui-input" ?disabled=${enforcedSetting(config, "/attachments/defaultFolder") !== undefined} .value=${this.machineDraft.attachmentDefaultFolder} placeholder=${DEFAULT_WORKSPACE_ATTACHMENTS_FOLDER} autocomplete="off" spellcheck="false" @input=${(event: Event) => { this.updateMachineDraft({ attachmentDefaultFolder: inputValue(event) }); }}>
+              <small>${messages.rich("attachmentHelp", { target: this.displayTarget, folder: DEFAULT_WORKSPACE_ATTACHMENTS_FOLDER, code: codeTag })}</small>
+            </label>
+            ${settingControls(config, "/attachments/defaultFolder", this.machineLoading || this.saving, this.onResetMachine)}
 
             ${this.renderMachineEffectiveConfig()}
 
-            <footer class="form-actions">
-              <button class="primary" ?disabled=${this.machineLoading || this.saving}>${this.saving ? "Saving…" : "Save file/upload config"}</button>
+            <footer class="form-actions ui-settings-actions">
+              ${draftsEqual(this.machineDraft, this.machineBaseline) ? null : html`<small>${messages.t("unsaved")}</small>`}
+              <button class="primary ui-button ui-button--action ui-button--primary" ?disabled=${this.machineLoading || this.saving}>${this.saving ? messages.t("saving") : messages.t("saveMachine")}</button>
             </footer>
           </form>
         `}
@@ -228,32 +327,33 @@ export class SettingsGeneralPanel extends LitElement {
 
   private panelNotices(): readonly SettingsNotice[] {
     const notices: SettingsNotice[] = [];
-    const gatewayError = this.gatewayLocalError || this.error;
-    if (gatewayError !== "") notices.push({ type: "error", title: "Gateway server", content: gatewayError });
+    const gatewayError = this.gatewayLocalError !== "" ? generalConfigError(this.gatewayLocalError) : this.error;
+    if (gatewayError !== "") notices.push({ type: "error", title: messages.t("configuration"), content: gatewayError });
     if (this.savedMessage !== "") notices.push({ type: "success", content: this.savedMessage });
     return notices;
   }
 
   private renderMachineMessages(): TemplateResult | null {
-    const error = this.machineLocalError || this.machineError;
+    const error = this.machineLocalError !== "" ? generalConfigError(this.machineLocalError) : this.machineError;
     if (error === "") return null;
-    return html`<div class="message error-message">${error}</div>`;
+    return html`<div class="message error-message ui-form-error" role="alert">${error}</div>`;
   }
 
-  private renderOverrideBadge(key: keyof PiWebConfigEnvOverrides): TemplateResult | null {
-    if (this.configResponse?.envOverrides[key] !== true) return null;
-    return html`<span class="override-badge">environment override</span>`;
+  private renderOverrideBadge(key: keyof PiWebConfigEnvOverrides): ReturnType<typeof settingControls> {
+    return settingControls(this.configResponse, `/${key}`, this.loading || this.saving, this.onReset);
   }
 
   private renderGatewayEffectiveConfig(): TemplateResult {
     const effective = this.configResponse?.effectiveConfig ?? {};
     return html`
-      <section class="effective-card" aria-label="Effective gateway configuration summary">
-        <h3>Effective gateway settings after environment overrides</h3>
+      <section class="effective-card ui-settings-summary" aria-label=${messages.t("effectiveGatewayAria")}>
+        <h3>${messages.t("effectiveGateway")}</h3>
+        <p>${messages.t("effectiveHelp")}</p>
         <dl>
-          <div><dt>Host</dt><dd>${effective.host ?? html`<span class="muted">127.0.0.1 default</span>`}</dd></div>
-          <div><dt>Port</dt><dd>${effective.port ?? html`<span class="muted">8504 default</span>`}</dd></div>
-          <div><dt>Allowed hosts</dt><dd>${formatAllowedHosts(effective.allowedHosts)}</dd></div>
+          <div><dt>${messages.t("host")}</dt><dd><bdi>${effective.host ?? html`<span class="muted">${messages.t("defaultValue", { value: "127.0.0.1" })}</span>`}</bdi></dd></div>
+          <div><dt>${messages.t("port")}</dt><dd>${effective.port === undefined ? html`<span class="muted">${messages.t("defaultValue", { value: "8504" })}</span>` : localization.number(effective.port)}</dd></div>
+          <div><dt>${messages.t("hostAccess")}</dt><dd>${formatHostAccess(effective.hostAccess ?? null)}</dd></div>
+          <div><dt>${messages.t("hostAccessRunning")}</dt><dd>${formatHostAccess(this.configResponse?.activeHostAccess)}</dd></div>
         </dl>
       </section>
     `;
@@ -262,12 +362,44 @@ export class SettingsGeneralPanel extends LitElement {
   private renderMachineEffectiveConfig(): TemplateResult {
     const effective = this.machineConfigResponse?.effectiveConfig ?? {};
     return html`
-      <section class="effective-card" aria-label="Effective selected machine file access and upload summary">
-        <h3>Effective selected-machine settings</h3>
+      <section class="effective-card ui-settings-summary" aria-label=${messages.t("effectiveMachineAria")}>
+        <h3>${messages.t("effectiveMachine")}</h3>
+        <p>${messages.t("machineSummaryHelp")}</p>
         <dl>
-          <div><dt>External roots</dt><dd>${formatAllowedPaths(effective.pathAccess?.allowedPaths)}</dd></div>
-          <div><dt>Upload folder</dt><dd>${effective.uploads?.defaultFolder ?? html`<span class="muted">${DEFAULT_WORKSPACE_UPLOADS_FOLDER} default</span>`}</dd></div>
+          <div><dt>${messages.t("baseRoots")}</dt><dd>
+            <div>${formatAllowedPaths(effective.basePaths)}</div>
+            <div class="field ui-form-field">
+              <small>${messages.t("baseRootsHelp")}</small>
+              ${settingControls(this.machineConfigResponse, "/basePaths", this.machineLoading || this.saving)}
+            </div>
+          </dd></div>
+          <div><dt>${messages.t("externalRoots")}</dt><dd>${formatAllowedPaths(effective.pathAccess?.allowedPaths)}</dd></div>
+          <div><dt>${messages.t("uploadFolder")}</dt><dd>${effective.uploads?.defaultFolder === undefined ? html`<span class="muted">${messages.t("defaultValue", { value: DEFAULT_WORKSPACE_UPLOADS_FOLDER })}</span>` : html`<bdi dir="ltr">${effective.uploads.defaultFolder}</bdi>`}</dd></div>
+          <div><dt>${messages.t("attachmentFolder")}</dt><dd>${effective.attachments?.defaultFolder === undefined ? html`<span class="muted">${messages.t("defaultValue", { value: DEFAULT_WORKSPACE_ATTACHMENTS_FOLDER })}</span>` : html`<bdi dir="ltr">${effective.attachments.defaultFolder}</bdi>`}</dd></div>
         </dl>
+        ${(effective.basePaths?.length ?? 0) === 0 && (effective.pathAccess?.allowedPaths?.length ?? 0) === 0 ? html`<p>${messages.t("denied")}</p>` : null}
+      </section>
+    `;
+  }
+
+  private renderAttentionAlerts(): TemplateResult {
+    const content = attentionAlertSettingsContent(this.attentionAlertsPermission);
+    return html`
+      <section class="settings-card ui-settings-section" aria-label="Browser attention alerts">
+        <div class="card-heading ui-settings-heading">
+          <h3>Attention alerts</h3>
+          <p>Alerts are emitted when a session asks a question, waits for a decision, or reports a warning or error.</p>
+        </div>
+        <dl class="attention-alert-status">
+          <div><dt>Status</dt><dd>${content.status}</dd></div>
+          <div><dt>Behavior</dt><dd>${content.detail}</dd></div>
+        </dl>
+        ${this.attentionAlertsError === "" ? null : html`<div class="message error-message ui-form-error" role="alert">${this.attentionAlertsError}</div>`}
+        ${content.action === undefined ? null : html`
+          <footer class="form-actions ui-settings-actions">
+            <button class="primary ui-button ui-button--action ui-button--primary" ?disabled=${this.onEnableAttentionAlerts === undefined} @click=${() => { void this.enableAttentionAlerts(); }}>${content.action}</button>
+          </footer>
+        `}
       </section>
     `;
   }
@@ -277,7 +409,7 @@ export class SettingsGeneralPanel extends LitElement {
     try {
       await this.onEnableAttentionAlerts?.();
     } catch (error) {
-      this.attentionAlertsError = errorMessage(error);
+      this.attentionAlertsError = error instanceof Error ? error.message : String(error);
     }
   }
 
@@ -286,23 +418,73 @@ export class SettingsGeneralPanel extends LitElement {
     void this.onReloadMachine?.();
   }
 
+  // The dialog owns quiet-mode failure reporting through its error notice; this
+  // toggle only forwards the new value. A second change arriving before the
+  // dialog's `saving` prop reaches this panel is ignored by the dialog's own
+  // saving guard.
+  private setQuietMode(event: Event): void {
+    const quietMode = event.target instanceof HTMLInputElement && event.target.checked;
+    if (this.configResponse === undefined || this.loading || this.saving || this.onSetQuietMode === undefined) return;
+    this.gatewayLocalError = "";
+    void this.onSetQuietMode(quietMode);
+  }
+
   private async saveGatewayConfig(event: Event): Promise<void> {
     event.preventDefault();
+    if (this.configResponse === undefined || this.loading || this.saving || this.onSave === undefined) return;
     this.gatewayLocalError = "";
     try {
-      await this.onSave?.(gatewayServerConfigFromDraft(this.gatewayDraft, this.configResponse?.config ?? {}));
+      const candidate = gatewayServerConfigFromDraft(this.gatewayDraft);
+      const baseline = gatewayServerConfigFromDraft(this.gatewayBaseline);
+      const config = explicitConfigUpdate(this.configResponse, candidate, baseline).set ?? {};
+      const resetKeys = (["host", "port"] as const).filter((key) => candidate[key] === undefined && baseline[key] !== undefined && enforcedSetting(this.configResponse, `/${key}`) === undefined);
+      const expectedConfig = { ...this.configResponse.effectiveConfig, ...config };
+      for (const key of resetKeys) {
+        Reflect.deleteProperty(expectedConfig, key);
+        const inherited = this.configResponse.defaultsConfig?.[key];
+        if (inherited !== undefined) Object.assign(expectedConfig, { [key]: inherited });
+      }
+      const submission = { draft: this.gatewayDraft, expected: gatewayServerDraftFromConfig(expectedConfig) };
+      this.gatewaySubmission = submission;
+      try {
+        if (resetKeys.length === 0) await this.onSave(config);
+        else await this.onSave(config, resetKeys.map((key) => `/${key}`));
+        await this.updateComplete;
+      } finally {
+        if (this.gatewaySubmission === submission) this.gatewaySubmission = undefined;
+      }
     } catch (error) {
-      this.gatewayLocalError = errorMessage(error);
+      this.gatewayLocalError = error;
     }
   }
 
   private async saveMachineAccessConfig(event: Event): Promise<void> {
     event.preventDefault();
+    if (this.machineConfigResponse === undefined || this.machineLoading || this.saving || this.onSaveMachineConfig === undefined) return;
     this.machineLocalError = "";
+    const target = this.targetId;
     try {
-      await this.onSaveMachineConfig?.(machineAccessConfigPatchFromDraft(this.machineDraft));
+      const candidate = machineAccessConfigPatchFromDraft(this.machineDraft);
+      const baseline = machineAccessConfigPatchFromDraft(this.machineBaseline);
+      const config = explicitConfigUpdate(this.machineConfigResponse, candidate, baseline).set ?? {};
+      const unset = resetConfigUpdate(this.machineConfigResponse, (["uploads", "attachments"] as const)
+        .filter((key) => candidate[key]?.defaultFolder === undefined && baseline[key]?.defaultFolder !== undefined)
+        .map((key) => `/${key}/defaultFolder`)).unset ?? [];
+      const expected = overlayPiWebConfig(this.machineConfigResponse.effectiveConfig, config);
+      for (const key of ["uploads", "attachments"] as const) {
+        if (unset.includes(`/${key}/defaultFolder`)) Object.assign(expected, { [key]: this.machineConfigResponse.defaultsConfig?.[key] ?? {} });
+      }
+      const submission = { draft: this.machineDraft, expected: machineAccessDraftFromConfig(expected) };
+      this.machineSubmission = submission;
+      try {
+        if (unset.length) await this.onSaveMachineConfig(config, unset);
+        else await this.onSaveMachineConfig(config);
+        await this.updateComplete;
+      } finally {
+        if (this.machineSubmission === submission) this.machineSubmission = undefined;
+      }
     } catch (error) {
-      this.machineLocalError = errorMessage(error);
+      if (this.targetId === target) this.machineLocalError = error;
     }
   }
 
@@ -316,57 +498,38 @@ export class SettingsGeneralPanel extends LitElement {
     this.machineLocalError = "";
   }
 
-  static override styles = css`
-    :host { display: block; }
-    .card-heading { display: grid; gap: 6px; min-width: 0; }
+  static override styles = [uiButtonStyles, uiFormStyles, uiSettingsStyles, css`
+    @layer pi-web-base {
+    :host { display: block; overflow-wrap: anywhere; }
     h3, p { margin: 0; }
     h3 { font-size: 13px; line-height: 1.3; }
     p { color: var(--pi-muted); line-height: 1.45; }
-    button, input, select, textarea { font: inherit; }
-    button { border: 1px solid var(--pi-border); border-radius: 8px; background: var(--pi-surface); color: var(--pi-text); padding: 7px 9px; cursor: pointer; }
-    button:disabled { opacity: .55; cursor: not-allowed; }
-    .settings-sections { display: grid; gap: 14px; }
-    .settings-card, .message, .loading-card, .config-path-card, .effective-card { border: 1px solid var(--pi-border); border-radius: 10px; background: var(--pi-surface); padding: 12px; }
-    .settings-card { display: grid; gap: 14px; }
-    .message { margin-bottom: 12px; }
-    .settings-card .message { margin-bottom: 0; }
-    .error-message { border-color: var(--pi-danger); color: var(--pi-danger); background: color-mix(in srgb, var(--pi-danger) 10%, var(--pi-surface)); }
     .loading-card { color: var(--pi-muted); }
-    .config-path-card { display: grid; gap: 5px; }
-    .config-path-card span, .field-heading, dt { color: var(--pi-muted); font-size: 12px; font-weight: 700; text-transform: uppercase; }
-    code { border: 1px solid var(--pi-border-muted); border-radius: 5px; background: var(--pi-bg); padding: 1px 4px; color: var(--pi-text); font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow-wrap: anywhere; }
+    .config-path-card span, .field-heading, dt { color: var(--pi-muted); font-size: 12px; font-weight: 600; }
+    code { border: 1px solid var(--pi-border-muted); border-radius: 5px; background: var(--pi-bg); padding: 1px 4px; color: var(--pi-text); font: 12px var(--pi-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace); overflow-wrap: anywhere; }
     .config-path-card small, .field small { color: var(--pi-muted); }
-    .config-form { display: grid; gap: 14px; }
-    .field { display: grid; gap: 7px; }
-    .field-heading { display: flex; align-items: center; gap: 8px; }
-    input, select, textarea { box-sizing: border-box; width: 100%; min-width: 0; border: 1px solid var(--pi-border); border-radius: 8px; background: var(--pi-bg); color: var(--pi-text); padding: 9px 10px; outline: none; font: var(--pi-control-font-size, 16px) var(--pi-control-font-family, system-ui, sans-serif); }
-    input:focus, select:focus, textarea:focus { border-color: var(--pi-accent); box-shadow: 0 0 0 1px var(--pi-accent-border); }
-    textarea { resize: vertical; min-height: 94px; font-family: var(--pi-control-monospace-font-family, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace); }
+    .field-heading { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+    input:not([name="installationName"]), textarea { direction: ltr; text-align: start; }
+    .override-badge { overflow-wrap: anywhere; }
+    textarea { resize: vertical; min-height: 94px; --ui-input-font-family: var(--pi-control-monospace-font-family, var(--pi-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace)); }
     textarea:disabled { opacity: .55; }
     .override-badge { border: 1px solid var(--pi-warning-border); border-radius: 999px; color: var(--pi-warning); background: var(--pi-warning-surface); padding: 2px 7px; font-size: 11px; font-weight: 600; text-transform: none; }
-    .effective-card { display: grid; gap: 10px; }
     .effective-card dl, .attention-alert-status { display: grid; gap: 8px; margin: 0; }
     .effective-card dl > div, .attention-alert-status > div { display: grid; grid-template-columns: 130px minmax(0, 1fr); gap: 12px; align-items: baseline; }
     dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
     .muted { color: var(--pi-muted); }
-    .form-actions { display: flex; justify-content: flex-end; gap: 8px; padding-top: 2px; }
-    .primary { border-color: var(--pi-accent); background: var(--pi-selection-bg); color: var(--pi-text-bright); }
+    .form-actions small { align-self: center; color: var(--pi-muted); padding-inline-end: 12px; }
 
     @media (max-width: 760px) {
       .effective-card dl > div, .attention-alert-status > div { grid-template-columns: minmax(0, 1fr); gap: 3px; }
     }
-  `;
-}
-
-function formatAllowedHosts(value: PiWebConfigValues["allowedHosts"]): string | TemplateResult {
-  if (value === true) return "Any host";
-  if (Array.isArray(value)) return value.length === 0 ? html`<span class="muted">None listed</span>` : value.join(", ");
-  return html`<span class="muted">Unset</span>`;
+    }
+  `];
 }
 
 function formatAllowedPaths(value: string[] | undefined): string | TemplateResult {
-  if (value === undefined || value.length === 0) return html`<span class="muted">External paths denied</span>`;
-  return value.join(", ");
+  if (value === undefined || value.length === 0) return html`<span class="muted">${messages.t("noPaths")}</span>`;
+  return html`<bdi dir="ltr">${localization.list(value)}</bdi>`;
 }
 
 function inputValue(event: Event): string {
@@ -381,6 +544,13 @@ function textAreaValue(event: Event): string {
   return event.target instanceof HTMLTextAreaElement ? event.target.value : "";
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+function draftsEqual<T extends object>(left: T, right: T): boolean {
+  for (const key in left) {
+    if (left[key] !== right[key]) return false;
+  }
+  return true;
+}
+
+function codeTag(parts: unknown[]): TemplateResult {
+  return html`<code dir="ltr">${parts}</code>`;
 }

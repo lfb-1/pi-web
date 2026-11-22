@@ -1,64 +1,45 @@
-import type { TemplateResult } from "lit";
-import { describe, expect, it, vi } from "vitest";
+// @vitest-environment happy-dom
+import { afterEach, expect, it } from "vitest";
 import type { SessionStatus } from "../api";
-import { templateEventHandlerAfterMarker } from "../templateInspection.testSupport";
-import { StatusBar, statusBarWarningControlContent } from "./StatusBar";
+import { localization } from "../localization/browser";
+import { StatusBar, statusBarMessages as messages } from "./StatusBar";
 
-describe("statusBarWarningControlContent", () => {
-  it("provides an action label for both states while keeping only the count visible", () => {
-    expect(statusBarWarningControlContent(1, true)).toEqual({
-      countText: "1",
-      accessibleLabel: "Minimise 1 warning",
-    });
-    expect(statusBarWarningControlContent(3, false)).toEqual({
-      countText: "3",
-      accessibleLabel: "Show 3 warnings in the warning area",
-    });
-  });
-
-  it("omits the control content when there are no warnings", () => {
-    expect(statusBarWarningControlContent(0, false)).toBeUndefined();
-  });
+const releases: (() => void)[] = [];
+afterEach(async () => {
+  document.body.replaceChildren();
+  localStorage.clear();
+  releases.splice(0).forEach((release) => { release(); });
+  await localization.setPreferences({ language: "en", formatLocale: "en" });
 });
 
-describe("StatusBar warning toggle wiring", () => {
-  // Escape hatch: this specifically verifies the compact status-bar button's
-  // Lit callback wiring in the node environment, anchored to its semantic class.
-  it("invokes onToggleWarnings when the warning-count control is activated", () => {
-    const statusBar = new StatusBar();
-    const onToggleWarnings = vi.fn();
-    statusBar.status = status();
-    statusBar.warningCount = 2;
-    statusBar.warningsExpanded = true;
-    statusBar.onToggleWarnings = onToggleWarnings;
+it("shows only the localized queued count; usage, context and cost stay hidden (fork)", async () => {
+  releases.push(localization.registerCatalog({ id: "status-bar-test", namespace: "core.statusBar", locale: "de", load: () => Promise.resolve({
+    empty: "Noch kein Status", queued: "{count, plural, one {# vorgemerkt} other {# vorgemerkt}}",
+  }) }));
+  const bar = new StatusBar();
+  document.body.append(bar);
+  const snapshot = status();
+  for (const language of ["de", "en"]) {
+    await localization.setPreferences({ language, formatLocale: "de-DE" });
+    bar.status = undefined;
+    await bar.updateComplete;
+    expect(bar.shadowRoot?.textContent).toContain(messages.t("empty"));
+    bar.status = snapshot;
+    await bar.updateComplete;
+    expect(bar.shadowRoot?.textContent).toContain(messages.t("queued", { count: 1200 }));
+    expect(bar.shadowRoot?.querySelector(".context")).toBeNull();
+    expect(bar.shadowRoot?.textContent).not.toContain(new Intl.NumberFormat("de-DE", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(snapshot.cost));
+    bar.status = { ...snapshot, pendingMessageCount: 0 };
+    await bar.updateComplete;
+    expect(bar.shadowRoot?.querySelector(".bar")).toBeNull();
+  }
 
-    templateEventHandlerAfterMarker(renderStatusBar(statusBar), "warning-toggle")(new Event("click"));
-
-    expect(onToggleWarnings).toHaveBeenCalledOnce();
-  });
 });
-
-type RenderStatusBar = (this: StatusBar) => TemplateResult;
-
-function renderStatusBar(statusBar: StatusBar): TemplateResult {
-  const method: unknown = Reflect.get(statusBar, "render");
-  if (!isRenderStatusBar(method)) throw new Error("StatusBar.render is not callable");
-  return method.call(statusBar);
-}
-
-function isRenderStatusBar(value: unknown): value is RenderStatusBar {
-  return typeof value === "function";
-}
 
 function status(): SessionStatus {
   return {
-    sessionId: "session-1",
-    isStreaming: true,
-    isCompacting: false,
-    isBashRunning: false,
-    pendingMessageCount: 0,
-    queuedMessages: [],
-    tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-    cost: 0,
+    sessionId: "session-1", isStreaming: true, isCompacting: false, isBashRunning: false,
+    pendingMessageCount: 1200, queuedMessages: [],
+    tokens: { input: 1234, output: 5678, cacheRead: 0, cacheWrite: 0, total: 6912 }, cost: 12.34,
   };
 }

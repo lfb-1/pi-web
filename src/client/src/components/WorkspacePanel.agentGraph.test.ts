@@ -2,9 +2,8 @@
 import { html } from "lit";
 import { afterEach, describe, expect, it } from "vitest";
 import type { SessionInfo, Workspace } from "../api";
-import type { QualifiedWorkspacePanelContribution } from "../plugins/types";
 import { AgentSessionGraphElement } from "./AgentSessionGraph";
-import { WorkspacePanel } from "./WorkspacePanel";
+import { WorkspacePanel, type WorkspaceToolPanel } from "./WorkspacePanel";
 
 afterEach(() => {
   document.body.replaceChildren();
@@ -15,9 +14,6 @@ describe("WorkspacePanel agent graph split", () => {
   it("keeps Agents folded by default and lets the user expand and collapse it", async () => {
     const panel = new WorkspacePanel();
     panel.workspace = workspace();
-    // The selected fixture panel does not inspect context; set the public Lit
-    // property without constructing unrelated file, terminal, and host fakes.
-    Reflect.set(panel, "panelContext", {});
     panel.panels = [workspaceTool()];
     panel.sessions = [session("main")];
     panel.selectedSession = panel.sessions[0];
@@ -58,11 +54,9 @@ function workspace(): Workspace {
   };
 }
 
-function workspaceTool(): QualifiedWorkspacePanelContribution {
+function workspaceTool(): WorkspaceToolPanel {
   return {
     id: "core:workspace.files",
-    localId: "workspace.files",
-    pluginId: "core",
     title: "Files",
     render: () => html`<div>Workspace tool content</div>`,
   };

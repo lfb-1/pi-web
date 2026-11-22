@@ -1,12 +1,11 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createAssistantMessageEventStream, InMemoryCredentialStore, type AssistantMessage } from "@earendil-works/pi-ai";
-import type { StreamFn } from "@earendil-works/pi-agent-core";
-import { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
+import { ModelRuntime } from "../../piSdk.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PiSessionService } from "./piSessionService.js";
-import { CapturingSessionEventHub, createTestModelRuntime, fakeRuntime, runtimeCreator, seedCredential, sessionGateway, sessionRecord, sessionRef, TEST_MODEL_ID, TEST_MODEL_PROVIDER, testModel, testModelRuntime, type RuntimeCreator } from "./piSessionService.testSupport.js";
+import { CapturingSessionEventHub, createTestModelRuntime, fakeRuntime, fakeSessionManager, runtimeCreator, seedCredential, sessionGateway, sessionRecord, sessionRef, TEST_MODEL_ID, TEST_MODEL_PROVIDER, testModelRuntime, type RuntimeCreator } from "./piSessionService.testSupport.js";
 
 const TEST_AGENT_DIR = "/tmp/pi-web-test-agent";
 
@@ -21,22 +20,6 @@ afterEach(() => {
 });
 
 describe("PiSessionService prompt, queue, and auth warnings", () => {
-  it("sends prompts to an injected runtime without touching the SDK runtime", async () => {
-    const fake = fakeRuntime("prompt-session");
-    const service = new PiSessionService(new CapturingSessionEventHub(), {
-      agentDir: TEST_AGENT_DIR,
-      modelRuntime: testModelRuntime,
-      createAgentRuntime: runtimeCreator(fake.runtime),
-      sessionManager: sessionGateway([sessionRecord("prompt-session")]),
-      heartbeatIntervalMs: 60_000,
-    });
-
-    await service.prompt(sessionRef("prompt-session"), "Build the thing");
-
-    expect(fake.calls.prompt).toEqual([{ text: "Build the thing", options: undefined }]);
-    await service.dispose();
-  });
-
   it("echoes the user message for direct prompts but not command-forwarded ones", async () => {
     const fake = fakeRuntime("echo-session", {
       resourceLoader: { getSkills: () => ({ skills: [{ name: "skill-creator" }] }) },
@@ -88,47 +71,68 @@ describe("PiSessionService prompt, queue, and auth warnings", () => {
     await service.dispose();
   });
 
-  it("generates a session name for the first prompt via the session's agent.streamFunction", async () => {
-    const model = testModel();
-    const streamCalls: unknown[] = [];
-    const streamFn: StreamFn = (streamModel, context, options) => {
-      streamCalls.push({ streamModel, context, options });
-      const stream = createAssistantMessageEventStream();
-      const message: AssistantMessage = {
-        role: "assistant",
-        content: [{ type: "text", text: "Fix login bug" }],
-        api: "anthropic-messages",
-        provider: "anthropic",
-        model: model.id,
-        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
-        stopReason: "stop",
-        timestamp: Date.now(),
-      };
-      stream.push({ type: "done", reason: "stop", message });
-      stream.end(message);
-      return stream;
-    };
+  it("publishes extension name changes and clearing to session and global subscribers", async () => {
+    const fake = fakeRuntime("extension-naming");
     const hub = new CapturingSessionEventHub();
-    const fake = fakeRuntime("name-session", { model, agent: { streamFunction: streamFn } });
     const service = new PiSessionService(hub, {
-      agentDir: TEST_AGENT_DIR,
-      modelRuntime: testModelRuntime,
+      agentDir: TEST_AGENT_DIR, modelRuntime: testModelRuntime,
       createAgentRuntime: runtimeCreator(fake.runtime),
-      sessionManager: sessionGateway([sessionRecord("name-session")]),
+      sessionManager: sessionGateway([sessionRecord("extension-naming")]),
       heartbeatIntervalMs: 60_000,
     });
+    try {
+      await service.prompt(sessionRef("extension-naming"), "Please fix the login bug");
+      expect(fake.session.sessionName).toBeUndefined();
+      expect(hub.sessionEvents.filter(({ event }) => event.type === "session.name")).toEqual([]);
 
-    await service.prompt(sessionRef("name-session"), "Please fix the login bug");
-    await vi.waitFor(() => { expect(fake.session.sessionName).toBe("Fix login bug"); });
+      // The SDK persists metadata before emitting this subscription event,
+      // including when an extension calls pi.setSessionName outside a run.
+      fake.session.sessionName = "Extension title";
+      fake.emit({ type: "session_info_changed", name: "Extension title" });
+      fake.session.sessionName = undefined;
+      fake.emit({ type: "session_info_changed", name: undefined });
 
-    expect(streamCalls).toHaveLength(1);
-    expect(hub.sessionEvents.some(({ event }) => event.type === "session.name" && event.name === "Fix login bug")).toBe(true);
-    await service.dispose();
+      const expected = [
+        { type: "session.name", sessionId: "extension-naming", name: "Extension title" },
+        { type: "session.name", sessionId: "extension-naming" },
+      ];
+      expect(hub.sessionEvents.filter(({ event }) => event.type === "session.name").map(({ event }) => event)).toEqual(expected);
+      expect(hub.globalEvents.filter((event) => event.type === "session.name")).toEqual(expected);
+    } finally {
+      await service.dispose();
+    }
+  });
+
+  it.each([false, true])("publishes manual names once whether the SDK emits metadata events (%s)", async (emitsMetadataEvent) => {
+    const fake = fakeRuntime("manual-naming");
+    fake.session.setSessionName = (name) => {
+      fake.session.sessionName = name;
+      if (emitsMetadataEvent) fake.emit({ type: "session_info_changed", name });
+    };
+    const hub = new CapturingSessionEventHub();
+    const service = new PiSessionService(hub, {
+      agentDir: TEST_AGENT_DIR, modelRuntime: testModelRuntime,
+      createAgentRuntime: runtimeCreator(fake.runtime),
+      sessionManager: sessionGateway([sessionRecord("manual-naming")]),
+      heartbeatIntervalMs: 60_000,
+    });
+    try {
+      await service.runCommand(sessionRef("manual-naming"), "/name Manual title");
+      const expected = [{ type: "session.name", sessionId: "manual-naming", name: "Manual title" }];
+      expect(hub.sessionEvents.filter(({ event }) => event.type === "session.name").map(({ event }) => event)).toEqual(expected);
+      expect(hub.globalEvents.filter((event) => event.type === "session.name")).toEqual(expected);
+    } finally {
+      await service.dispose();
+    }
   });
 
   it("includes queued message details in session status", async () => {
+    const messages = [{ role: "user", content: "hello" }, { role: "assistant", content: "hi" }];
     const fake = fakeRuntime("status-session", {
-      messages: [{ role: "user", content: "hello" }, { role: "assistant", content: "hi" }],
+      messages,
+      sessionManager: fakeSessionManager("/workspace", {
+        getBranch: () => messages.map((message) => ({ type: "message", message })),
+      }),
       pendingMessageCount: 2,
       getSteeringMessages: () => ["adjust this turn"],
       getFollowUpMessages: () => ["then do this"],
@@ -255,6 +259,9 @@ describe("PiSessionService prompt, queue, and auth warnings", () => {
     const hub = new CapturingSessionEventHub();
     const fake = fakeRuntime("clear-queue-session", {
       messages: transcript,
+      sessionManager: fakeSessionManager("/workspace", {
+        getBranch: () => transcript.map((message) => ({ type: "message", message })),
+      }),
       isStreaming: true,
       isCompacting: true,
       pendingMessageCount: 2,
@@ -442,6 +449,11 @@ describe("PiSessionService prompt, queue, and auth warnings", () => {
 
     const warningCount = () => hub.sessionEvents.filter(({ event }) => event.type === "command.output" && event.level === "error" && event.message.includes(`${TEST_MODEL_PROVIDER}/${TEST_MODEL_ID}`)).length;
     expect(warningCount()).toBe(1);
+    expect(hub.sessionEvents.find(({ event }) => event.type === "command.output")?.event).toEqual({
+      type: "command.output", level: "error",
+      message: `Authentication for ${TEST_MODEL_PROVIDER}/${TEST_MODEL_ID} was removed. Use /model to select another model.`,
+      presentation: { kind: "modelAuthRemoved", provider: TEST_MODEL_PROVIDER, model: TEST_MODEL_ID },
+    });
     expect(hub.globalEvents.some((event) => event.type === "status.update" && event.status.sessionId === "auth-session")).toBe(true);
 
     await seedCredential(credentials, "anthropic", { type: "api_key", key: "sk-new" });

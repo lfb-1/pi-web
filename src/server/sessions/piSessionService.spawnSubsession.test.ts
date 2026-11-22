@@ -1,7 +1,7 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { PiSessionService, type PiAgentSession } from "./piSessionService.js";
 import type { SpawnTargetDecision } from "./spawnTargetResolver.js";
 import { CapturingSessionEventHub, emptyArchiveStore, fakeRuntime, fakeSessionManager, resolveSessionFileFromList, runtimeCreator, sessionGateway, sessionRecord, sessionRef, testModel, testModelRuntime, type RuntimeCreator } from "./piSessionService.testSupport.js";
@@ -10,6 +10,8 @@ const TEST_AGENT_DIR = "/tmp/pi-web-test-agent";
 
 describe("PiSessionService", () => {
   describe("spawnSubsession", () => {
+    afterEach(() => { vi.useRealTimers(); });
+
     function subsessionService(decision: SpawnTargetDecision, heartbeatIntervalMs = 60_000, childIds = ["child-1"]) {
       const parent = fakeRuntime("parent-1", { sessionFile: "/tmp/parent-1.jsonl" });
       const children = childIds.map((childId) => fakeRuntime(childId, {
@@ -38,7 +40,8 @@ describe("PiSessionService", () => {
         restore: (sessionId: string) => { archived.delete(sessionId); return Promise.resolve(); },
         isArchived: (sessionId: string) => Promise.resolve(archived.has(sessionId)),
       };
-      const service = new PiSessionService(new CapturingSessionEventHub(), {
+      const events = new CapturingSessionEventHub();
+      const service = new PiSessionService(events, {
         agentDir: TEST_AGENT_DIR,
       modelRuntime: testModelRuntime,
         createAgentRuntime,
@@ -47,16 +50,21 @@ describe("PiSessionService", () => {
         spawnTargets: { resolveSpawnTarget: () => Promise.resolve(decision) },
         heartbeatIntervalMs,
       });
-      return { parent, child, children, service };
+      return { parent, child, children, service, events };
     }
 
     it("records the parent, delivers the prompt, and lists the tracked child", async () => {
-      const { child, service } = subsessionService({ allowed: true, cwd: "/workspace" });
+      const { child, service, events } = subsessionService({ allowed: true, cwd: "/workspace" });
       await service.start("/workspace"); // bring the parent online so it can be notified
 
       const result = await service.spawnSubsession({ spawningCwd: "/workspace", parentSessionId: "parent-1", parentSessionFile: "/tmp/parent-1.jsonl", prompt: "do the slice" });
 
       expect(result).toEqual({ sessionId: "child-1", cwd: "/workspace" });
+      const created = events.globalEvents.filter((event) => event.type === "session.created");
+      expect(created).toHaveLength(2);
+      expect(created[0]?.session).not.toHaveProperty("agentSubsession");
+      expect(created[1]?.session).toMatchObject({ id: "child-1", agentSubsession: true });
+      expect((await service.list("/workspace")).find((session) => session.id === "child-1")?.agentSubsession).toBe(true);
       expect(child.calls.prompt).toEqual([{ text: "do the slice", options: undefined }]);
       await expect(service.listSubsessions("parent-1")).resolves.toEqual([
         { sessionId: "child-1", cwd: "/workspace", status: "idle" },
@@ -479,7 +487,7 @@ describe("PiSessionService", () => {
           expect(parent.calls.sendCustomMessage).toHaveLength(1);
         });
 
-        expect(parent.calls.sendCustomMessage[0]?.message.content).toContain("Subsession child-1 stopped working");
+        expect(parent.calls.sendCustomMessage[0]?.message.content).toContain("Subsession child-1 is now idle.");
         expect(delegationCapabilities).toEqual([false, true]);
         expect(open).toHaveBeenCalledWith(parentFile);
         await service.dispose();
@@ -769,7 +777,7 @@ describe("PiSessionService", () => {
         });
 
         expect(copiedParent.calls.sendCustomMessage).toHaveLength(0);
-        expect(parent.calls.sendCustomMessage[0]?.message.content).toContain("Subsession child-1 stopped working");
+        expect(parent.calls.sendCustomMessage[0]?.message.content).toContain("Subsession child-1 is now idle.");
         expect(open).toHaveBeenCalledWith(parentFile);
         await service.dispose();
       } finally {
@@ -928,6 +936,167 @@ describe("PiSessionService", () => {
       await service.dispose();
     });
 
+    it("does not arm a completion notice while an idle child's extension command is busy", async () => {
+      vi.useFakeTimers();
+      const { parent, child, service } = subsessionService({ allowed: true, cwd: "/workspace" }, 10);
+      let finishCommand!: () => void;
+      const commandFinished = new Promise<void>((resolve) => { finishCommand = resolve; });
+      try {
+        await service.start("/workspace");
+        await service.spawnSubsession({ spawningCwd: "/workspace", parentSessionId: "parent-1", parentSessionFile: "/tmp/parent-1.jsonl", prompt: "go" });
+        await vi.advanceTimersByTimeAsync(0);
+
+        // A command can stay busy without emitting any agent events. Only the
+        // heartbeat observes this work, so it must not arm a completion notice.
+        const commandPrompt = vi.fn(() => commandFinished);
+        child.session.prompt = commandPrompt;
+        await service.prompt(sessionRef("child-1", "/workspace"), "/pi-vcc");
+        await vi.advanceTimersByTimeAsync(20);
+        expect(commandPrompt).toHaveBeenCalledOnce();
+        await expect(service.listSubsessions("parent-1")).resolves.toMatchObject([{ status: "working" }]);
+        expect(parent.calls.sendCustomMessage).toHaveLength(0);
+
+        finishCommand();
+        await vi.advanceTimersByTimeAsync(20);
+        await expect(service.listSubsessions("parent-1")).resolves.toMatchObject([{ status: "idle" }]);
+        expect(parent.calls.sendCustomMessage).toHaveLength(0);
+      } finally {
+        finishCommand();
+        await service.dispose();
+      }
+    });
+
+    it("does not arm a completion notice for standalone compaction events or heartbeats", async () => {
+      vi.useFakeTimers();
+      const { parent, child, service } = subsessionService({ allowed: true, cwd: "/workspace" }, 10);
+      try {
+        await service.start("/workspace");
+        await service.spawnSubsession({ spawningCwd: "/workspace", parentSessionId: "parent-1", parentSessionFile: "/tmp/parent-1.jsonl", prompt: "go" });
+        await vi.advanceTimersByTimeAsync(0);
+
+        child.session.isCompacting = true;
+        child.emit({ type: "compaction_start" });
+        await vi.advanceTimersByTimeAsync(20);
+        expect(parent.calls.sendCustomMessage).toHaveLength(0);
+
+        child.session.isCompacting = false;
+        child.emit({ type: "compaction_end" });
+        await vi.advanceTimersByTimeAsync(20);
+        expect(parent.calls.sendCustomMessage).toHaveLength(0);
+      } finally {
+        child.session.isCompacting = false;
+        await service.dispose();
+      }
+    });
+
+    it.each([
+      ["go", "No model selected"],
+      ["/skill:review", "No API key for anthropic"],
+    ])("notifies the parent when %s fails before the child's agent starts", async (text, message) => {
+      vi.useFakeTimers();
+      const { parent, child, service, events } = subsessionService({ allowed: true, cwd: "/workspace" }, 10);
+      let rejectPrompt!: (error: Error) => void;
+      const promptFinished = new Promise<void>((_resolve, reject) => { rejectPrompt = reject; });
+      child.session.prompt = vi.fn(() => promptFinished);
+      try {
+        await service.start("/workspace");
+        await expect(service.spawnSubsession({ spawningCwd: "/workspace", parentSessionId: "parent-1", parentSessionFile: "/tmp/parent-1.jsonl", prompt: text }))
+          .resolves.toEqual({ sessionId: "child-1", cwd: "/workspace" });
+        expect(parent.calls.sendCustomMessage).toHaveLength(0);
+
+        // The child was accepted, but model/auth validation rejects without
+        // any agent_start/agent_end event to wake the waiting parent.
+        rejectPrompt(new Error(message));
+        await vi.advanceTimersByTimeAsync(0);
+        await expect(service.listSubsessions("parent-1")).resolves.toMatchObject([{ status: "error" }]);
+        expect(events.sessionEvents).toContainEqual({ sessionId: "child-1", event: { type: "session.error", message } });
+        expect(parent.calls.sendCustomMessage).toHaveLength(1);
+        expect(parent.calls.sendCustomMessage[0]?.message).toMatchObject({
+          customType: "subsession.completion", display: true, details: { sessionId: "child-1" },
+        });
+        expect(parent.calls.sendCustomMessage[0]?.message.content).toContain("Subsession child-1 stopped with error.");
+        expect(JSON.stringify(parent.calls.sendCustomMessage[0]?.message)).not.toContain(message);
+        await expect(service.checkSubsession("parent-1", "child-1", "/tmp/parent-1.jsonl")).resolves.toMatchObject({ status: "error", errorDetail: message });
+        expect(parent.calls.sendCustomMessage[0]?.options).toEqual({ triggerTurn: true });
+        await vi.advanceTimersByTimeAsync(50);
+        expect(parent.calls.sendCustomMessage).toHaveLength(1);
+
+        // An early failure must not interfere with the next real agent run.
+        child.session.isStreaming = true;
+        child.emit({ type: "agent_start" });
+        child.session.isStreaming = false;
+        child.emit({ type: "agent_end" });
+        await vi.advanceTimersByTimeAsync(50);
+        expect(parent.calls.sendCustomMessage).toHaveLength(2);
+      } finally {
+        rejectPrompt(new Error(message));
+        child.session.isStreaming = false;
+        await service.dispose();
+      }
+    });
+
+    it("does not duplicate a completion notice when a started agent's prompt rejects", async () => {
+      vi.useFakeTimers();
+      const { parent, child, service } = subsessionService({ allowed: true, cwd: "/workspace" }, 10);
+      let rejectPrompt!: (error: Error) => void;
+      const promptFinished = new Promise<void>((_resolve, reject) => { rejectPrompt = reject; });
+      child.session.prompt = () => promptFinished;
+      try {
+        await service.start("/workspace");
+        await service.spawnSubsession({ spawningCwd: "/workspace", parentSessionId: "parent-1", parentSessionFile: "/tmp/parent-1.jsonl", prompt: "go" });
+        child.session.isStreaming = true;
+        child.emit({ type: "agent_start" });
+        child.session.isStreaming = false;
+        child.emit({ type: "agent_end" });
+        rejectPrompt(new Error("run failed"));
+        await vi.advanceTimersByTimeAsync(50);
+        expect(parent.calls.sendCustomMessage).toHaveLength(1);
+        await vi.advanceTimersByTimeAsync(50);
+        expect(parent.calls.sendCustomMessage).toHaveLength(1);
+      } finally {
+        rejectPrompt(new Error("run failed"));
+        child.session.isStreaming = false;
+        await service.dispose();
+      }
+    });
+
+    it("does not arm a completion notice when an idle child's extension command rejects", async () => {
+      vi.useFakeTimers();
+      const { parent, child, service, events } = subsessionService({ allowed: true, cwd: "/workspace" }, 10);
+      try {
+        await service.start("/workspace");
+        await service.spawnSubsession({ spawningCwd: "/workspace", parentSessionId: "parent-1", parentSessionFile: "/tmp/parent-1.jsonl", prompt: "go" });
+        await vi.advanceTimersByTimeAsync(0);
+        child.session.extensionRunner.getRegisteredCommands = () => [{ invocationName: "pi-vcc" }];
+        child.session.prompt = () => Promise.reject(new Error("command failed"));
+        await service.prompt(sessionRef("child-1", "/workspace"), "/pi-vcc status");
+        await vi.advanceTimersByTimeAsync(50);
+        expect(events.sessionEvents).toContainEqual({ sessionId: "child-1", event: { type: "session.error", message: "command failed" } });
+        expect(parent.calls.sendCustomMessage).toHaveLength(0);
+      } finally {
+        await service.dispose();
+      }
+    });
+
+    it("does not notify the parent when a pending initial prompt rejects after the child is stopped", async () => {
+      vi.useFakeTimers();
+      const { parent, child, service } = subsessionService({ allowed: true, cwd: "/workspace" }, 10);
+      let rejectPrompt!: (error: Error) => void;
+      const promptFinished = new Promise<void>((_resolve, reject) => { rejectPrompt = reject; });
+      child.session.prompt = () => promptFinished;
+      try {
+        await service.start("/workspace");
+        await service.spawnSubsession({ spawningCwd: "/workspace", parentSessionId: "parent-1", parentSessionFile: "/tmp/parent-1.jsonl", prompt: "go" });
+        await service.stop(sessionRef("child-1", "/workspace"));
+        rejectPrompt(new Error("prompt cancelled"));
+        await vi.advanceTimersByTimeAsync(50);
+        expect(parent.calls.sendCustomMessage).toHaveLength(0);
+      } finally {
+        rejectPrompt(new Error("prompt cancelled"));
+        await service.dispose();
+      }
+    });
+
     it("notifies the parent once when the tracked child stops working", async () => {
       const { parent, child, service } = subsessionService({ allowed: true, cwd: "/workspace" });
       child.session.sessionManager.getBranch = () => [
@@ -947,10 +1116,11 @@ describe("PiSessionService", () => {
       await vi.waitFor(() => {
         expect(parent.calls.sendCustomMessage).toHaveLength(1);
       });
-      expect(parent.calls.sendCustomMessage[0]?.message.content).toContain("Subsession child-1 stopped working");
-      expect(parent.calls.sendCustomMessage[0]?.message.content).toContain("--- SUBSESSION OUTPUT: child-1 ---\nall done");
+      expect(parent.calls.sendCustomMessage[0]?.message.content).toContain("Subsession child-1 is now idle.");
+      expect(JSON.stringify(parent.calls.sendCustomMessage[0]?.message)).not.toContain("all done");
+      await expect(service.checkSubsession("parent-1", "child-1", "/tmp/parent-1.jsonl")).resolves.toMatchObject({ finalText: "all done" });
       expect(parent.calls.sendCustomMessage[0]?.message.customType).toBe("subsession.completion");
-      expect(parent.calls.sendCustomMessage[0]?.options).toEqual({ triggerTurn: true, deliverAs: "followUp" });
+      expect(parent.calls.sendCustomMessage[0]?.options).toEqual({ triggerTurn: true });
       expect(parent.calls.prompt).toHaveLength(0); // not a user-authored message
       await service.dispose();
     });
@@ -973,9 +1143,7 @@ describe("PiSessionService", () => {
         expect(parent.calls.sendCustomMessage).toHaveLength(1);
       });
 
-      expect(parent.calls.sendCustomMessage[0]?.message.content).toBe(
-        "Subsession child-1 stopped working (idle).\nNo other tracked subsessions are working.\n\nOutput from subsession child-1 was too long for this completion notice and was omitted. Call check_subsession with sessionId \"child-1\" to retrieve the final output.",
-      );
+      expect(parent.calls.sendCustomMessage[0]?.message.content).toContain("Subsession child-1 is now idle.");
       expect(parent.calls.sendCustomMessage[0]?.message.content).not.toContain("BEGIN_LONG_OUTPUT");
       await expect(service.checkSubsession("parent-1", "child-1", "/tmp/parent-1.jsonl")).resolves.toMatchObject({ finalText: longOutput });
       await service.dispose();
@@ -1005,9 +1173,7 @@ describe("PiSessionService", () => {
         expect(parent.calls.sendCustomMessage).toHaveLength(1);
       });
 
-      expect(parent.calls.sendCustomMessage[0]?.message.content).toBe(
-        "Subsession child-1 stopped working (idle).\nStill working: child-2. Continue working, or call yield_to_subsessions alone and last at the next join point. Further completion notices arrive automatically; do not poll.\n\n--- SUBSESSION OUTPUT: child-1 ---\n(no output)",
-      );
+      expect(parent.calls.sendCustomMessage[0]?.message.content).toContain("Still working: child-2.");
 
       second.session.isStreaming = false;
       second.emit({ type: "agent_end" });
@@ -1016,35 +1182,41 @@ describe("PiSessionService", () => {
         expect(parent.calls.sendCustomMessage).toHaveLength(2);
       });
 
-      expect(parent.calls.sendCustomMessage[1]?.message.content).toBe(
-        "Subsession child-2 stopped working (idle).\nNo other tracked subsessions are working.\n\n--- SUBSESSION OUTPUT: child-2 ---\n(no output)",
-      );
+      expect(parent.calls.sendCustomMessage[1]?.message.content).toContain("No other tracked subsessions are working.");
       await service.dispose();
     });
 
-    it("notifies via the heartbeat when the child settles without a further event", async () => {
+    it("notifies once per agent run via the heartbeat when the child settles without a further event", async () => {
+      vi.useFakeTimers();
       const { parent, child, service } = subsessionService({ allowed: true, cwd: "/workspace" }, 10);
-      await service.start("/workspace");
-      await service.spawnSubsession({ spawningCwd: "/workspace", parentSessionId: "parent-1", parentSessionFile: "/tmp/parent-1.jsonl", prompt: "go" });
-      parent.calls.prompt.length = 0;
+      try {
+        await service.start("/workspace");
+        await service.spawnSubsession({ spawningCwd: "/workspace", parentSessionId: "parent-1", parentSessionFile: "/tmp/parent-1.jsonl", prompt: "go" });
+        await vi.advanceTimersByTimeAsync(0);
 
-      // The child works, then settles silently: agent_end arrives while it still
-      // reports active work, so the event-driven latch does not fire here.
-      child.session.isStreaming = true;
-      child.emit({ type: "agent_start" });
-      child.emit({ type: "agent_end" });
-      expect(parent.calls.sendCustomMessage).toHaveLength(0);
+        for (let run = 1; run <= 2; run += 1) {
+          // agent_end arrives while work is still active; neither it nor the
+          // heartbeat may notify until the session actually settles.
+          child.session.isStreaming = true;
+          child.emit({ type: "agent_start" });
+          child.emit({ type: "agent_end" });
+          await vi.advanceTimersByTimeAsync(20);
+          expect(parent.calls.sendCustomMessage).toHaveLength(run - 1);
 
-      // Once the session settles, the periodic heartbeat re-check notifies.
-      child.session.isStreaming = false;
-      // The periodic heartbeat (heartbeatIntervalMs: 10) re-checks and notifies
-      // once the child settles; wait for that delivery rather than sleeping.
-      await vi.waitFor(() => {
-        expect(parent.calls.sendCustomMessage).toHaveLength(1);
-      });
+          child.session.isStreaming = false;
+          // The heartbeat records readiness; idle delivery runs on the next tick.
+          await vi.advanceTimersByTimeAsync(20);
+          expect(parent.calls.sendCustomMessage).toHaveLength(run);
+          expect(parent.calls.sendCustomMessage[run - 1]?.message.content).toContain("Subsession child-1 is now idle.");
 
-      expect(parent.calls.sendCustomMessage[0]?.message.content).toContain("Subsession child-1 stopped working");
-      await service.dispose();
+          // Further idle heartbeats must not duplicate the completed run.
+          await vi.advanceTimersByTimeAsync(20);
+          expect(parent.calls.sendCustomMessage).toHaveLength(run);
+        }
+      } finally {
+        child.session.isStreaming = false;
+        await service.dispose();
+      }
     });
 
     it("does not notify the parent when a tracked child is archived", async () => {

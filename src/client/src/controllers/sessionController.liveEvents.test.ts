@@ -4,6 +4,21 @@ import { SessionController } from "./sessionController";
 import { defaultApi, EmitSocket, emptyPage, FakeSocket, oldSession, runPendingAnimationFrames, status, workspace, type AppState, type SessionActivity, type SessionInfo } from "./sessionController.testSupport";
 
 describe("SessionController live events", () => {
+  it("notifies the host when the daemon scope revision changes", () => {
+    const revisions: number[] = [];
+    const controller = new SessionController(
+      () => ({ ...initialAppState(), selectedSession: oldSession, sessions: [oldSession] }),
+      () => undefined,
+      () => undefined,
+      undefined,
+      { socket: new FakeSocket(), onModelScopeChanged: (revision) => { revisions.push(revision); } },
+    );
+
+    controller.applyGlobalEvent({ type: "models.changed", revision: 4 });
+
+    expect(revisions).toEqual([4]);
+  });
+
   it("coalesces rapid status updates into a single state write per frame", () => {
     const setStateCalls: Partial<AppState>[] = [];
     let state: AppState = { ...initialAppState(), selectedSession: oldSession, sessions: [oldSession] };
@@ -57,9 +72,7 @@ describe("SessionController live events", () => {
     let state: AppState = { ...initialAppState(), selectedWorkspace: workspace, selectedSession: oldSession, sessions: [oldSession] };
     const api: typeof defaultApi = {
       ...defaultApi,
-      messages: () => Promise.resolve(emptyPage),
-      status: () => Promise.resolve(status(oldSession.id)),
-      streamSnapshot: () => Promise.resolve({ seq: 0, partial: null }),
+      transcriptSnapshot: () => Promise.resolve({ page: emptyPage, status: status(oldSession.id), seq: 0, partial: null }),
     };
     const controller = new SessionController(
       () => state,

@@ -2,12 +2,20 @@
 
 import { html, render, svg } from "lit";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { JsonValue, PluginRuntimeContext, Workspace, WorkspaceBackend, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
+import type { FileIconsCapability, JsonValue, PluginCapability, PluginPeer, PluginRuntimeContext, Workspace, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
 import { GIT_FILE_VIEW_STORAGE_KEY } from "./browser/gitFileViewPreference.js";
 import plugin from "./browser/pi-web-plugin.js";
+import { LocalizationService } from "../../src/client/src/localization/service.js";
+import { createPluginLocalization } from "../../src/client/src/plugins/localization.js";
 
 const projectId = "project-1";
 const workspaceId = "workspace-1";
+const releaseStyles = vi.fn();
+const stylesheetIntegration = {
+  registerRoot: vi.fn(() => releaseStyles),
+  subscribe: vi.fn(),
+  createController: vi.fn(),
+};
 
 const gitWorkspace: Workspace = {
   id: workspaceId,
@@ -15,7 +23,7 @@ const gitWorkspace: Workspace = {
   path: "/repo",
   label: "main",
   isMain: true,
-  provider: { pluginId: "git", capabilities: { request: true, remove: false } },
+  provider: { pluginId: "git", capabilities: { remove: false } },
 };
 
 afterEach(() => {
@@ -26,6 +34,267 @@ afterEach(() => {
 });
 
 describe("bundled Git browser plugin", () => {
+  it.each(["list", "tree"])("uses live file icons in %s view without losing Git status or directory disclosures", async (view) => {
+    window.localStorage.setItem(GIT_FILE_VIEW_STORAGE_KEY, view);
+    let url: string | undefined = "https://icons.test/typescript.svg";
+    const listeners = new Set<() => void>();
+    const resolveIcon = vi.fn(() => url);
+    const release = vi.fn();
+    const icons: FileIconsCapability = {
+      resolveIcon,
+      subscribe(listener) { listeners.add(listener); return () => { listeners.delete(listener); release(); }; },
+    };
+    const panel = requiredPanel(activate("git", "git", new LocalizationService(), new AbortController(), icons));
+    const requestRender = vi.fn();
+    const context = { ...panelContext(backendFixture().request), host: { requestRender } };
+    const container = document.createElement("div");
+    document.body.append(container);
+    await panel.onInvalidate?.(context);
+    render(panel.render(context), container);
+    await settleBackend();
+    render(panel.render(context), container);
+    if (view === "tree") {
+      button(container, "src").click();
+      render(panel.render(context), container);
+      expect(button(container, "src").getAttribute("aria-expanded")).toBe("true");
+      expect(button(container, "src").querySelector("pi-web-git-file-icon")).toBeNull();
+    }
+    const row = button(container, view === "tree" ? "main.ts" : "src/main.ts");
+    const icon = row.querySelector("pi-web-git-file-icon");
+    expect(resolveIcon).toHaveBeenCalledWith("src/main.ts");
+    expect(icon?.shadowRoot?.querySelector("img")?.src).toBe(url);
+    expect(icon?.shadowRoot?.querySelector("img")?.alt).toBe("");
+    expect(icon?.shadowRoot?.querySelector("img")?.hidden).toBe(true);
+    expect(icon?.shadowRoot?.querySelector("img")?.crossOrigin).toBe("anonymous");
+    icon?.shadowRoot?.querySelector("img")?.dispatchEvent(new Event("load"));
+    expect(icon?.shadowRoot?.querySelector<HTMLElement>(".mask")?.style.maskImage).toBe(`url("${url}")`);
+    expect(icon?.shadowRoot?.querySelector("svg")).toBeNull();
+    expect(row.querySelector(".ui-file-leading")?.getAttribute("aria-hidden")).toBe("true");
+    expect(row.dataset["gitState"]).toBe("modified");
+    expect(row.querySelector(".git-status")?.textContent).toBe("M");
+    const calls = requestRender.mock.calls.length;
+    url = "https://icons.test/typescript-light.svg";
+    for (const listener of listeners) listener();
+    expect(requestRender).toHaveBeenCalledTimes(calls + 1);
+    render(panel.render(context), container);
+    expect(icon?.shadowRoot?.querySelector("img")?.src).toBe(url);
+    expect(button(container, view === "tree" ? "main.ts" : "src/main.ts")).toBe(row);
+    url = undefined;
+    for (const listener of listeners) listener();
+    render(panel.render(context), container);
+    expect(icon?.shadowRoot?.querySelector("img")).toBeNull();
+    expect(icon?.shadowRoot?.querySelector(".mask")).toBeNull();
+    expect(icon?.shadowRoot?.querySelector("svg")).not.toBeNull();
+    container.remove();
+    expect(listeners.size).toBe(0);
+    expect(release).toHaveBeenCalledOnce();
+    document.body.append(container);
+    expect(listeners.size).toBe(1);
+    render(null, container);
+    expect(listeners.size).toBe(0);
+    expect(release).toHaveBeenCalledTimes(2);
+  });
+
+  it("falls back after an image failure and ignores errors from a replaced image", async () => {
+    let url = "https://icons.test/typescript.svg";
+    const icons = { resolveIcon: () => url, subscribe: () => () => undefined };
+    const panel = requiredPanel(activate("git", "git", new LocalizationService(), new AbortController(), icons));
+    const context = panelContext(backendFixture({ files: [changedFile("main.ts")] }).request);
+    const container = document.createElement("div");
+    document.body.append(container);
+    await panel.onInvalidate?.(context);
+    render(panel.render(context), container);
+    const icon = button(container, "main.ts").querySelector("pi-web-git-file-icon");
+    const image = icon?.shadowRoot?.querySelector("img");
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    image?.dispatchEvent(new Event("error"));
+    expect(warning).toHaveBeenCalledExactlyOnceWith("Failed to load Git file icon", url);
+    expect(icon?.shadowRoot?.querySelector("svg")).not.toBeNull();
+    url = "https://icons.test/typescript-light.svg";
+    render(panel.render(context), container);
+    expect(icon?.shadowRoot?.querySelector("img")?.src).toBe(url);
+    image?.dispatchEvent(new Event("error"));
+    expect(icon?.shadowRoot?.querySelector("img")?.src).toBe(url);
+    warning.mockRestore();
+    render(null, container);
+  });
+
+  it("requires the host's file icons capability and rejects incompatible payloads", () => {
+    const capability = plugin.requires.find(({ id }) => id === "file-icons");
+    if (capability === undefined) throw new Error("Expected file icons requirement");
+    const icons = { resolveIcon: () => undefined, subscribe: () => () => undefined };
+    expect(capability.parse(icons)).toBe(icons);
+    for (const value of [null, {}, { ...icons, resolveIcon: undefined }, { ...icons, subscribe: undefined }]) {
+      expect(() => capability.parse(value)).toThrow("Invalid PI WEB file icons");
+    }
+  });
+
+  it.each(["list", "tree"])("shows change types and staging hints in %s view", async (view) => {
+    window.localStorage.setItem(GIT_FILE_VIEW_STORAGE_KEY, view);
+    const panel = requiredPanel(activate("git"));
+    const backend = backendFixture({ files: [
+      changedFile("added.ts", { index: "added", workingTree: "unmodified" }),
+      changedFile("modified.ts"),
+      changedFile("deleted.ts", { workingTree: "deleted" }),
+      changedFile("renamed.ts", { index: "renamed", workingTree: "modified" }),
+      changedFile("untracked.ts", { workingTree: "untracked" }),
+      changedFile("conflict.ts", { index: "conflicted", workingTree: "modified" }),
+    ] });
+    const context = panelContext(backend.request);
+    const container = document.createElement("div");
+    document.body.append(container);
+    await panel.onInvalidate?.(context);
+    render(panel.render(context), container);
+
+    await settleBackend();
+    render(panel.render(context), container);
+    const added = button(container, "added.ts");
+    expect(added.dataset["gitState"]).toBe("added");
+    expect(added.querySelector(".git-status")?.getAttribute("aria-label")).toBe("Added");
+    expect(added.querySelector(".git-status")?.textContent).toBe("A");
+    expect(added.querySelector(".git-staging")?.textContent).toBe("Staged");
+    expect(button(container, "modified.ts").querySelector(".git-staging")?.textContent).toBe("Unstaged");
+    expect(button(container, "deleted.ts").dataset["gitState"]).toBe("deleted");
+    const both = button(container, "renamed.ts").querySelector(".git-staging");
+    expect(both?.textContent).toBe("Both");
+    expect(both?.getAttribute("title")).toBe("Staged: Renamed · Unstaged: Modified");
+    const untracked = button(container, "untracked.ts");
+    expect(untracked.querySelector(".git-status")?.textContent).toBe("?");
+    expect(untracked.querySelector(".git-staging")).toBeNull();
+    const conflict = button(container, "conflict.ts");
+    expect(conflict.dataset["gitState"]).toBe("conflicted");
+    expect(conflict.querySelector(".git-status")?.textContent).toBe("Conflicted");
+    expect(conflict.querySelector(".git-staging")).toBeNull();
+    render(null, container);
+  });
+
+  it("updates live labels, cached diffs and regional numbers without refetching source", async () => {
+    const service = new LocalizationService({ development: true });
+    const panelContributions = activate("git", "remote.git", service);
+    const panel = requiredPanel(panelContributions);
+    const backend = backendFixture({ ahead: 1234, behind: 2 });
+    const context = panelContext(backend.request);
+    const container = document.createElement("div");
+    document.body.append(container);
+    await panel.onInvalidate?.(context);
+    render(panel.render(context), container);
+    button(container, "src/main.ts").click();
+    await settleBackend();
+    render(panel.render(context), container);
+    const source = [...container.querySelectorAll(".git-content")].map((node) => node.textContent);
+    expect(source.length).toBeGreaterThan(0);
+    backend.request.mockClear();
+    const requests = vi.spyOn(context.host, "requestRender").mockClear();
+
+    await service.setPreferences({ language: "en-XA", formatLocale: "de-DE" });
+    expect(requests).toHaveBeenCalled();
+    render(panel.render(context), container);
+    expect(panel.title).not.toBe("Git");
+    expect(panelContributions.actions?.[0]?.title).not.toBe("Go to Git");
+    expect(container.querySelector(".git-summary")?.textContent).toContain("1.234");
+    expect(container.querySelector('[role="group"]')?.getAttribute("aria-label")).not.toBe("Changed files view");
+    expect(container.querySelector(".ui-file-meta")?.getAttribute("title")).not.toBe("Modified");
+
+    await service.setPreferences({ language: "ar-XB", formatLocale: "ar-EG" });
+    render(panel.render(context), container);
+    expect(container.querySelector(".git-diff-grid")?.getAttribute("dir")).toBe("ltr");
+    expect(container.querySelector(".ui-file-label bdi")?.textContent).toBe("src/main.ts");
+    expect([...container.querySelectorAll(".git-content")].map((node) => node.textContent)).toEqual(source);
+    expect([...container.querySelectorAll(".git-line-number")].some((node) => node.textContent === new Intl.NumberFormat("ar-EG", { useGrouping: false }).format(1))).toBe(true);
+    expect(backend.request).not.toHaveBeenCalled();
+
+    const remove = service.registerCatalog({ id: "git-test", namespace: "plugin:git:panel", locale: "fr", load: () => Promise.resolve({
+      git: "Dépôt", refresh: "Actualiser", goToGit: "Ouvrir le dépôt", diffState: "{staged, select, yes {Index} other {Travail}}{truncated, select, yes { (limité)} other {}}",
+    }) });
+    await service.setPreferences({ language: "fr", formatLocale: "en" });
+    render(panel.render(context), container);
+    expect(panel.title).toBe("Dépôt");
+    expect(panelContributions.actions?.[0]?.title).toBe("Ouvrir le dépôt");
+    expect(button(container, "Actualiser")).toBeDefined();
+    expect(container.querySelector(".git-viewer-header small")?.textContent).toBe("Index");
+    remove();
+  });
+
+  it("owns localization observers across disconnect, reconnect and activation replacement", async () => {
+    const service = new LocalizationService({ development: true });
+    const panel = requiredPanel(activate("git", "git", service));
+    const context = panelContext(backendFixture().request);
+    await panel.onInvalidate?.(context);
+    const container = document.createElement("div");
+    document.body.append(container);
+    render(panel.render(context), container);
+    const requests = vi.spyOn(context.host, "requestRender");
+    requests.mockClear();
+    await service.setPreferences({ language: "en-XA", formatLocale: "en" });
+    expect(requests).toHaveBeenCalledTimes(1);
+    container.remove();
+    requests.mockClear();
+    await service.setPreferences({ language: "ar-XB", formatLocale: "en" });
+    expect(requests).not.toHaveBeenCalled();
+    document.body.append(container);
+    expect(requests).toHaveBeenCalledTimes(1);
+    render(panel.render(context), container);
+
+    const secondService = new LocalizationService({ development: true });
+    const lifetime = new AbortController();
+    const secondPanel = requiredPanel(activate("git", "git", secondService, lifetime));
+    await secondPanel.onInvalidate?.(context);
+    render(secondPanel.render(context), container);
+    await settleBackend();
+    requests.mockClear();
+    await service.setPreferences({ language: "en", formatLocale: "en" });
+    expect(requests).not.toHaveBeenCalled();
+    await secondService.setPreferences({ language: "en-XA", formatLocale: "en" });
+    expect(requests).toHaveBeenCalledTimes(1);
+    lifetime.abort();
+    requests.mockClear();
+    await secondService.setPreferences({ language: "ar-XB", formatLocale: "en" });
+    expect(requests).not.toHaveBeenCalled();
+  });
+
+  it("translates cached missing-backend errors after a language change", async () => {
+    const service = new LocalizationService({ development: true });
+    const panel = requiredPanel(activate("git", "git", service));
+    const context = panelContext(undefined);
+    await panel.onInvalidate?.(context);
+    const container = document.createElement("div");
+    render(panel.render(context), container);
+    const english = container.querySelector('[role="alert"]')?.textContent;
+    await service.setPreferences({ language: "en-XA", formatLocale: "en" });
+    render(panel.render(context), container);
+    expect(container.querySelector('[role="alert"]')?.textContent).not.toBe(english);
+  });
+
+  it("requires stylesheet integration v1 and rejects invalid payloads", () => {
+    const capability = plugin.requires[0];
+    if (capability === undefined) throw new Error("Expected stylesheet integration requirement");
+    expect(capability).toMatchObject({ pluginId: "pi-web", id: "stylesheet-integration", version: 1 });
+    expect(capability.parse(stylesheetIntegration)).toBe(stylesheetIntegration);
+    for (const value of [null, {}, { ...stylesheetIntegration, registerRoot: 1 }, { ...stylesheetIntegration, subscribe: null }, { ...stylesheetIntegration, createController: null }]) {
+      expect(() => capability.parse(value)).toThrow("Invalid PI WEB stylesheet integration");
+    }
+  });
+
+  it("opts the containing panel root into shared UI for its mounted lifetime", () => {
+    const panel = requiredPanel(activate("git"));
+    const host = document.createElement("div");
+    const root = host.attachShadow({ mode: "open" });
+    document.body.append(host);
+    stylesheetIntegration.registerRoot.mockClear();
+    releaseStyles.mockClear();
+    const context = panelContext(backendFixture().request);
+    render(panel.render(context), root);
+    render(panel.render(context), root);
+    expect(stylesheetIntegration.registerRoot).toHaveBeenCalledExactlyOnceWith(root, { sharedUi: true });
+    expect(root.querySelector("style[data-ui-styles]")).toBeNull();
+    host.remove();
+    expect(releaseStyles).toHaveBeenCalledTimes(1);
+    document.body.append(host);
+    expect(stylesheetIntegration.registerRoot).toHaveBeenCalledTimes(2);
+    render(null, root);
+    expect(releaseStyles).toHaveBeenCalledTimes(2);
+  });
+
   it("contributes provider-owned actions and a panel that replacements suppress", async () => {
     const contributions = activate("git");
     const panel = contributions.workspacePanels?.[0];
@@ -40,23 +309,22 @@ describe("bundled Git browser plugin", () => {
     expect(panel.visible?.(panelContext(backend.request, {
       ...gitWorkspace,
       // Legacy Git-shaped data must not override a declared replacement owner.
-      provider: { pluginId: "jj", capabilities: { request: true, remove: false } },
+      provider: { pluginId: "jj", capabilities: { remove: false } },
     }))).toBe(false);
 
-    const selectMainView = vi.fn<PluginRuntimeContext["selectMainView"]>();
+    const selectWorkspaceTool = vi.fn<PluginRuntimeContext["selectWorkspaceTool"]>();
     const refreshWorkspacePanels = vi.fn<PluginRuntimeContext["refreshWorkspacePanels"]>(() => panel.onInvalidate?.(context));
-    const runtime = runtimeContext({ selectMainView, refreshWorkspacePanels });
+    const runtime = runtimeContext({ selectWorkspaceTool, refreshWorkspacePanels });
     const goToGit = contributions.actions?.find((action) => action.id === "view.git");
     const refresh = contributions.actions?.find((action) => action.id === "workspace.refresh-git");
 
     expect(contributions.actions?.map(({ id }) => id)).toEqual(["view.git", "workspace.refresh-git"]);
-    expect(panel.routeAliases).toEqual(["git", "core:workspace.git"]);
     expect(goToGit?.shortcut).toBe("mod+3");
     expect(goToGit?.shortcutAliases).toEqual(["core:view.git"]);
     expect(refresh?.shortcutAliases).toEqual(["core:workspace.refresh-git"]);
     expect(goToGit?.enabled?.(runtime)).toBe(true);
     await goToGit?.run(runtime);
-    expect(selectMainView).toHaveBeenCalledWith("git:workspace.git");
+    expect(selectWorkspaceTool).toHaveBeenCalledWith("git:workspace.git");
 
     await refresh?.run(runtime);
     expect(refreshWorkspacePanels).toHaveBeenCalledWith("git:workspace.git");
@@ -65,6 +333,20 @@ describe("bundled Git browser plugin", () => {
     backend.request.mockClear();
     await panel.onInvalidate?.(context);
     expect(backend.request).toHaveBeenCalledWith("status", null);
+  });
+
+  it("inspects the repository from a folder workspace without requiring workspace ownership", async () => {
+    const folder: Workspace = { id: workspaceId, projectId, path: "/repo/app", label: "app", isMain: true };
+    const backend = backendFixture({ files: [changedFile("outside.txt")] });
+    const panel = requiredPanel(activate("git"));
+    const context = panelContext(backend.request, folder);
+    expect(panel.visible?.(context)).toBe(true);
+    await panel.onInvalidate?.(context);
+    const container = document.createElement("div");
+    document.body.append(container);
+    render(panel.render(context), container);
+    expect(backend.request).toHaveBeenCalledWith("status", null);
+    expect(container.textContent).toContain("outside.txt");
   });
 
   it("uses source identity for ownership and runtime identity for federated routes", async () => {
@@ -76,13 +358,13 @@ describe("bundled Git browser plugin", () => {
     expect(panel.visible?.(panelContext(backend.request))).toBe(true);
     expect(panel.visible?.(panelContext(backend.request, {
       ...gitWorkspace,
-      provider: { pluginId: runtimePluginId, capabilities: { request: true, remove: false } },
+      provider: { pluginId: runtimePluginId, capabilities: { remove: false } },
     }))).toBe(false);
 
-    const selectMainView = vi.fn<PluginRuntimeContext["selectMainView"]>();
+    const selectWorkspaceTool = vi.fn<PluginRuntimeContext["selectWorkspaceTool"]>();
     const action = contributions.actions?.find((candidate) => candidate.id === "view.git");
-    await action?.run(runtimeContext({ selectMainView }));
-    expect(selectMainView).toHaveBeenCalledWith(`${runtimePluginId}:workspace.git`);
+    await action?.run(runtimeContext({ selectWorkspaceTool }));
+    expect(selectWorkspaceTool).toHaveBeenCalledWith(`${runtimePluginId}:workspace.git`);
   });
 
   it("keeps visibility checks free of route side effects", () => {
@@ -110,7 +392,7 @@ describe("bundled Git browser plugin", () => {
     );
   });
 
-  it("loads status and diffs through context.backend, preserves URL selection, views, grouping, and rich diff rendering", async () => {
+  it("loads status and diffs through context.peer, preserves URL selection, views, grouping, and rich diff rendering", async () => {
     window.history.replaceState({}, "", `/?project=${projectId}&workspace=${workspaceId}`);
     const backend = backendFixture({
       files: [
@@ -148,14 +430,10 @@ describe("bundled Git browser plugin", () => {
     expect(backend.request).toHaveBeenCalledWith("diff", { path: "src/main.ts", staged: true });
     expect(container.textContent).toContain("staged");
     expect(container.textContent).toContain("unstaged");
-    expect(container.querySelector(".git-panel")).not.toBeNull();
-    expect(container.querySelector(".split")).toBeNull();
-    const styleRules = (container.querySelector("style")?.textContent ?? "")
-      .split("\n")
-      .map((line) => line.trim())
-      .filter((line) => line.includes("{"));
-    expect(styleRules).toContainEqual(expect.stringContaining(".git-panel .git-row"));
-    expect(styleRules.every((rule) => rule.startsWith(".git-panel"))).toBe(true);
+    const selectedRow = button(container, "src/main.ts");
+    expect(selectedRow.classList.contains("selected")).toBe(true);
+    expect(selectedRow.querySelector(".ui-file-label")?.textContent).toBe("src/main.ts");
+    expect(selectedRow.querySelector(".ui-file-meta")?.textContent).toBe("M");
     expect(container.querySelector('[role="table"][aria-label="Unified diff"]')).not.toBeNull();
     expect([...container.querySelectorAll(".inline-change")].map((entry) => entry.textContent)).toContain("new");
 
@@ -167,6 +445,196 @@ describe("bundled Git browser plugin", () => {
     render(panel.render(context), container);
     expect(button(container, "main.ts")).toBeDefined();
 
+    render(null, container);
+  });
+
+  it.each([false, true])("keeps unchanged background polls quiet (selected diff: %s)", async (selected) => {
+    vi.useFakeTimers();
+    const backend = backendFixture();
+    const panel = requiredPanel(activate("git"));
+    const requestRender = vi.fn();
+    const context = { ...panelContext(backend.request), host: { requestRender } };
+    const container = document.createElement("div");
+    document.body.append(container);
+    render(panel.render(context), container);
+    render(panel.render(context), container);
+    expect(button(container, "Refresh").disabled).toBe(true);
+    await settleBackend();
+    render(panel.render(context), container);
+    if (selected) {
+      button(container, "src/main.ts").click();
+      await settleBackend();
+      render(panel.render(context), container);
+    }
+    requestRender.mockClear();
+    const respond = backend.request.getMockImplementation();
+    if (respond === undefined) throw new Error("Expected backend implementation");
+    let release: () => void = () => { throw new Error("Expected pending request"); };
+    const pending = new Promise<void>((resolve) => { release = resolve; });
+    backend.request.mockImplementation(async (operation, input) => {
+      await pending;
+      return respond(operation, input);
+    });
+
+    await vi.advanceTimersByTimeAsync(8_000);
+    expect(requestRender).not.toHaveBeenCalled();
+    render(panel.render(context), container);
+    expect(button(container, "Refresh").disabled).toBe(false);
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(requestRender).not.toHaveBeenCalled();
+
+    button(container, "Refresh").click();
+    render(panel.render(context), container);
+    expect(button(container, "Refresh").disabled).toBe(true);
+    await vi.advanceTimersByTimeAsync(0);
+    render(panel.render(context), container);
+    expect(button(container, "Refresh").disabled).toBe(false);
+    expect(requestRender).toHaveBeenCalled();
+    render(null, container);
+  });
+
+  it("shows explicit refresh feedback when joining an in-flight background poll", async () => {
+    vi.useFakeTimers();
+    const backend = backendFixture();
+    const panel = requiredPanel(activate("git"));
+    const requestRender = vi.fn();
+    const context = { ...panelContext(backend.request), host: { requestRender } };
+    const container = document.createElement("div");
+    document.body.append(container);
+    render(panel.render(context), container);
+    await settleBackend();
+    render(panel.render(context), container);
+    const respond = backend.request.getMockImplementation();
+    if (respond === undefined) throw new Error("Expected backend implementation");
+    let release: () => void = () => { throw new Error("Expected pending request"); };
+    const pending = new Promise<void>((resolve) => { release = resolve; });
+    backend.request.mockImplementation(async (operation, input) => {
+      await pending;
+      return respond(operation, input);
+    });
+    await vi.advanceTimersByTimeAsync(8_000);
+    backend.request.mockClear();
+    requestRender.mockClear();
+    button(container, "Refresh").click();
+    expect(backend.request).not.toHaveBeenCalled();
+    expect(requestRender).toHaveBeenCalledOnce();
+    render(panel.render(context), container);
+    expect(button(container, "Refresh").disabled).toBe(true);
+    requestRender.mockClear();
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(requestRender).toHaveBeenCalledOnce();
+    render(panel.render(context), container);
+    expect(button(container, "Refresh").disabled).toBe(false);
+    render(null, container);
+  });
+
+  it.each(["status", "diff"])("renders background %s errors and recovery, but not repeated failures", async (operation) => {
+    vi.useFakeTimers();
+    const backend = backendFixture();
+    const panel = requiredPanel(activate("git"));
+    const container = document.createElement("div");
+    const requestRender = vi.fn();
+    const context = { ...panelContext(backend.request), host: { requestRender } };
+    document.body.append(container);
+    render(panel.render(context), container);
+    await settleBackend();
+    render(panel.render(context), container);
+    button(container, "src/main.ts").click();
+    await settleBackend();
+    const respond = backend.request.getMockImplementation();
+    if (respond === undefined) throw new Error("Expected backend implementation");
+    backend.request.mockImplementation((requested, input) => requested === operation
+      ? Promise.reject(new Error("Polling failed")) : respond(requested, input));
+    requestRender.mockClear();
+    await vi.advanceTimersByTimeAsync(8_000);
+    expect(requestRender).toHaveBeenCalled();
+    render(panel.render(context), container);
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("Could not refresh Git. Try refreshing again.");
+    requestRender.mockClear();
+    await vi.advanceTimersByTimeAsync(8_000);
+    expect(requestRender).not.toHaveBeenCalled();
+
+    backend.request.mockImplementation(respond);
+    await vi.advanceTimersByTimeAsync(8_000);
+    expect(requestRender).toHaveBeenCalled();
+    render(panel.render(context), container);
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    render(null, container);
+  });
+
+  it("renders changed status, staged and unstaged diffs, and removed selection during polls", async () => {
+    vi.useFakeTimers();
+    const backend = backendFixture();
+    const panel = requiredPanel(activate("git"));
+    const container = document.createElement("div");
+    const requestRender = vi.fn();
+    const context = { ...panelContext(backend.request), host: { requestRender } };
+    document.body.append(container);
+    render(panel.render(context), container);
+    await settleBackend();
+    render(panel.render(context), container);
+    button(container, "src/main.ts").click();
+    await settleBackend();
+    requestRender.mockClear();
+    backend.status.files.push(changedFile("added.ts"));
+    await vi.advanceTimersByTimeAsync(8_000);
+    expect(requestRender).toHaveBeenCalled();
+    render(panel.render(context), container);
+    expect(button(container, "added.ts")).toBeDefined();
+
+    const respond = backend.request.getMockImplementation();
+    if (respond === undefined) throw new Error("Expected backend implementation");
+    for (const staged of [true, false]) {
+      backend.request.mockImplementation(async (operation, input) => {
+        const response = await respond(operation, input);
+        return operation === "diff" && isRecord(response) && response["staged"] === staged
+          ? { ...response, hash: `changed-${String(staged)}`, diff: `@@ -1 +1 @@\n-old\n+changed-${String(staged)}` }
+          : response;
+      });
+      requestRender.mockClear();
+      await vi.advanceTimersByTimeAsync(8_000);
+      expect(requestRender).toHaveBeenCalled();
+      render(panel.render(context), container);
+      expect(container.textContent).toContain(`changed-${String(staged)}`);
+    }
+    backend.status.files = [];
+    requestRender.mockClear();
+    await vi.advanceTimersByTimeAsync(8_000);
+    expect(requestRender).toHaveBeenCalled();
+    render(panel.render(context), container);
+    expect(container.querySelector('[aria-label="Unified diff"]')).toBeNull();
+    render(null, container);
+  });
+
+  it("refreshes truncation metadata even when polled diff text has the same hash", async () => {
+    vi.useFakeTimers();
+    const backend = backendFixture();
+    const panel = requiredPanel(activate("git"));
+    const requestRender = vi.fn();
+    const context = { ...panelContext(backend.request), host: { requestRender } };
+    const container = document.createElement("div");
+    document.body.append(container);
+    render(panel.render(context), container);
+    await settleBackend();
+    render(panel.render(context), container);
+    button(container, "src/main.ts").click();
+    await settleBackend();
+    const respond = backend.request.getMockImplementation();
+    if (respond === undefined) throw new Error("Expected backend implementation");
+    backend.request.mockImplementation(async (operation, input) => {
+      const response = await respond(operation, input);
+      return operation === "diff" && isRecord(response) ? { ...response, truncated: true } : response;
+    });
+    requestRender.mockClear();
+    await vi.advanceTimersByTimeAsync(8_000);
+    expect(requestRender).toHaveBeenCalled();
+    render(panel.render(context), container);
+    expect(container.querySelector(".git-viewer-header")?.textContent).toContain("truncated");
+    requestRender.mockClear();
+    await vi.advanceTimersByTimeAsync(8_000);
+    expect(requestRender).not.toHaveBeenCalled();
     render(null, container);
   });
 
@@ -258,8 +726,22 @@ describe("bundled Git browser plugin", () => {
   });
 });
 
-function activate(pluginId: string, runtimePluginId = pluginId) {
-  return plugin.activate({ apiVersion: 2, pluginId, runtimePluginId, html, svg }).contributions;
+function activate(pluginId: string, runtimePluginId = pluginId, service = new LocalizationService(), lifetime = new AbortController(), icons: FileIconsCapability = { resolveIcon: () => undefined, subscribe: () => () => undefined }) {
+  const result = plugin.activate({
+    apiVersion: 4,
+    pluginId,
+    runtimePluginId,
+    localization: createPluginLocalization(service, pluginId, runtimePluginId, lifetime.signal),
+    html,
+    svg,
+    signal: new AbortController().signal,
+    lifetimeSignal: new AbortController().signal,
+  });
+  result.start({
+    capabilities: { resolve: <Value,>(capability: PluginCapability<Value>): Value => capability.parse(capability.id === "file-icons" ? icons : stylesheetIntegration) },
+    signal: new AbortController().signal,
+  });
+  return result.contributions;
 }
 
 function requiredPanel(contributions: ReturnType<typeof activate>) {
@@ -268,11 +750,13 @@ function requiredPanel(contributions: ReturnType<typeof activate>) {
   return panel;
 }
 
-function backendFixture(patch: { files?: ReturnType<typeof changedFile>[]; submodules?: string[]; branch?: string } = {}) {
+function backendFixture(patch: { files?: ReturnType<typeof changedFile>[]; submodules?: string[]; branch?: string; ahead?: number; behind?: number } = {}) {
   const status = {
     isGitRepo: true,
     hash: `status-hash-${patch.branch ?? "main"}`,
     branch: patch.branch ?? "main",
+    ahead: patch.ahead ?? 0,
+    behind: patch.behind ?? 0,
     files: patch.files ?? [changedFile("src/main.ts")],
     submodules: patch.submodules ?? [],
   };
@@ -300,12 +784,13 @@ function changedFile(path: string, patch: Record<string, JsonValue> = {}) {
   return { path, index: "unmodified", workingTree: "modified", ...patch };
 }
 
-function panelContext(request: WorkspaceBackend["request"] | undefined, workspace = gitWorkspace, machineId = "local"): WorkspacePanelContext {
+function panelContext(request: NonNullable<PluginPeer["request"]> | undefined, workspace = gitWorkspace, machineId = "local"): WorkspacePanelContext {
   const noop = () => undefined;
   return {
+    navigate: () => Promise.resolve(),
     machine: { id: machineId, name: machineId, kind: machineId === "local" ? "local" : "remote" },
     workspace,
-    state: { selectedWorkspace: workspace, workspaceTool: "git:workspace.git", mainView: "git:workspace.git" },
+    state: { selectedWorkspace: workspace, workspaceTool: "git:workspace.git", mainView: "workspace" },
     files: {
       readFile: () => Promise.reject(new Error("not implemented")),
       listFiles: () => Promise.reject(new Error("not implemented")),
@@ -313,7 +798,7 @@ function panelContext(request: WorkspaceBackend["request"] | undefined, workspac
       deleteFile: () => Promise.reject(new Error("not implemented")),
       moveFile: () => Promise.reject(new Error("not implemented")),
     },
-    ...(request === undefined ? {} : { backend: { request } }),
+    ...(request === undefined ? {} : { peer: { request } }),
     host: { requestRender: noop },
     prompt: { insertText: noop, getText: () => "", getSelection: () => null },
     terminal: { open: noop, runCommand: () => Promise.reject(new Error("not implemented")) },
@@ -323,7 +808,8 @@ function panelContext(request: WorkspaceBackend["request"] | undefined, workspac
 function runtimeContext(patch: Partial<PluginRuntimeContext> = {}): PluginRuntimeContext {
   const noop = () => undefined;
   return {
-    state: { selectedWorkspace: gitWorkspace, workspaceTool: "git:workspace.git", mainView: "git:workspace.git" },
+    navigate: () => Promise.resolve(),
+    state: { selectedWorkspace: gitWorkspace, workspaceTool: "git:workspace.git", mainView: "workspace" },
     prompt: { insertText: noop, getText: () => "", getSelection: () => null },
     openActionPalette: noop,
     focusPrompt: noop,

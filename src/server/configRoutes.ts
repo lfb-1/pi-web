@@ -1,21 +1,32 @@
 import type { FastifyInstance } from "fastify";
-import { loadPiWebConfig, parseAgentConfig, parseUploadsConfig, resolveEffectivePiWebConfig, savePiWebConfig, type AgentPathHost, type LoadOptions, type PiWebConfig } from "../config.js";
-import type { PiWebConfigEnvOverrides, PiWebConfigResponse, PiWebConfigValues } from "../shared/apiTypes.js";
-import { isPiWebPluginId } from "../shared/pluginIds.js";
+import { loadPiWebConfig, overlayPiWebConfig, piWebConfigEnforcedSettings, piWebConfigSources, parsePiWebConfig, resolveEffectivePiWebConfig, savePiWebConfig, type AgentPathHost, type LoadOptions, type PiWebConfig } from "../config.js";
+import { CONFIG_KEYS, parseConfigPointer, preserveEnforcedConfigOverrides, removeConfigOverrides, validateConfigUpdate, type PiWebConfigUpdate } from "./configUpdates.js";
+import { requireHostAccess } from "../shared/hostAccess.js";
+import type { PiWebConfigEnvOverrides, PiWebConfigResponse, PiWebConfigValues, PiWebHostAccess } from "../shared/apiTypes.js";
 
 export interface PiWebConfigService {
   read: () => PiWebConfigResponse | Promise<PiWebConfigResponse>;
   write: (config: PiWebConfigValues) => PiWebConfigResponse | Promise<PiWebConfigResponse>;
+  replace?: (config: PiWebConfigValues, selectedMachine: boolean) => PiWebConfigResponse | Promise<PiWebConfigResponse>;
+  update?: (update: PiWebConfigUpdate) => PiWebConfigResponse | Promise<PiWebConfigResponse>;
 }
 
 export const SELECTED_MACHINE_CONFIG_KEYS = [
+  "installationName",
   "plugins",
   "pathAccess",
+  "basePaths",
   "uploads",
+  "attachments",
   "maxUploadBytes",
   "spawnSessions",
+  "sessionMessages",
+  "crossProjectSessionMessages",
   "subsessions",
   "askUser",
+  "environmentFacts",
+  "extensionDialogsTimeoutMs",
+  "sessionArchive",
   "agent",
 ] as const satisfies readonly (keyof PiWebConfigValues)[];
 
@@ -26,6 +37,18 @@ export function createFilePiWebConfigService(options: LoadOptions = {}): PiWebCo
     read: () => currentPiWebConfigResponse(options),
     write: (config) => {
       savePiWebConfig(config, options);
+      return currentPiWebConfigResponse(options);
+    },
+    replace: (config, selectedMachine) => {
+      const current = currentPiWebConfigResponse(options);
+      const replacement = selectedMachine ? mergeSelectedMachineConfig(current.config, config) : config;
+      savePiWebConfig(preserveEnforcedConfigOverrides(current.config, replacement, current.enforcedSettings), options);
+      return currentPiWebConfigResponse(options);
+    },
+    update: (update) => {
+      const current = currentPiWebConfigResponse(options);
+      const next = applyPiWebConfigUpdate(current, update);
+      savePiWebConfig(next, options);
       return currentPiWebConfigResponse(options);
     },
   };
@@ -41,21 +64,36 @@ export function currentPiWebConfigResponse(options: LoadOptions = {}): PiWebConf
     config: loaded.config,
     effectiveConfig: effective.config,
     envOverrides: piWebConfigEnvOverrides(env),
+    enforcedSettings: piWebConfigEnforcedSettings(env),
+    configSources: piWebConfigSources(loaded, options),
+    ...(loaded.defaultsPath === undefined ? {} : { defaultsPath: loaded.defaultsPath, defaultsConfig: loaded.defaultsConfig }),
   };
 }
 
-export function registerConfigRoutes(app: FastifyInstance, service: PiWebConfigService = createFilePiWebConfigService()): void {
+export function registerConfigRoutes(app: FastifyInstance, service: PiWebConfigService = createFilePiWebConfigService(), activeHostAccess?: PiWebHostAccess | null): void {
+  const withRuntime = (response: PiWebConfigResponse): PiWebConfigResponse => ({
+    ...response, ...(activeHostAccess === undefined ? {} : { activeHostAccess }),
+  });
   app.get("/api/config", async (_request, reply) => {
     try {
-      return await service.read();
+      return withRuntime(await service.read());
     } catch (error) {
       return reply.code(500).send({ error: errorMessage(error) });
     }
   });
 
+  app.patch<{ Body: unknown }>("/api/config", async (request, reply) => {
+    try {
+      return withRuntime(await updateConfigService(service, parsePiWebConfigUpdate(request.body)));
+    } catch (error) {
+      return reply.code(isConfigValidationError(error) ? 400 : 500).send({ error: errorMessage(error) });
+    }
+  });
+
   app.put<{ Body: { config?: unknown } | undefined }>("/api/config", async (request, reply) => {
     try {
-      return await service.write(parseConfigRequest(request.body?.config));
+      const config = parseConfigRequest(request.body?.config);
+      return withRuntime(await replaceConfigService(service, config));
     } catch (error) {
       const status = isConfigValidationError(error) ? 400 : 500;
       return reply.code(status).send({ error: errorMessage(error) });
@@ -72,16 +110,77 @@ export function registerLocalMachineConfigRoutes(app: FastifyInstance, service: 
     }
   });
 
+  app.patch<{ Body: unknown }>("/api/machines/local/config", async (request, reply) => {
+    try {
+      return selectedMachineConfigResponse(await updateConfigService(service, parsePiWebConfigUpdate(request.body, true)));
+    } catch (error) {
+      return reply.code(isConfigValidationError(error) ? 400 : 500).send({ error: errorMessage(error) });
+    }
+  });
+
   app.put<{ Body: { config?: unknown } | undefined }>("/api/machines/local/config", async (request, reply) => {
     try {
-      const current = await service.read();
       const patch = parseSelectedMachineConfigRequest(request.body?.config);
-      return selectedMachineConfigResponse(await service.write(mergeSelectedMachineConfig(current.config, patch)));
+      return selectedMachineConfigResponse(await replaceConfigService(service, patch, true));
     } catch (error) {
       const status = isConfigValidationError(error) ? 400 : 500;
       return reply.code(status).send({ error: errorMessage(error) });
     }
   });
+}
+
+export function parsePiWebConfigUpdate(value: unknown, selectedMachine = false, pathHost: AgentPathHost = "current"): PiWebConfigUpdate {
+  const prefix = selectedMachine ? "PI WEB selected-machine config" : "PI WEB config";
+  if (!isRecord(value) || Object.keys(value).some((key) => key !== "set" && key !== "unset")) throw new Error(`${prefix} update must contain only set and unset`);
+  const setValue = value["set"];
+  if (setValue !== undefined && (!isRecord(setValue) || Object.keys(setValue).some((key) => !CONFIG_KEYS.some((known) => known === key)))) throw new Error(`${prefix} update contains unknown settings`);
+  const set = setValue === undefined ? {} : selectedMachine ? parseSelectedMachineConfigRequest(setValue, pathHost) : parseConfigRequest(setValue, pathHost);
+  const unset = value["unset"] === undefined ? [] : value["unset"];
+  if (!Array.isArray(unset) || !unset.every((pointer): pointer is string => typeof pointer === "string")) throw new Error(`${prefix} unset must be an array of JSON pointers`);
+  for (const pointer of unset) {
+    const root = parseConfigPointer(pointer)[0];
+    if (selectedMachine && (root === undefined || !SELECTED_MACHINE_CONFIG_KEY_SET.has(root))) throw new Error(`${prefix} key is not allowed: ${root ?? pointer}`);
+  }
+  const update = { set, unset };
+  validateConfigUpdate(update);
+  return update;
+}
+
+export function applyPiWebConfigUpdate(current: PiWebConfigResponse, update: PiWebConfigUpdate): PiWebConfig {
+  validateConfigUpdate(update, current.enforcedSettings);
+  return parseConfigRequest(removeConfigOverrides(overlayPiWebConfig(current.config, update.set ?? {}), update.unset ?? []));
+}
+
+async function replaceConfigService(service: PiWebConfigService, config: PiWebConfigValues, selectedMachine = false): Promise<PiWebConfigResponse> {
+  if (service.replace !== undefined) return service.replace(config, selectedMachine);
+  const current = await service.read();
+  const replacement = selectedMachine ? mergeSelectedMachineConfig(current.config, config) : config;
+  return service.write(preserveEnforcedConfigOverrides(current.config, replacement, current.enforcedSettings));
+}
+
+async function updateConfigService(service: PiWebConfigService, update: PiWebConfigUpdate): Promise<PiWebConfigResponse> {
+  if (service.update !== undefined) return service.update(update);
+  return service.write(applyPiWebConfigUpdate(await service.read(), update));
+}
+
+function selectedMachineSources(sources: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(Object.entries(sources).filter(([pointer]) => {
+    const root = sourcePointerRoot(pointer);
+    return SELECTED_MACHINE_CONFIG_KEY_SET.has(root);
+  }));
+}
+
+function parseSourceMap(value: unknown, source: string): Record<string, string> {
+  if (!isRecord(value) || !Object.values(value).every((entry) => typeof entry === "string")) throw new Error(`${source} configuration sources must map settings to strings`);
+  return Object.fromEntries(Object.entries(value).map(([pointer, entry]) => {
+    sourcePointerRoot(pointer);
+    return [pointer, String(entry)];
+  }));
+}
+
+function sourcePointerRoot(pointer: string): string {
+  if (!pointer.startsWith("/") || /~(?![01])/u.test(pointer)) throw new Error("PI WEB config source identifiers must be JSON pointers");
+  return pointer.slice(1).split("/")[0]?.replaceAll("~1", "/").replaceAll("~0", "~") ?? "";
 }
 
 export function parseSelectedMachineConfigRequest(value: unknown, agentPathHost: AgentPathHost = "current"): PiWebConfig {
@@ -101,11 +200,16 @@ export function mergeSelectedMachineConfig(current: PiWebConfigValues, patch: Pi
 }
 
 export function selectedMachineConfigResponse(response: PiWebConfigResponse): PiWebConfigResponse {
-  return {
+  const selected: PiWebConfigResponse = {
     ...response,
     config: pickSelectedMachineConfig(response.config),
     effectiveConfig: pickSelectedMachineConfig(response.effectiveConfig),
+    ...(response.defaultsConfig === undefined ? {} : { defaultsConfig: pickSelectedMachineConfig(response.defaultsConfig) }),
+    ...(response.enforcedSettings === undefined ? {} : { enforcedSettings: selectedMachineSources(response.enforcedSettings) }),
+    ...(response.configSources === undefined ? {} : { configSources: selectedMachineSources(response.configSources) }),
   };
+  delete selected.activeHostAccess;
+  return selected;
 }
 
 export function parsePiWebConfigResponseBody(value: unknown, source = "PI WEB config response"): PiWebConfigResponse {
@@ -115,129 +219,32 @@ export function parsePiWebConfigResponseBody(value: unknown, source = "PI WEB co
     exists: requireResponseBoolean(record, "exists", source),
     config: parseConfigRequest(record["config"], "portable"),
     effectiveConfig: parseConfigRequest(record["effectiveConfig"], "portable"),
+    ...(record["activeHostAccess"] === undefined ? {} : { activeHostAccess: record["activeHostAccess"] === null ? null : requireHostAccess(record["activeHostAccess"], `${source} activeHostAccess`) }),
     envOverrides: parsePiWebConfigEnvOverridesResponse(record["envOverrides"], source),
+    ...(record["enforcedSettings"] === undefined ? {} : { enforcedSettings: parseSourceMap(record["enforcedSettings"], source) }),
+    ...(record["configSources"] === undefined ? {} : { configSources: parseSourceMap(record["configSources"], source) }),
+    ...(record["defaultsPath"] === undefined ? {} : { defaultsPath: requireResponseString(record, "defaultsPath", source) }),
+    ...(record["defaultsConfig"] === undefined ? {} : { defaultsConfig: parseConfigRequest(record["defaultsConfig"], "portable") }),
   };
 }
 
 function parseConfigRequest(value: unknown, agentPathHost: AgentPathHost = "current"): PiWebConfig {
   if (!isRecord(value)) throw new Error("PI WEB config update must include a config object");
-  const config: PiWebConfig = {};
-  const host = value["host"];
-  const port = value["port"];
-  const allowedHosts = value["allowedHosts"];
-  const shortcuts = value["shortcuts"];
-  const plugins = value["plugins"];
-  const pathAccess = value["pathAccess"];
-  const uploads = value["uploads"];
-  const maxUploadBytes = value["maxUploadBytes"];
-  const spawnSessions = value["spawnSessions"];
-  const subsessions = value["subsessions"];
-  const askUser = value["askUser"];
-  const agent = value["agent"];
-  if (host !== undefined) {
-    if (typeof host !== "string") throw new Error("PI WEB config host must be a string");
-    config.host = host;
+  // JSON API inputs stay typed; numeric environment/file parsing is shared below.
+  for (const key of ["port", "maxUploadBytes"] as const) {
+    if (value[key] !== undefined && typeof value[key] !== "number") throw new Error(`PI WEB config ${key} must be a number`);
   }
-  if (port !== undefined) {
-    if (typeof port !== "number") throw new Error("PI WEB config port must be a number");
-    config.port = port;
-  }
-  if (allowedHosts !== undefined) config.allowedHosts = parseAllowedHostsRequest(allowedHosts);
-  if (shortcuts !== undefined) config.shortcuts = parseShortcutsRequest(shortcuts);
-  if (plugins !== undefined) config.plugins = parsePluginsRequest(plugins);
-  if (pathAccess !== undefined) config.pathAccess = parsePathAccessRequest(pathAccess);
-  if (uploads !== undefined) config.uploads = parseUploadsConfig(uploads, "request");
-  if (maxUploadBytes !== undefined) config.maxUploadBytes = parseMaxUploadBytesRequest(maxUploadBytes);
-  if (spawnSessions !== undefined) {
-    if (typeof spawnSessions !== "boolean") throw new Error("PI WEB config spawnSessions must be a boolean");
-    config.spawnSessions = spawnSessions;
-  }
-  if (subsessions !== undefined) {
-    if (typeof subsessions !== "boolean") throw new Error("PI WEB config subsessions must be a boolean");
-    config.subsessions = subsessions;
-  }
-  if (askUser !== undefined) {
-    if (typeof askUser !== "boolean") throw new Error("PI WEB config askUser must be a boolean");
-    config.askUser = askUser;
-  }
-  if (agent !== undefined) config.agent = parseAgentRequest(agent, agentPathHost);
-  return config;
+  return parsePiWebConfig(value, "request", agentPathHost);
 }
 
 function pickSelectedMachineConfig(config: PiWebConfigValues): PiWebConfig {
-  return {
-    ...(config.plugins !== undefined ? { plugins: config.plugins } : {}),
-    ...(config.pathAccess !== undefined ? { pathAccess: config.pathAccess } : {}),
-    ...(config.uploads !== undefined ? { uploads: config.uploads } : {}),
-    ...(config.maxUploadBytes !== undefined ? { maxUploadBytes: config.maxUploadBytes } : {}),
-    ...(config.spawnSessions !== undefined ? { spawnSessions: config.spawnSessions } : {}),
-    ...(config.subsessions !== undefined ? { subsessions: config.subsessions } : {}),
-    ...(config.askUser !== undefined ? { askUser: config.askUser } : {}),
-    ...(config.agent !== undefined ? { agent: config.agent } : {}),
-  };
+  return Object.fromEntries(Object.entries(config).filter(([key, value]) => value !== undefined && SELECTED_MACHINE_CONFIG_KEY_SET.has(key)));
 }
 
 function selectedMachineConfigErrorMessage(error: unknown): string {
   const message = errorMessage(error);
   if (message.startsWith("PI WEB config ")) return `PI WEB selected-machine config ${message.slice("PI WEB config ".length)}`;
   return `PI WEB selected-machine config ${message}`;
-}
-
-function parseAllowedHostsRequest(value: unknown): string[] | true {
-  if (value === true) return true;
-  if (!Array.isArray(value) || !value.every((item) => typeof item === "string")) {
-    throw new Error("PI WEB config allowedHosts must be true or an array of strings");
-  }
-  return value;
-}
-
-function parseShortcutsRequest(value: unknown): Record<string, string | null> {
-  if (!isRecord(value)) throw new Error("PI WEB config shortcuts must be an object");
-  return Object.fromEntries(Object.entries(value).map(([actionId, shortcut]) => {
-    if (shortcut !== null && (typeof shortcut !== "string" || shortcut === "")) throw new Error("PI WEB config shortcut values must be non-empty strings or null");
-    return [actionId, shortcut];
-  }));
-}
-
-function parsePathAccessRequest(value: unknown): NonNullable<PiWebConfig["pathAccess"]> {
-  if (!isRecord(value)) throw new Error("PI WEB config pathAccess must be an object");
-  const allowedPaths = value["allowedPaths"];
-  return {
-    ...(allowedPaths === undefined ? {} : { allowedPaths: parseAllowedPathsRequest(allowedPaths) }),
-  };
-}
-
-function parseAllowedPathsRequest(value: unknown): string[] {
-  if (!isNonEmptyStringArray(value)) {
-    throw new Error("PI WEB config pathAccess.allowedPaths must be an array of non-empty strings");
-  }
-  return value;
-}
-
-function isNonEmptyStringArray(value: unknown): value is string[] {
-  return Array.isArray(value) && value.every((item) => typeof item === "string" && item !== "");
-}
-
-function parseMaxUploadBytesRequest(value: unknown): number {
-  if (typeof value !== "number" || !Number.isInteger(value) || value < 1) throw new Error("PI WEB config maxUploadBytes must be a positive integer");
-  return value;
-}
-
-function parseAgentRequest(value: unknown, pathHost: AgentPathHost): NonNullable<PiWebConfig["agent"]> {
-  return parseAgentConfig(value, "request", pathHost);
-}
-
-function parsePluginsRequest(value: unknown): NonNullable<PiWebConfig["plugins"]> {
-  if (!isRecord(value) || Array.isArray(value)) throw new Error("PI WEB config plugins must be an object");
-  return Object.fromEntries(Object.entries(value).map(([pluginId, config]) => {
-    if (!isPiWebPluginId(pluginId)) throw new Error("PI WEB config plugin ids are invalid");
-    if (!isRecord(config) || Array.isArray(config)) throw new Error("PI WEB config plugin entries must be objects");
-    const enabled = config["enabled"];
-    if (enabled !== undefined && typeof enabled !== "boolean") throw new Error("PI WEB config plugin enabled values must be booleans");
-    const settings = config["settings"];
-    if (settings !== undefined && (!isRecord(settings) || Array.isArray(settings))) throw new Error("PI WEB config plugin settings must be objects");
-    return [pluginId, config];
-  }));
 }
 
 function parsePiWebConfigEnvOverridesResponse(value: unknown, source: string): PiWebConfigEnvOverrides {
@@ -247,6 +254,7 @@ function parsePiWebConfigEnvOverridesResponse(value: unknown, source: string): P
     port: requireResponseBoolean(record, "port", source),
     allowedHosts: requireResponseBoolean(record, "allowedHosts", source),
     spawnSessions: requireResponseBoolean(record, "spawnSessions", source),
+    sessionMessages: record["sessionMessages"] === undefined ? false : requireResponseBoolean(record, "sessionMessages", source),
     subsessions: requireResponseBoolean(record, "subsessions", source),
     askUser: requireResponseBoolean(record, "askUser", source),
   };
@@ -275,6 +283,7 @@ function piWebConfigEnvOverrides(env: NodeJS.ProcessEnv): PiWebConfigEnvOverride
     port: isEnvSet(env["PI_WEB_PORT"]) || isEnvSet(env["PORT"]),
     allowedHosts: isEnvSet(env["PI_WEB_ALLOWED_HOSTS"]),
     spawnSessions: isEnvSet(env["PI_WEB_SPAWN_SESSIONS"]),
+    sessionMessages: isEnvSet(env["PI_WEB_SESSION_MESSAGES"]),
     subsessions: isEnvSet(env["PI_WEB_SUBSESSIONS"]),
     askUser: isEnvSet(env["PI_WEB_ASK_USER"]),
   };

@@ -1,15 +1,25 @@
 import { createReadStream } from "node:fs";
-import { stat } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { extname, join, resolve, sep } from "node:path";
 import type { Plugin } from "vite";
-import { defineConfig } from "vite";
+import { defineConfig, normalizePath } from "vite";
 import { effectivePiWebConfig } from "./src/config";
+import { developmentAllowedHosts } from "./src/shared/hostAccess";
+import { DEPLOYMENT_MANIFEST_CONTENT_TYPE, DEPLOYMENT_MANIFEST_PATH, createDeploymentFlavorResolver, deploymentHtmlForFlavor, deploymentIdentityAssetForPath, deploymentManifestForFlavor, isDeploymentIdentityAssetPath } from "./src/server/deploymentIdentity";
+import { detectPiWebInstallation } from "./src/server/piWebStatus";
+import { fetchThemeBootstrap, injectThemeBootstrap } from "./src/server/themeBootstrap";
 
 const { config } = effectivePiWebConfig();
 const apiPort = config.port ?? 8504;
+const allowedHosts = developmentAllowedHosts(config);
 const docsRoot = resolve("docs");
 const docsPrefix = "/site";
+const clientPublicRoot = resolve("src/client/public");
+
+// The dev deployment gets the dev brand identity even when the UI is served
+// by the Vite dev server (production serving does the same swap in Fastify).
+const deploymentFlavor = createDeploymentFlavorResolver(() => detectPiWebInstallation());
 
 const contentTypes: Record<string, string> = {
   ".css": "text/css; charset=utf-8",
@@ -90,13 +100,138 @@ function devDocsPlugin(): Plugin {
   };
 }
 
+async function serveDevDeploymentIdentity(request: IncomingMessage, response: ServerResponse, next: MiddlewareNext): Promise<void> {
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    next();
+    return;
+  }
+  const requestUrl = request.url;
+  if (requestUrl === undefined) {
+    next();
+    return;
+  }
+  const { pathname } = new URL(requestUrl, "http://localhost");
+  const isManifest = pathname === DEPLOYMENT_MANIFEST_PATH;
+  if (!isManifest && !isDeploymentIdentityAssetPath(pathname)) {
+    next();
+    return;
+  }
+  if ((await deploymentFlavor()) !== "dev") {
+    next();
+    return;
+  }
+
+  const serve = async (): Promise<{ contentType: string; body: string | undefined; filePath: string | undefined } | undefined> => {
+    if (isManifest) {
+      const manifest = await readFile(join(clientPublicRoot, DEPLOYMENT_MANIFEST_PATH.slice(1)), "utf8");
+      return { contentType: DEPLOYMENT_MANIFEST_CONTENT_TYPE, body: deploymentManifestForFlavor(manifest, "dev"), filePath: undefined };
+    }
+    const asset = deploymentIdentityAssetForPath(pathname, "dev");
+    if (asset === undefined) return undefined;
+    return { contentType: asset.contentType, body: undefined, filePath: join(clientPublicRoot, asset.fileName) };
+  };
+
+  let serving: Awaited<ReturnType<typeof serve>>;
+  try {
+    serving = await serve();
+  } catch (error) {
+    const code = error instanceof Error && "code" in error ? error.code : undefined;
+    if (code === "ENOENT") {
+      next();
+      return;
+    }
+    next(error);
+    return;
+  }
+  if (serving === undefined) {
+    next();
+    return;
+  }
+  response.statusCode = 200;
+  response.setHeader("Content-Type", serving.contentType);
+  response.setHeader("Cache-Control", "no-store");
+  if (serving.body !== undefined) {
+    response.end(serving.body);
+    return;
+  }
+  if (serving.filePath === undefined) {
+    next();
+    return;
+  }
+  createReadStream(serving.filePath).pipe(response);
+}
+
+export function devDeploymentIdentityPlugin(flavor = deploymentFlavor): Plugin {
+  return {
+    name: "pi-web-dev-deployment-identity",
+    apply: "serve",
+    transformIndexHtml: {
+      order: "pre",
+      async handler(html, context) {
+        if (context.originalUrl === undefined) return html;
+        return deploymentHtmlForFlavor(html, await flavor());
+      },
+    },
+    configureServer(server) {
+      server.middlewares.use((request, response, next) => {
+        void serveDevDeploymentIdentity(request, response, next);
+      });
+    },
+  };
+}
+
+function manualRefreshPlugin(): Plugin {
+  let clientEntry: string | undefined;
+  const connect = "transport.connect(createHMRHandler(handleMessage));";
+  return {
+    name: "pi-web-manual-refresh",
+    apply: "serve",
+    async configureServer(server) {
+      // Ask the serving runtime, not this config's import resolution. Docker
+      // exposes the same dependencies at multiple absolute mount paths.
+      const client = await server.environments.client.pluginContainer.resolveId("/@vite/client");
+      if (client === null) throw new Error("Cannot resolve Vite's served client for manual refresh");
+      clientEntry = normalizePath(client.id.split("?")[0] ?? client.id);
+    },
+    transform(code, id) {
+      if (clientEntry === undefined || normalizePath(id.split("?")[0] ?? id) !== clientEntry) return;
+      // Vite 8 starts its client even with hmr:false and ws:false. An unanswered
+      // handshake blocks Chromium's subsequent /api WebSockets to the same host.
+      // Keep Vite's helpers (dynamic plugin imports need injectQuery), but never
+      // start its reload transport. Removing the HTML script alone is not enough.
+      // Fail loudly on a Vite upgrade rather than silently reintroducing the hang.
+      if (code.split(connect).length !== 2) {
+        throw new Error("Vite client startup changed; update PI WEB's manual-refresh transform");
+      }
+      return { code: code.replace(connect, "/* PI WEB uses manual browser refresh. */"), map: null };
+    },
+  };
+}
+
+export function devThemeBootstrapPlugin(load = () => fetchThemeBootstrap(`http://localhost:${String(apiPort)}/api/theme-bootstrap`)): Plugin {
+  return {
+    name: "pi-web-dev-theme-bootstrap",
+    apply: "serve",
+    transformIndexHtml: {
+      order: "pre",
+      async handler(html, context) {
+        // Direct transforms/build checks do not represent an initial HTTP response.
+        if (context.originalUrl === undefined || !html.includes("pi-web-theme-data")) return html;
+        try { return injectThemeBootstrap(html, await load()); } catch { return html; }
+      },
+    },
+  };
+}
+
 export default defineConfig({
-  plugins: [devDocsPlugin()],
+  plugins: [devDocsPlugin(), devDeploymentIdentityPlugin(), manualRefreshPlugin(), devThemeBootstrapPlugin()],
   root: "src/client",
   base: "./",
   build: {
     outDir: "../../dist/client",
     emptyOutDir: true,
+    // Accept the measured ~1,570 kB main chunk, but flag growth beyond ~15%.
+    chunkSizeWarningLimit: 1800,
     rollupOptions: {
       output: {
         manualChunks(id) {
@@ -112,12 +247,19 @@ export default defineConfig({
     },
   },
   server: {
+    // Manual UI refresh is intentional: Vite reloads after an established dev
+    // socket disconnects, including when iPadOS suspends a background PWA.
+    // Disable both the listener and client connection (manualRefreshPlugin).
+    // The application's /api WebSocket proxy remains enabled.
+    hmr: false,
+    ws: false,
     port: 8505,
     strictPort: true,
-    ...(config.allowedHosts === undefined ? {} : { allowedHosts: config.allowedHosts }),
+    ...(allowedHosts === undefined ? {} : { allowedHosts }),
     proxy: {
       "/api": { target: `http://localhost:${String(apiPort)}`, ws: true },
       "/pi-web-plugins": { target: `http://localhost:${String(apiPort)}` },
+      "/pi-web-theme-assets": { target: `http://localhost:${String(apiPort)}` },
     },
   },
 });

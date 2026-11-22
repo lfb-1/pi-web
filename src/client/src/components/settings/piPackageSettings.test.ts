@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { PiPackageInfo } from "../../api";
-import { canUpdateAllPiPackages, friendlyPiPackageErrorMessage, isPiPackageOperationPending, normalizePiPackageSource, piPackageFilteredLabel, piPackageMutationFollowUpMessage, piPackageScopeLabel, piPackageSourceValidationMessage, piPackageTargetContext, piPackageTargetLabel, piPackageUpdateDisabledReason, shouldRefreshGatewayPluginsAfterPiPackageMutation, updateAllPiPackagesDisabledReason, type PiPackageTargetContext } from "./piPackageSettings";
+import { canUpdateAllPiPackages, friendlyPiPackageErrorMessage, isPiPackageOperationPending, normalizePiPackageSource, piPackageFilteredLabel, piPackageMutationFollowUpMessage, piPackagesResponseAfterMutation, piPackageScopeLabel, piPackageSourceValidationMessage, piPackageTargetContext, piPackageTargetLabel, piPackageUpdateDisabledReason, shouldRefreshGatewayPluginsAfterPiPackageMutation, updateAllPiPackagesDisabledReason, type PiPackageTargetContext } from "./piPackageSettings";
 
 const userPackage: PiPackageInfo = { source: "npm:@acme/tools", scope: "user", filtered: false, installedPath: "/home/test/.pi/packages/tools" };
 const projectPackage: PiPackageInfo = { source: "../project-tools", scope: "project", filtered: true };
@@ -11,7 +11,7 @@ describe("Pi package settings helpers", () => {
   it("normalizes and validates install sources without adding location choices", () => {
     expect(normalizePiPackageSource("  npm:@acme/tools  ")).toBe("npm:@acme/tools");
     expect(piPackageSourceValidationMessage("  npm:@acme/tools  ")).toBeUndefined();
-    expect(piPackageSourceValidationMessage("   ")).toContain("Pi package source accepted by Pi");
+    expect(piPackageSourceValidationMessage("   ")).toContain("Enter an npm package, Git URL, or local path");
   });
 
   it("formats package metadata with Pi package terminology", () => {
@@ -23,7 +23,7 @@ describe("Pi package settings helpers", () => {
 
   it("allows updates for user-scope packages and explains project-scope limits", () => {
     expect(piPackageUpdateDisabledReason(userPackage)).toBeUndefined();
-    expect(piPackageUpdateDisabledReason(projectPackage)).toContain("user-scope Pi packages");
+    expect(piPackageUpdateDisabledReason(projectPackage)).toContain("This view updates user packages only");
     expect(canUpdateAllPiPackages([userPackage])).toBe(true);
     expect(canUpdateAllPiPackages([userPackage, projectPackage])).toBe(false);
     expect(updateAllPiPackagesDisabledReason([])).toBe("No Pi packages are configured yet.");
@@ -44,14 +44,14 @@ describe("Pi package settings helpers", () => {
     expect(shouldRefreshGatewayPluginsAfterPiPackageMutation(remoteTarget)).toBe(false);
   });
 
-  it("describes the browser and session reload follow-up without requiring sessiond restarts", () => {
+  it("distinguishes session and browser reloads from possible server-plugin restarts", () => {
     const message = piPackageMutationFollowUpMessage("install");
 
     expect(message).toContain("Type /reload in each idle PI WEB session");
-    expect(message).toContain("extensions, skills, prompt templates, themes, and context/system prompt files");
-    expect(message).toContain("Reload the browser page separately for PI WEB browser plugin changes");
-    expect(message).not.toContain("session daemon");
-    expect(message).not.toContain("sessiond");
+    expect(message).toContain("extensions, skills, prompts, and themes");
+    expect(message).toContain("Reload this browser tab for PI WEB browser plugin changes");
+    expect(message).toContain("may also need a session daemon restart");
+    expect(message).toContain("interrupts active sessions");
   });
 
   it("scopes remote package mutation follow-up copy to the selected machine", () => {
@@ -60,6 +60,16 @@ describe("Pi package settings helpers", () => {
     expect(message).toContain("Pi package updated on Lab Mac");
     expect(message).toContain("each idle PI WEB session on Lab Mac");
     expect(message).toContain("PI WEB browser plugin changes served by Lab Mac");
+  });
+
+  it("carries a mutation's refreshed installable-known-package suggestions forward, omitting the field when absent", () => {
+    const suggestion = { id: "@jmfederico/pi-relay", label: "Relays", description: "Relay method prompts and skill.", source: "/pi-web/dist/pi-packages/relays" };
+
+    expect(piPackagesResponseAfterMutation({ packages: [userPackage], installableKnownPackages: [suggestion] })).toEqual({
+      packages: [userPackage],
+      installableKnownPackages: [suggestion],
+    });
+    expect(piPackagesResponseAfterMutation({ packages: [userPackage] })).toEqual({ packages: [userPackage] });
   });
 
   it("turns remote transport failures into package-management guidance", () => {

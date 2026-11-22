@@ -1,6 +1,6 @@
 import type {
-  AskUserCloseResponse,
   AskUserSubmission,
+  SessionQueueMessageMutation,
   ExtensionDialogAnswer,
   ExtensionDialogCloseResponse,
   SavedPromptAttachment,
@@ -11,6 +11,10 @@ import type {
   SessionNotificationDismissAllRequest,
   SessionNotificationDismissRequest,
   SessionNotificationInboxSnapshot,
+  SessionModelScopeMode,
+  SessionModelCatalogResponse,
+  SessionDefaults,
+  SessionDefaultsUpdate,
   SessionUnreadAcknowledgeRequest,
   SessionUnreadCatalogSnapshot,
 } from "../../shared/apiTypes.js";
@@ -31,8 +35,10 @@ import type {
   ClientSessionTreeNavigateResult,
   ClientThinkingLevel,
   SessionStreamSnapshot,
+  SessionTranscriptSnapshot,
 } from "../types.js";
 import type { NormalizedSessionCleanupRequest } from "./sessionCleanup.js";
+import type { SessionMedia } from "./sessionMediaIndex.js";
 
 export type SessionRouteRef = ClientSessionRef;
 
@@ -52,22 +58,35 @@ export interface SessionRouteService {
    */
   start(cwd: string, options?: { startupToken?: string }): Promise<ClientSession>;
   messages(ref: SessionRouteRef, page?: { before?: number; limit?: number }): Promise<ClientMessagePage>;
+  /** Resolve image bytes without modifying the Pi transcript or runtime. */
+  media(ref: SessionRouteRef, mediaId: string): Promise<SessionMedia | undefined>;
   status(ref: SessionRouteRef): Promise<ClientSessionStatus>;
   streamSnapshot(ref: SessionRouteRef): Promise<SessionStreamSnapshot>;
+  transcriptSnapshot(ref: SessionRouteRef, page?: { limit?: number }): Promise<SessionTranscriptSnapshot>;
   notificationCatalog(): SessionNotificationCatalogSnapshot | Promise<SessionNotificationCatalogSnapshot>;
   unreadCatalog(): Promise<SessionUnreadCatalogSnapshot>;
+  markUnread(sessionId: string, cwd: string): Promise<SessionUnreadCatalogSnapshot>;
   acknowledgeUnread(sessionId: string, request: SessionUnreadAcknowledgeRequest): Promise<SessionUnreadCatalogSnapshot>;
   notificationInbox(ref: SessionRouteRef): SessionNotificationInboxSnapshot | Promise<SessionNotificationInboxSnapshot>;
   dismissNotification(ref: SessionRouteRef, request: Omit<SessionNotificationDismissRequest, "cwd">): SessionNotificationInboxSnapshot | Promise<SessionNotificationInboxSnapshot>;
   dismissAllNotifications(ref: SessionRouteRef, request: Omit<SessionNotificationDismissAllRequest, "cwd">): SessionNotificationInboxSnapshot | Promise<SessionNotificationInboxSnapshot>;
   clearQueue(ref: SessionRouteRef): Promise<ClientSessionStatus>;
-  submitAsk(ref: SessionRouteRef, askId: string, submission: AskUserSubmission): Promise<AskUserCloseResponse>;
-  cancelAsk(ref: SessionRouteRef, askId: string): Promise<AskUserCloseResponse>;
+  mutateQueueMessage(ref: SessionRouteRef, mutation: SessionQueueMessageMutation): Promise<ClientSessionStatus>;
+  submitAsk(ref: SessionRouteRef, askId: string, submission: AskUserSubmission): Promise<ClientSessionStatus>;
+  cancelAsk(ref: SessionRouteRef, askId: string): Promise<ClientSessionStatus>;
   answerDialog(ref: SessionRouteRef, dialogId: string, value: ExtensionDialogAnswer): Promise<ExtensionDialogCloseResponse>;
   cancelDialog(ref: SessionRouteRef, dialogId: string): Promise<ExtensionDialogCloseResponse>;
   dismissWarning(ref: SessionRouteRef, dismissId: string): Promise<ClientSessionStatus>;
+  getSessionDefaults(ref: SessionRouteRef): Promise<SessionDefaults>;
+  setSessionDefaults(ref: SessionRouteRef, defaults: SessionDefaultsUpdate): Promise<SessionDefaults>;
   availableModels(ref: SessionRouteRef): Promise<ClientSessionModel[]>;
+  /** The session machine's full available-model catalog with per-model enabled state, enabled models first. */
+  modelCatalog(ref: SessionRouteRef): Promise<SessionModelCatalogResponse>;
   setModel(ref: SessionRouteRef, provider: string, modelId: string): Promise<ClientSessionStatus>;
+  /** Add/remove one model to/from pi's enabled-models scope; returns the updated full catalog. */
+  setModelEnabled(ref: SessionRouteRef, provider: string, modelId: string, enabled: boolean): Promise<SessionModelCatalogResponse>;
+  /** Atomically clear the selection, snapshot available models, or retain only the current model. */
+  setModelScope(ref: SessionRouteRef, mode: SessionModelScopeMode): Promise<SessionModelCatalogResponse>;
   cycleModel(ref: SessionRouteRef, direction: "forward" | "backward"): Promise<ClientSessionStatus>;
   availableThinkingLevels(ref: SessionRouteRef): Promise<ClientThinkingLevel[]>;
   setThinkingLevel(ref: SessionRouteRef, level: string): Promise<ClientSessionStatus>;
